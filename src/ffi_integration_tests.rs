@@ -4515,6 +4515,64 @@ fn escape_fn_curdate_executes_as_sqlite_date() {
     }
 }
 
+/// The three bare-keyword date/time escapes must reach SQLite without their
+/// parentheses and actually execute.
+///
+/// `SQL_TIMEDATE_FUNCTIONS` advertises `SQL_FN_TD_CURRENT_DATE`,
+/// `_CURRENT_TIME` and `_CURRENT_TIMESTAMP`, but nothing translated them:
+/// `{fn CURRENT_DATE()}` reached SQLite as `CURRENT_DATE()`, which is a syntax
+/// error, so the driver advertised three functions an application could not
+/// use. `EscapeDialect::rewrite_scalar_fn` replaces the whole escape, which is
+/// what emitting a bare keyword requires.
+///
+/// Only the shape is asserted -- these are clock values.
+#[test]
+fn escape_bare_keyword_datetime_fns_execute() {
+    unsafe {
+        let (env, conn, stmt) = alloc_handles();
+        assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
+
+        // (escape, expected length, expected separators at their positions)
+        for (sql, len, seps) in [
+            ("SELECT {fn CURRENT_DATE()}", 10, vec![(4, b'-'), (7, b'-')]),
+            ("SELECT {fn CURRENT_TIME()}", 8, vec![(2, b':'), (5, b':')]),
+            (
+                "SELECT {fn CURRENT_TIMESTAMP()}",
+                19,
+                vec![(4, b'-'), (7, b'-'), (10, b' '), (13, b':'), (16, b':')],
+            ),
+        ] {
+            assert_eq!(
+                exec_direct(stmt, sql),
+                SqlReturn::SUCCESS,
+                "{sql} failed to translate -- the escape's trailing () most \
+                 likely reached SQLite"
+            );
+            assert_eq!(
+                ffi::fetch::sql_fetch::<SqliteBackend>(stmt),
+                SqlReturn::SUCCESS
+            );
+
+            let value = fetch_string_col(stmt, 1);
+            assert_eq!(value.len(), len, "{sql} returned {value:?}");
+            for (idx, sep) in seps {
+                assert_eq!(
+                    value.as_bytes()[idx],
+                    sep,
+                    "{sql} missing separator at {idx} in {value:?}"
+                );
+            }
+
+            assert_eq!(
+                ffi::cursor::sql_close_cursor::<SqliteBackend>(stmt),
+                SqlReturn::SUCCESS
+            );
+        }
+
+        cleanup(env, conn, stmt);
+    }
+}
+
 /// `{fn NOW()}` must be remapped to SQLite's zero-argument `datetime()` and
 /// actually execute against the database. As with CURDATE, only the ISO
 /// `YYYY-MM-DD HH:MM:SS` shape is checked (length 19, dashes/colons/space at

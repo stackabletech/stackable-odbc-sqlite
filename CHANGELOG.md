@@ -96,6 +96,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `{fn CURRENT_DATE()}`, `{fn CURRENT_TIME()}` and `{fn CURRENT_TIMESTAMP()}`
+  now execute. `SQL_TIMEDATE_FUNCTIONS` advertised all three, but nothing
+  translated them: SQLite spells them as bare keywords, `SELECT CURRENT_DATE();`
+  is a syntax error, and a name-only remap cannot drop the trailing `()` the
+  ODBC escape always carries — so each reached SQLite as `CURRENT_DATE()` and
+  failed to prepare. The driver was advertising three functions an application
+  could not use. `stackable-odbc-core`'s new
+  `EscapeDialect::rewrite_scalar_fn` replaces the whole escape, which is what
+  emitting a bare keyword requires.
+
 - `SQL_CATALOG_TERM`, `SQL_CATALOG_NAME_SEPARATOR` and `SQL_SCHEMA_TERM` now
   report empty strings instead of `"catalog"`, `"."` and `"schema"`. The
   `SQLGetInfo` specification requires an empty string from all three when the

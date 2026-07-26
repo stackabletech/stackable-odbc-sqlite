@@ -35,13 +35,21 @@
 //!   `abs()`, `sign()`, `round()`, `ifnull()`, so they pass through
 //!   unchanged (`None`). SQLite has `ifnull()` natively, so no substitution
 //!   is needed for `SQL_FN_SYS_IFNULL`.
+//!
+//! Names handled by [`rewrite_scalar_fn`] rather than the remap table:
+//!
 //! - `SQL_FN_TD_CURRENT_DATE` / `SQL_FN_TD_CURRENT_TIME` /
 //!   `SQL_FN_TD_CURRENT_TIMESTAMP`: SQLite's `CURRENT_DATE` / `CURRENT_TIME`
 //!   / `CURRENT_TIMESTAMP` are bare keywords, not callable functions.
 //!   `SELECT CURRENT_DATE();` is a syntax error (confirmed live: "near '(':
 //!   syntax error"). The ODBC escape always includes `()` (e.g.
-//!   `{fn CURRENT_DATE()}`), and the translator appends whatever follows the
-//!   name verbatim, so no name-only rename can drop that trailing `()`.
+//!   `{fn CURRENT_DATE()}`), and a name-only rename appends whatever follows
+//!   the name verbatim, so it cannot drop that trailing `()`.
+//!
+//!   These three were advertised in `SQL_TIMEDATE_FUNCTIONS` while no
+//!   translation existed for them, so `{fn CURRENT_DATE()}` reached SQLite as
+//!   `CURRENT_DATE()` and failed to prepare. `rewrite_scalar_fn` replaces the
+//!   whole escape, which is what emitting a bare keyword requires.
 use stackable_odbc_core::escape::EscapeDialect;
 
 /// Remap an ODBC `{fn NAME(...)}` scalar-function name to SQLite's spelling.
@@ -63,6 +71,32 @@ pub(crate) fn remap_scalar_fn(name: &str) -> Option<&'static str> {
     }
 }
 
+/// Rewrite a whole `{fn NAME(args)}` escape, for the calls a name swap cannot
+/// express.
+///
+/// Only the three bare-keyword date/time forms need this: SQLite spells them
+/// `CURRENT_DATE` / `CURRENT_TIME` / `CURRENT_TIMESTAMP` with no parentheses,
+/// and `SELECT CURRENT_DATE();` is a syntax error. Returning the keyword alone
+/// replaces the escape including its `()`.
+///
+/// Everything else returns `None` and falls back to [`remap_scalar_fn`]. The
+/// argument text is checked rather than ignored: `{fn CURRENT_DATE(x)}` is not
+/// a call SQLite has any spelling for, so it is left alone to fail as the
+/// malformed call it is, instead of being silently rewritten to a keyword that
+/// discards `x`.
+pub(crate) fn rewrite_scalar_fn(name: &str, args: &str) -> Option<String> {
+    if !args.trim().is_empty() {
+        return None;
+    }
+    match name.to_ascii_uppercase().as_str() {
+        // SQL_FN_TD_CURRENT_DATE / _CURRENT_TIME / _CURRENT_TIMESTAMP
+        "CURRENT_DATE" => Some("CURRENT_DATE".to_string()),
+        "CURRENT_TIME" => Some("CURRENT_TIME".to_string()),
+        "CURRENT_TIMESTAMP" => Some("CURRENT_TIMESTAMP".to_string()),
+        _ => None,
+    }
+}
+
 /// SQLite has no date/time/timestamp storage classes, a date/time value is
 /// just quoted text, so `{d/t/ts '...'}` render to the bare string literal
 /// with no leading type keyword.
@@ -76,6 +110,7 @@ pub(crate) fn dialect() -> EscapeDialect {
     EscapeDialect {
         identifier_quotes: &[('"', '"'), ('`', '`'), ('[', ']')],
         remap_scalar_fn,
+        rewrite_scalar_fn,
         render_date: render_bare,
         render_time: render_bare,
         render_timestamp: render_bare,
@@ -153,20 +188,41 @@ mod tests {
         assert_eq!(remap_scalar_fn("SIGN"), None);
     }
 
-    // Deliberately NOT remapped despite being advertised (see module doc).
+    // The three bare-keyword forms are handled by rewrite_scalar_fn, not by
+    // the name-only remap table, which cannot drop the escape's trailing `()`.
     #[test]
-    fn current_date_not_remapped() {
+    fn current_date_is_not_a_name_only_remap() {
         assert_eq!(remap_scalar_fn("CURRENT_DATE"), None);
-    }
-
-    #[test]
-    fn current_time_not_remapped() {
         assert_eq!(remap_scalar_fn("CURRENT_TIME"), None);
+        assert_eq!(remap_scalar_fn("CURRENT_TIMESTAMP"), None);
     }
 
     #[test]
-    fn current_timestamp_not_remapped() {
-        assert_eq!(remap_scalar_fn("CURRENT_TIMESTAMP"), None);
+    fn bare_keyword_datetime_forms_are_rewritten_without_parentheses() {
+        for name in ["CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP"] {
+            assert_eq!(rewrite_scalar_fn(name, ""), Some(name.to_string()));
+            // Case-insensitive, like the remap table.
+            assert_eq!(
+                rewrite_scalar_fn(&name.to_ascii_lowercase(), ""),
+                Some(name.to_string())
+            );
+        }
+    }
+
+    /// A call with arguments is left alone rather than rewritten to a keyword
+    /// that would silently discard them.
+    #[test]
+    fn bare_keyword_rewrite_declines_a_call_with_arguments() {
+        assert_eq!(rewrite_scalar_fn("CURRENT_DATE", "x"), None);
+        assert_eq!(rewrite_scalar_fn("CURRENT_TIMESTAMP", "1, 2"), None);
+    }
+
+    /// Everything else falls through to the remap table.
+    #[test]
+    fn rewrite_declines_names_the_remap_table_owns() {
+        for name in ["UCASE", "SUBSTRING", "NOW", "CURDATE", "ABS"] {
+            assert_eq!(rewrite_scalar_fn(name, ""), None);
+        }
     }
 
     #[test]
