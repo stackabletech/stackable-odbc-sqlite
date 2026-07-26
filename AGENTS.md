@@ -17,6 +17,7 @@ the 73 C ABI entry points — lives in
 | [Relationship to core](#relationship-to-stackable-odbc-core) | Deciding where a change belongs |
 | [Conventions](#conventions) | Any code change |
 | [Backend error mapping](#backend-error-mapping) | Touching an error path |
+| [Declaring capabilities](#declaring-capabilities) | Adding or changing any `SQLGetInfo` value |
 | [Transactions](#transactions) | Touching `SQLEndTran`, autocommit or cursor behaviour |
 | [Architecture](#architecture-of-this-crate) | Understanding the module layout |
 | [Connection string keys](#connection-string-keys) | Adding or changing a parameter |
@@ -52,7 +53,8 @@ crates.io; releases are GitHub Release archives built by
 | Handle allocation, tag validation, `panic_safe` | core |
 | UTF-16 marshalling, diagnostics, `SQLGetDiagRec` | core |
 | The 73 exported C ABI entry points (`forward_ffi!`) | core |
-| Generic `SQLGetInfo` defaults, cursor-state tracking | core |
+| `SQLGetInfo` marshalling and shape checking, cursor-state tracking | core |
+| Every `SQLGetInfo` value that describes SQLite | this crate — see [Declaring capabilities](#declaring-capabilities) |
 | `Backend` / `StatementBackend` trait definitions | core |
 | Opening the database, executing, fetching | this crate |
 | SQLite storage class → SQL type mapping, value conversion | this crate |
@@ -150,7 +152,59 @@ For this driver `connect` is where real I/O happens:
 `rusqlite::Connection::open` touches the filesystem, so a missing or unreadable
 database file is `08001`. Failures after that point are `08S01`.
 
+### Declaring capabilities
+
+`Backend` has around two dozen **required** methods that state what SQLite can
+do — `alter_table_support`, `outer_join_capabilities`, `subqueries`,
+`sql_conformance`, `supports_catalogs`, `txn_isolation_options` and the rest.
+They are required, with no default, deliberately: a defaulted capability is a
+claim no backend ever made, and every one of them was a bug here before core
+made it a compile error.
+
+Three rules, all learned the hard way:
+
+**Probe the bundled library, never the documentation or the system CLI.**
+`rusqlite` links its own SQLite (3.53.2 via the `bundled` feature); the
+`sqlite3` binary on a developer's machine is a different version. Writing the
+`ALTER TABLE` bitmap from the system CLI's behaviour got `ADD CONSTRAINT` and
+`DROP CONSTRAINT` wrong, because 3.51.3 rejects both and 3.53.2 accepts them.
+`alter_table_capabilities_are_each_live_probed`,
+`outer_join_capabilities_are_each_live_probed` and
+`subqueries_are_each_live_probed` all execute the syntax they describe.
+
+**Probe the bits you do not claim, too.** A test that only checks what a bitmap
+claims can overclaim forever, and a bitmap that only grows when someone notices
+can understate forever. The negative half of the `ALTER TABLE` probe is what
+caught the two bits above. `SQL_KEYWORDS` goes further and reads the list out
+of the library through `sqlite3_keyword_count` / `sqlite3_keyword_name`, so it
+needs no maintenance at all.
+
+**Values must agree with each other.** Most defects found in this crate were
+one capability stated twice, in opposite directions:
+
+| Said one thing | Said the opposite |
+|---|---|
+| `SQL_CATALOG_NAME = "N"` | `SQL_CATALOG_TERM = "catalog"` |
+| `SQL_OUTER_JOINS = "Y"` | `SQL_OUTER_JOIN_CAPABILITIES = 0` |
+| `SQL_SQL_CONFORMANCE = SQL_SC_SQL92_ENTRY` | `SQL_GROUP_BY = SQL_GB_NO_RELATION` |
+| `SQL_SQL92_PREDICATES` without `SQL_SP_QUANTIFIED_COMPARISON` | `SQL_SUBQUERIES` with `SQL_SQ_QUANTIFIED` |
+| `SQL_TXN_ISOLATION_OPTION` with four levels | nothing applying the level an application sets |
+
+When adding or changing a capability, look for the other info type that talks
+about the same thing, and assert the relationship —
+`catalog_and_schema_info_types_agree_with_each_other` and
+`transaction_isolation_offers_only_the_level_sqlite_implements` are that check,
+and they assert the spec's rule rather than today's values, so they keep
+holding if the answer changes.
+
 ### Transactions
+
+`connect` issues `PRAGMA foreign_keys = ON`. SQLite leaves it off for backward
+compatibility, and the bundled library only happens to compile with
+`SQLITE_DEFAULT_FOREIGN_KEYS` — so without the pragma, `SQL_INTEGRITY = "Y"`
+would depend on a dependency's build flags rather than on this driver.
+`integrity_enhancement_facility_is_actually_enforced` checks it through
+`connect`.
 
 SQLite supports transactions and this driver reports `SQL_TC_DML` for
 `SQL_TXN_CAPABLE`, so manual-commit mode is honoured for real:
