@@ -18,19 +18,18 @@ use stackable_odbc_core::types::{
     SQL_FN_STR_REPLACE, SQL_FN_STR_RTRIM, SQL_FN_STR_SOUNDEX, SQL_FN_STR_SUBSTRING,
     SQL_FN_STR_UCASE, SQL_FN_SYS_IFNULL, SQL_FN_TD_CURDATE, SQL_FN_TD_CURRENT_DATE,
     SQL_FN_TD_CURRENT_TIME, SQL_FN_TD_CURRENT_TIMESTAMP, SQL_FN_TD_CURTIME, SQL_FN_TD_NOW,
-    SQL_GD_ANY_COLUMN, SQL_GD_ANY_ORDER, SQL_GD_BOUND, SQL_IC_MIXED, SQL_KEYWORDS,
-    SQL_LIKE_ESCAPE_CLAUSE, SQL_NUMERIC_FUNCTIONS, SQL_OJ_ALL_COMPARISON_OPS, SQL_OJ_FULL,
-    SQL_OJ_INNER, SQL_OJ_LEFT, SQL_OJ_NESTED, SQL_OJ_NOT_ORDERED, SQL_OJ_RIGHT, SQL_OUTER_JOINS,
-    SQL_SEARCHABLE, SQL_SP_BETWEEN, SQL_SP_COMPARISON, SQL_SP_EXISTS, SQL_SP_IN, SQL_SP_ISNOTNULL,
-    SQL_SP_ISNULL, SQL_SP_LIKE, SQL_SQ_COMPARISON, SQL_SQ_CORRELATED_SUBQUERIES, SQL_SQ_EXISTS,
-    SQL_SQ_IN, SQL_SQL92_PREDICATES, SQL_SQL92_RELATIONAL_JOIN_OPERATORS,
-    SQL_SQL92_VALUE_EXPRESSIONS, SQL_SRJO_CROSS_JOIN, SQL_SRJO_EXCEPT_JOIN,
-    SQL_SRJO_FULL_OUTER_JOIN, SQL_SRJO_INNER_JOIN, SQL_SRJO_INTERSECT_JOIN,
-    SQL_SRJO_LEFT_OUTER_JOIN, SQL_SRJO_NATURAL_JOIN, SQL_SRJO_RIGHT_OUTER_JOIN,
-    SQL_STRING_FUNCTIONS, SQL_SVE_CASE, SQL_SVE_CAST, SQL_SVE_COALESCE, SQL_SVE_NULLIF,
-    SQL_SYSTEM_FUNCTIONS, SQL_TC_DML, SQL_TIMEDATE_FUNCTIONS, SQL_TXN_SERIALIZABLE, SQL_U_UNION,
-    SQL_U_UNION_ALL, SqlDataType, TypeInfoRow, catalog_column_size, format_odbc_version,
-    parse_dotted_version,
+    SQL_GD_ANY_COLUMN, SQL_GD_ANY_ORDER, SQL_GD_BOUND, SQL_IC_MIXED, SQL_LIKE_ESCAPE_CLAUSE,
+    SQL_NUMERIC_FUNCTIONS, SQL_OJ_ALL_COMPARISON_OPS, SQL_OJ_FULL, SQL_OJ_INNER, SQL_OJ_LEFT,
+    SQL_OJ_NESTED, SQL_OJ_NOT_ORDERED, SQL_OJ_RIGHT, SQL_OUTER_JOINS, SQL_SEARCHABLE,
+    SQL_SP_BETWEEN, SQL_SP_COMPARISON, SQL_SP_EXISTS, SQL_SP_IN, SQL_SP_ISNOTNULL, SQL_SP_ISNULL,
+    SQL_SP_LIKE, SQL_SQ_COMPARISON, SQL_SQ_CORRELATED_SUBQUERIES, SQL_SQ_EXISTS, SQL_SQ_IN,
+    SQL_SQL92_PREDICATES, SQL_SQL92_RELATIONAL_JOIN_OPERATORS, SQL_SQL92_VALUE_EXPRESSIONS,
+    SQL_SRJO_CROSS_JOIN, SQL_SRJO_EXCEPT_JOIN, SQL_SRJO_FULL_OUTER_JOIN, SQL_SRJO_INNER_JOIN,
+    SQL_SRJO_INTERSECT_JOIN, SQL_SRJO_LEFT_OUTER_JOIN, SQL_SRJO_NATURAL_JOIN,
+    SQL_SRJO_RIGHT_OUTER_JOIN, SQL_STRING_FUNCTIONS, SQL_SVE_CASE, SQL_SVE_CAST, SQL_SVE_COALESCE,
+    SQL_SVE_NULLIF, SQL_SYSTEM_FUNCTIONS, SQL_TC_DML, SQL_TIMEDATE_FUNCTIONS, SQL_TXN_SERIALIZABLE,
+    SQL_U_UNION, SQL_U_UNION_ALL, SqlDataType, TypeInfoRow, catalog_column_size,
+    format_odbc_version, parse_dotted_version,
 };
 
 use super::SqliteBackend;
@@ -984,311 +983,53 @@ pub(crate) const SQLITE_TIMEDATE_FUNCTIONS: u32 = SQL_FN_TD_NOW
     | SQL_FN_TD_CURRENT_TIME
     | SQL_FN_TD_CURRENT_TIMESTAMP;
 
-/// The ODBC reserved keywords, from Appendix C of the specification.
+/// SQLite's reserved words, read out of the linked library.
 ///
-/// `SQL_KEYWORDS` is defined as the data source's keywords *excluding* these:
-/// "This list does not contain keywords specific to ODBC or keywords used by
-/// both the data source and ODBC." Roughly the SQL-92 reserved list, which is
-/// why one list suffices.
+/// `Backend::keywords` returns the **raw** list: core subtracts
+/// `ODBC_RESERVED_KEYWORDS`, sorts and joins it into `SQL_KEYWORDS` (89), so
+/// the spec's "excluding ODBC's own" rule lives in one place across drivers
+/// rather than being reimplemented per backend.
 ///
-/// Written in the order the specification page lists them rather than sorted,
-/// so a reviewer can diff it against the source. Nothing here depends on the
-/// order — [`sqlite_specific_keywords`] does a linear membership test, and
-/// `odbc_reserved_keywords_are_unique` guards the one property that matters.
+/// The names come from `sqlite3_keyword_count` / `sqlite3_keyword_name` rather
+/// than from <https://www.sqlite.org/lang_keywords.html>. A transcribed list
+/// would describe whichever SQLite the author was reading about; this describes
+/// the one the driver is linked against, and needs no maintenance when that
+/// changes. Same reason the `ALTER TABLE` and outer-join bitmaps are probed.
 ///
-/// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/reserved-keywords>
-const ODBC_RESERVED_KEYWORDS: &[&str] = &[
-    "ABSOLUTE",
-    "ACTION",
-    "ADA",
-    "ADD",
-    "ALL",
-    "ALLOCATE",
-    "ALTER",
-    "AND",
-    "ANY",
-    "ARE",
-    "AS",
-    "ASC",
-    "ASSERTION",
-    "AT",
-    "AUTHORIZATION",
-    "AVG",
-    "BEGIN",
-    "BETWEEN",
-    "BIT",
-    "BIT_LENGTH",
-    "BOTH",
-    "BY",
-    "CASCADE",
-    "CASCADED",
-    "CASE",
-    "CAST",
-    "CATALOG",
-    "CHAR",
-    "CHAR_LENGTH",
-    "CHARACTER",
-    "CHARACTER_LENGTH",
-    "CHECK",
-    "CLOSE",
-    "COALESCE",
-    "COLLATE",
-    "COLLATION",
-    "COLUMN",
-    "COMMIT",
-    "CONNECT",
-    "CONNECTION",
-    "CONSTRAINT",
-    "CONSTRAINTS",
-    "CONTINUE",
-    "CONVERT",
-    "CORRESPONDING",
-    "COUNT",
-    "CREATE",
-    "CROSS",
-    "CURRENT",
-    "CURRENT_DATE",
-    "CURRENT_TIME",
-    "CURRENT_TIMESTAMP",
-    "CURRENT_USER",
-    "CURSOR",
-    "DATE",
-    "DAY",
-    "DEALLOCATE",
-    "DEC",
-    "DECIMAL",
-    "DECLARE",
-    "DEFAULT",
-    "DEFERRABLE",
-    "DEFERRED",
-    "DELETE",
-    "DESC",
-    "DESCRIBE",
-    "DESCRIPTOR",
-    "DIAGNOSTICS",
-    "DISCONNECT",
-    "DISTINCT",
-    "DOMAIN",
-    "DOUBLE",
-    "DROP",
-    "ELSE",
-    "END",
-    "END-EXEC",
-    "ESCAPE",
-    "EXCEPT",
-    "EXCEPTION",
-    "EXEC",
-    "EXECUTE",
-    "EXISTS",
-    "EXTERNAL",
-    "EXTRACT",
-    "FALSE",
-    "FETCH",
-    "FIRST",
-    "FLOAT",
-    "FOR",
-    "FOREIGN",
-    "FORTRAN",
-    "FOUND",
-    "FROM",
-    "FULL",
-    "GET",
-    "GLOBAL",
-    "GO",
-    "GOTO",
-    "GRANT",
-    "GROUP",
-    "HAVING",
-    "HOUR",
-    "IDENTITY",
-    "IMMEDIATE",
-    "IN",
-    "INCLUDE",
-    "INDEX",
-    "INDICATOR",
-    "INITIALLY",
-    "INNER",
-    "INPUT",
-    "INSENSITIVE",
-    "INSERT",
-    "INT",
-    "INTEGER",
-    "INTERSECT",
-    "INTERVAL",
-    "INTO",
-    "IS",
-    "ISOLATION",
-    "JOIN",
-    "KEY",
-    "LANGUAGE",
-    "LAST",
-    "LEADING",
-    "LEFT",
-    "LEVEL",
-    "LIKE",
-    "LOCAL",
-    "LOWER",
-    "MATCH",
-    "MAX",
-    "MIN",
-    "MINUTE",
-    "MODULE",
-    "MONTH",
-    "NAMES",
-    "NATIONAL",
-    "NATURAL",
-    "NCHAR",
-    "NEXT",
-    "NO",
-    "NONE",
-    "NOT",
-    "NULL",
-    "NULLIF",
-    "NUMERIC",
-    "OCTET_LENGTH",
-    "OF",
-    "ON",
-    "ONLY",
-    "OPEN",
-    "OPTION",
-    "OR",
-    "ORDER",
-    "OUTER",
-    "OUTPUT",
-    "OVERLAPS",
-    "PAD",
-    "PARTIAL",
-    "PASCAL",
-    "POSITION",
-    "PRECISION",
-    "PREPARE",
-    "PRESERVE",
-    "PRIMARY",
-    "PRIOR",
-    "PRIVILEGES",
-    "PROCEDURE",
-    "PUBLIC",
-    "READ",
-    "REAL",
-    "REFERENCES",
-    "RELATIVE",
-    "RESTRICT",
-    "REVOKE",
-    "RIGHT",
-    "ROLLBACK",
-    "ROWS",
-    "SCHEMA",
-    "SCROLL",
-    "SECOND",
-    "SECTION",
-    "SELECT",
-    "SESSION",
-    "SESSION_USER",
-    "SET",
-    "SIZE",
-    "SMALLINT",
-    "SOME",
-    "SPACE",
-    "SQL",
-    "SQLCA",
-    "SQLCODE",
-    "SQLERROR",
-    "SQLSTATE",
-    "SQLWARNING",
-    "SUBSTRING",
-    "SUM",
-    "SYSTEM_USER",
-    "TABLE",
-    "TEMPORARY",
-    "THEN",
-    "TIME",
-    "TIMESTAMP",
-    "TIMEZONE_HOUR",
-    "TIMEZONE_MINUTE",
-    "TO",
-    "TRAILING",
-    "TRANSACTION",
-    "TRANSLATE",
-    "TRANSLATION",
-    "TRIM",
-    "TRUE",
-    "UNION",
-    "UNIQUE",
-    "UNKNOWN",
-    "UPDATE",
-    "UPPER",
-    "USAGE",
-    "USER",
-    "USING",
-    "VALUE",
-    "VALUES",
-    "VARCHAR",
-    "VARYING",
-    "VIEW",
-    "WHEN",
-    "WHENEVER",
-    "WHERE",
-    "WITH",
-    "WORK",
-    "WRITE",
-    "YEAR",
-    "ZONE",
-];
+/// Cached behind a `OnceLock` because core recomputes `SQL_KEYWORDS` on every
+/// call — it cannot cache a value that is generic over the backend — and
+/// walking SQLite's keyword table each time would be wasteful. The table is
+/// fixed at link time, so one walk is enough.
+pub(crate) fn sqlite_keywords() -> &'static [&'static str] {
+    static KEYWORDS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    KEYWORDS
+        .get_or_init(|| {
+            let count = unsafe { rusqlite::ffi::sqlite3_keyword_count() };
+            let mut names: Vec<&'static str> = Vec::with_capacity(count.max(0) as usize);
 
-/// `SQL_KEYWORDS` (89): SQLite's own keywords, minus those ODBC already
-/// reserves, as a comma-separated list.
-///
-/// The list is read out of the linked SQLite library through
-/// `sqlite3_keyword_count` / `sqlite3_keyword_name` rather than transcribed
-/// from <https://www.sqlite.org/lang_keywords.html>. A hand-copied list would
-/// describe whichever SQLite the author was reading about; this describes the
-/// one the driver is actually linked against, and needs no maintenance when
-/// that changes. It is the same reason the `ALTER TABLE` and outer-join
-/// bitmaps are live-probed.
-///
-/// `stackable-odbc-core` answers this info type with an empty string, which is
-/// a valid empty list and says SQLite has no keywords of its own. It has
-/// plenty — `AUTOINCREMENT`, `PRAGMA`, `VACUUM`, `GLOB`, `REGEXP` — and
-/// applications read this to decide which identifiers need quoting, so an
-/// empty list can leave a generated identifier unquoted where it collides.
-///
-/// Computed once: the underlying table is fixed at link time.
-fn sqlite_specific_keywords() -> &'static str {
-    static KEYWORDS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    KEYWORDS.get_or_init(|| {
-        let count = unsafe { rusqlite::ffi::sqlite3_keyword_count() };
-        let mut names: Vec<&'static str> = Vec::with_capacity(count.max(0) as usize);
-
-        for i in 0..count {
-            let mut ptr: *const std::ffi::c_char = std::ptr::null();
-            let mut len: std::ffi::c_int = 0;
-            // SAFETY: `i` is in `0..sqlite3_keyword_count()`, the range the API
-            // defines. On success it writes a pointer into SQLite's own static
-            // keyword table, valid for the life of the process, and its length;
-            // neither is owned by the caller, so the `'static` borrow is sound.
-            let rc = unsafe { rusqlite::ffi::sqlite3_keyword_name(i, &mut ptr, &mut len) };
-            if rc != rusqlite::ffi::SQLITE_OK || ptr.is_null() || len <= 0 {
-                continue;
+            for i in 0..count {
+                let mut ptr: *const std::ffi::c_char = std::ptr::null();
+                let mut len: std::ffi::c_int = 0;
+                // SAFETY: `i` is in `0..sqlite3_keyword_count()`, the range the
+                // API defines. On success it writes a pointer into SQLite's own
+                // static keyword table, valid for the life of the process, and
+                // its length; neither is owned by the caller, so the `'static`
+                // borrow is sound.
+                let rc = unsafe { rusqlite::ffi::sqlite3_keyword_name(i, &mut ptr, &mut len) };
+                if rc != rusqlite::ffi::SQLITE_OK || ptr.is_null() || len <= 0 {
+                    continue;
+                }
+                // SAFETY: as above -- `ptr`/`len` describe a live, static, ASCII
+                // keyword that SQLite never mutates or frees.
+                let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+                if let Ok(name) = std::str::from_utf8(bytes) {
+                    names.push(name);
+                }
             }
-            // SAFETY: as above — `ptr`/`len` describe a live, static, ASCII
-            // keyword that SQLite never mutates or frees.
-            let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
-            let Ok(name) = std::str::from_utf8(bytes) else {
-                continue;
-            };
-            if !ODBC_RESERVED_KEYWORDS
-                .iter()
-                .any(|r| r.eq_ignore_ascii_case(name))
-            {
-                names.push(name);
-            }
-        }
 
-        // SQLite reports them in its own table order; sort so the value is
-        // stable for anything that diffs or caches it.
-        names.sort_unstable();
-        names.join(",")
-    })
+            names
+        })
+        .as_slice()
 }
 
 pub(super) fn get_info_raw(
@@ -1338,11 +1079,6 @@ pub(super) fn get_info_raw(
         // since 3.39.0; this build is 3.53.2).
         SQL_LIKE_ESCAPE_CLAUSE => Some(Ok(InfoValue::String("Y".into()))),
         SQL_OUTER_JOINS => Some(Ok(InfoValue::String("Y".into()))),
-        // SQLite's own keywords, read from the linked library. Core answers
-        // this with an empty string, which claims SQLite has none of its own.
-        SQL_KEYWORDS => Some(Ok(InfoValue::String(
-            sqlite_specific_keywords().to_string(),
-        ))),
         _ => common_get_info_raw::<SqliteBackend>(info_type).map(Ok),
     }
 }
@@ -1486,8 +1222,8 @@ mod tests {
         SQL_FN_TD_EXTRACT, SQL_FN_TD_MONTH, SQL_FN_TD_MONTHNAME, SQL_FN_TD_QUARTER,
         SQL_FN_TD_TIMESTAMPADD, SQL_FN_TD_TIMESTAMPDIFF, SQL_FN_TD_YEAR, SQL_GB_NO_RELATION,
         SQL_GD_ANY_COLUMN, SQL_GD_ANY_ORDER, SQL_GD_BOUND, SQL_IC_MIXED, SQL_INSENSITIVE,
-        SQL_MAX_CURSOR_NAME_LEN, SQL_NC_LOW, SQL_NNC_NON_NULL, SQL_OIC_CORE, SQL_SO_FORWARD_ONLY,
-        SQL_SP_MATCH_FULL, SQL_SP_MATCH_PARTIAL, SQL_SP_MATCH_UNIQUE_FULL,
+        SQL_KEYWORDS, SQL_MAX_CURSOR_NAME_LEN, SQL_NC_LOW, SQL_NNC_NON_NULL, SQL_OIC_CORE,
+        SQL_SO_FORWARD_ONLY, SQL_SP_MATCH_FULL, SQL_SP_MATCH_PARTIAL, SQL_SP_MATCH_UNIQUE_FULL,
         SQL_SP_MATCH_UNIQUE_PARTIAL, SQL_SP_OVERLAPS, SQL_SP_QUANTIFIED_COMPARISON, SQL_SP_UNIQUE,
         SQL_SQ_COMPARISON, SQL_SQ_CORRELATED_SUBQUERIES, SQL_SQ_EXISTS, SQL_SQ_IN,
         SQL_SQ_QUANTIFIED, SQL_SRJO_CORRESPONDING_CLAUSE, SQL_SRJO_UNION_JOIN, SQL_TC_DML,
@@ -1921,65 +1657,58 @@ mod tests {
         }
     }
 
-    /// `SQL_KEYWORDS` lists SQLite's own keywords and excludes the ones ODBC
-    /// already reserves.
+    /// The hook returns SQLite's **raw** keyword list, and core turns it into
+    /// `SQL_KEYWORDS` by subtracting the ODBC reserved words.
     ///
-    /// The list is read out of the linked library, so this asserts properties
-    /// rather than a fixed string: a `rusqlite` bump may legitimately add a
-    /// keyword, and pinning the exact value would turn that into a failure.
+    /// Both halves are asserted, because each can fail independently: a raw
+    /// list missing SQLite's own words, or a wiring mistake that leaves core
+    /// filtering something else. Properties rather than a fixed string — a
+    /// `rusqlite` bump may legitimately add a keyword, and pinning the value
+    /// would turn that into a failure.
     #[test]
-    fn sql_keywords_lists_sqlite_specific_keywords_only() {
-        let keywords = sqlite_specific_keywords();
-        let listed: Vec<&str> = keywords.split(',').filter(|s| !s.is_empty()).collect();
+    fn keywords_hook_feeds_sql_keywords_with_odbc_words_removed() {
+        let raw = SqliteBackend::keywords();
+        assert!(!raw.is_empty(), "SQLite reserves words of its own");
 
+        // Raw means unfiltered: ODBC's words are still in here, because
+        // removing them is core's job and doing it twice would be the
+        // duplication this hook exists to avoid.
         assert!(
-            !listed.is_empty(),
-            "SQLite has keywords of its own; an empty list is the claim core's \
-             default made and this arm exists to correct"
+            raw.iter().any(|k| k.eq_ignore_ascii_case("SELECT")),
+            "the raw list should still contain SELECT; filtering is core's"
         );
-
-        // Present: unmistakably SQLite, and absent from the ODBC list.
         for expected in ["AUTOINCREMENT", "PRAGMA", "VACUUM", "GLOB", "REGEXP"] {
             assert!(
-                listed.contains(&expected),
-                "{expected} is a SQLite keyword but is missing from SQL_KEYWORDS"
+                raw.iter().any(|k| k.eq_ignore_ascii_case(expected)),
+                "{expected} is a SQLite keyword but the hook did not report it"
             );
         }
 
-        // Absent: reserved by ODBC, so excluded by the spec's definition.
+        // And what an application actually receives, through the real path.
+        let params = ConnectParams::parse("Database=:memory:").unwrap();
+        let conn = SqliteBackend::connect(&params).expect("connect");
+        let value = match get_info_raw(&conn, SQL_KEYWORDS) {
+            Some(Ok(InfoValue::String(s))) => s,
+            other => panic!("SQL_KEYWORDS unexpected: {other:?}"),
+        };
+        let listed: Vec<&str> = value.split(',').filter(|s| !s.is_empty()).collect();
+
         for reserved in ["SELECT", "FROM", "WHERE", "PRIMARY", "TABLE"] {
             assert!(
                 !listed.contains(&reserved),
-                "{reserved} is an ODBC reserved keyword and must not appear in \
-                 SQL_KEYWORDS"
+                "{reserved} is ODBC-reserved and must not survive into SQL_KEYWORDS"
             );
         }
-
-        let mut sorted = listed.clone();
-        sorted.sort_unstable();
-        assert_eq!(listed, sorted, "SQL_KEYWORDS should be sorted");
-        assert!(
-            !keywords.contains(", "),
-            "the spec asks for a comma-separated list, not comma-space"
-        );
-    }
-
-    /// The ODBC reserved list is transcribed from the specification page, so
-    /// the one mistake worth guarding is a duplicated entry from a bad merge.
-    #[test]
-    fn odbc_reserved_keywords_are_unique() {
-        let mut seen = std::collections::HashSet::new();
-        for k in ODBC_RESERVED_KEYWORDS {
+        for expected in ["AUTOINCREMENT", "PRAGMA", "VACUUM", "GLOB", "REGEXP"] {
             assert!(
-                seen.insert(*k),
-                "{k} appears twice in ODBC_RESERVED_KEYWORDS"
-            );
-            assert_eq!(
-                *k,
-                k.to_ascii_uppercase(),
-                "{k} should be uppercase, matching the spec page"
+                listed.contains(&expected),
+                "{expected} should survive the ODBC subtraction"
             );
         }
+        assert!(
+            listed.len() < raw.len(),
+            "nothing was subtracted, so the ODBC filter did not run"
+        );
     }
 
     /// SQLite's `GROUP BY` is unrelated to the select list, which is what

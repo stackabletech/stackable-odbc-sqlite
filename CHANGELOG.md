@@ -130,11 +130,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `SQL_KEYWORDS` now lists SQLite's own keywords instead of an empty string.
   The list is read out of the linked library through `sqlite3_keyword_count` /
-  `sqlite3_keyword_name` and filtered against the ODBC reserved list, which the
-  specification defines this value as excluding. An empty list claimed SQLite
+  `sqlite3_keyword_name` rather than transcribed from SQLite's documentation,
+  so it describes the library the driver links. An empty list claimed SQLite
   has no keywords of its own — it has `AUTOINCREMENT`, `PRAGMA`, `VACUUM`,
   `GLOB`, `REGEXP` and many more, and applications read this to decide which
-  identifiers need quoting.
+  identifiers need quoting. The driver reports the raw list through
+  `Backend::keywords`; `stackable-odbc-core` subtracts the ODBC reserved words
+  the specification defines this value as excluding.
 
 - `{fn CURRENT_DATE()}`, `{fn CURRENT_TIME()}` and `{fn CURRENT_TIMESTAMP()}`
   now execute. `SQL_TIMEDATE_FUNCTIONS` advertised all three, but nothing

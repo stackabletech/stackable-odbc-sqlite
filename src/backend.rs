@@ -532,6 +532,16 @@ impl Backend for SqliteBackend {
         false
     }
 
+    /// SQLite's reserved words, read out of the linked library rather than
+    /// transcribed. See `info::sqlite_keywords`.
+    ///
+    /// This is the raw list; core subtracts `ODBC_RESERVED_KEYWORDS` and joins
+    /// it into `SQL_KEYWORDS`, so the "excluding ODBC's own" rule is applied
+    /// once for every driver instead of per backend.
+    fn keywords() -> &'static [&'static str] {
+        info::sqlite_keywords()
+    }
+
     /// Backslash: SQLite's `LIKE ... ESCAPE` takes any character, and this
     /// driver reports `SQL_LIKE_ESCAPE_CLAUSE = "Y"`. Backslash is the
     /// conventional choice and the one `SQLTables`-style pattern arguments are
