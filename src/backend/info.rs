@@ -9,21 +9,22 @@ use stackable_odbc_core::errors::OdbcError;
 use stackable_odbc_core::function_id::FunctionId;
 use stackable_odbc_core::types::{
     InfoType, InfoValue, MaxPrecision, MaxScale, Nullable, SQL_AF_ALL, SQL_AF_AVG, SQL_AF_COUNT,
-    SQL_AF_DISTINCT, SQL_AF_MAX, SQL_AF_MIN, SQL_AF_SUM, SQL_AGGREGATE_FUNCTIONS, SQL_CL_START,
-    SQL_CODE_DATE, SQL_CODE_TIME, SQL_CODE_TIMESTAMP, SQL_CU_DML_STATEMENTS,
-    SQL_CU_INDEX_DEFINITION, SQL_CU_TABLE_DEFINITION, SQL_FN_NUM_ABS, SQL_FN_NUM_ROUND,
-    SQL_FN_NUM_SIGN, SQL_FN_STR_ASCII, SQL_FN_STR_CHAR, SQL_FN_STR_CONCAT, SQL_FN_STR_LCASE,
-    SQL_FN_STR_LENGTH, SQL_FN_STR_LTRIM, SQL_FN_STR_OCTET_LENGTH, SQL_FN_STR_REPLACE,
-    SQL_FN_STR_RTRIM, SQL_FN_STR_SOUNDEX, SQL_FN_STR_SUBSTRING, SQL_FN_STR_UCASE,
-    SQL_FN_SYS_IFNULL, SQL_FN_TD_CURDATE, SQL_FN_TD_CURRENT_DATE, SQL_FN_TD_CURRENT_TIME,
-    SQL_FN_TD_CURRENT_TIMESTAMP, SQL_FN_TD_CURTIME, SQL_FN_TD_NOW, SQL_GD_ANY_COLUMN,
-    SQL_GD_ANY_ORDER, SQL_GD_BOUND, SQL_IC_MIXED, SQL_LIKE_ESCAPE_CLAUSE, SQL_NC_LOW,
-    SQL_NUMERIC_FUNCTIONS, SQL_OJ_ALL_COMPARISON_OPS, SQL_OJ_FULL, SQL_OJ_INNER, SQL_OJ_LEFT,
-    SQL_OJ_NESTED, SQL_OJ_NOT_ORDERED, SQL_OJ_RIGHT, SQL_OUTER_JOINS, SQL_SEARCHABLE,
-    SQL_SP_BETWEEN, SQL_SP_COMPARISON, SQL_SP_EXISTS, SQL_SP_IN, SQL_SP_ISNOTNULL, SQL_SP_ISNULL,
-    SQL_SP_LIKE, SQL_SQL92_PREDICATES, SQL_SQL92_RELATIONAL_JOIN_OPERATORS,
-    SQL_SQL92_VALUE_EXPRESSIONS, SQL_SRJO_CROSS_JOIN, SQL_SRJO_EXCEPT_JOIN,
-    SQL_SRJO_FULL_OUTER_JOIN, SQL_SRJO_INNER_JOIN, SQL_SRJO_INTERSECT_JOIN,
+    SQL_AF_DISTINCT, SQL_AF_MAX, SQL_AF_MIN, SQL_AF_SUM, SQL_AGGREGATE_FUNCTIONS,
+    SQL_AT_ADD_COLUMN_COLLATION, SQL_AT_ADD_COLUMN_DEFAULT, SQL_AT_ADD_COLUMN_SINGLE,
+    SQL_AT_ADD_TABLE_CONSTRAINT, SQL_AT_CONSTRAINT_NAME_DEFINITION, SQL_CL_START, SQL_CODE_DATE,
+    SQL_CODE_TIME, SQL_CODE_TIMESTAMP, SQL_CU_DML_STATEMENTS, SQL_CU_INDEX_DEFINITION,
+    SQL_CU_TABLE_DEFINITION, SQL_FN_NUM_ABS, SQL_FN_NUM_ROUND, SQL_FN_NUM_SIGN, SQL_FN_STR_ASCII,
+    SQL_FN_STR_CHAR, SQL_FN_STR_CONCAT, SQL_FN_STR_LCASE, SQL_FN_STR_LENGTH, SQL_FN_STR_LTRIM,
+    SQL_FN_STR_OCTET_LENGTH, SQL_FN_STR_REPLACE, SQL_FN_STR_RTRIM, SQL_FN_STR_SOUNDEX,
+    SQL_FN_STR_SUBSTRING, SQL_FN_STR_UCASE, SQL_FN_SYS_IFNULL, SQL_FN_TD_CURDATE,
+    SQL_FN_TD_CURRENT_DATE, SQL_FN_TD_CURRENT_TIME, SQL_FN_TD_CURRENT_TIMESTAMP, SQL_FN_TD_CURTIME,
+    SQL_FN_TD_NOW, SQL_GD_ANY_COLUMN, SQL_GD_ANY_ORDER, SQL_GD_BOUND, SQL_IC_MIXED,
+    SQL_LIKE_ESCAPE_CLAUSE, SQL_NC_LOW, SQL_NUMERIC_FUNCTIONS, SQL_OJ_ALL_COMPARISON_OPS,
+    SQL_OJ_FULL, SQL_OJ_INNER, SQL_OJ_LEFT, SQL_OJ_NESTED, SQL_OJ_NOT_ORDERED, SQL_OJ_RIGHT,
+    SQL_OUTER_JOINS, SQL_SEARCHABLE, SQL_SP_BETWEEN, SQL_SP_COMPARISON, SQL_SP_EXISTS, SQL_SP_IN,
+    SQL_SP_ISNOTNULL, SQL_SP_ISNULL, SQL_SP_LIKE, SQL_SQL92_PREDICATES,
+    SQL_SQL92_RELATIONAL_JOIN_OPERATORS, SQL_SQL92_VALUE_EXPRESSIONS, SQL_SRJO_CROSS_JOIN,
+    SQL_SRJO_EXCEPT_JOIN, SQL_SRJO_FULL_OUTER_JOIN, SQL_SRJO_INNER_JOIN, SQL_SRJO_INTERSECT_JOIN,
     SQL_SRJO_LEFT_OUTER_JOIN, SQL_SRJO_NATURAL_JOIN, SQL_SRJO_RIGHT_OUTER_JOIN,
     SQL_STRING_FUNCTIONS, SQL_SU_DML_STATEMENTS, SQL_SU_INDEX_DEFINITION, SQL_SU_TABLE_DEFINITION,
     SQL_SVE_CASE, SQL_SVE_CAST, SQL_SVE_COALESCE, SQL_SVE_NULLIF, SQL_SYSTEM_FUNCTIONS, SQL_TC_DML,
@@ -675,6 +676,7 @@ fn sqlite_get_info(info_type: InfoType) -> Result<InfoValue, SqliteError> {
         // the ON clause the spec asks about. Core's default is 0, which
         // contradicted this driver's own SQL_OUTER_JOINS = "Y". Each bit is
         // exercised by `outer_join_capabilities_are_each_live_probed`.
+        InfoType::AlterTable => return Ok(InfoValue::U32(SQLITE_ALTER_TABLE)),
         InfoType::OuterJoinCapabilities => {
             return Ok(InfoValue::U32(
                 SQL_OJ_LEFT
@@ -745,6 +747,48 @@ pub(super) fn get_info_pre_connect(info_type: InfoType) -> Result<InfoValue, Odb
 /// <https://sqlite.org/lang_aggfunc.html>
 pub(crate) const SQLITE_AGGREGATE_FUNCTIONS: u32 =
     SQL_AF_AVG | SQL_AF_COUNT | SQL_AF_MAX | SQL_AF_MIN | SQL_AF_SUM | SQL_AF_DISTINCT | SQL_AF_ALL;
+
+/// `SQL_ALTER_TABLE` (86) — the `ALTER TABLE` clauses SQLite accepts, of those
+/// the ODBC bitmap can express.
+///
+/// Every bit here was established by executing the clause against the bundled
+/// library (3.53.2), not read off the documentation —
+/// `alter_table_capabilities_are_each_live_probed` is that probe, and it
+/// checks the unclaimed bits too. That matters: `ADD CONSTRAINT` and
+/// `DROP CONSTRAINT` are recent additions, rejected by 3.51.3 and accepted by
+/// 3.53.2, so a bitmap written from an older recollection of SQLite's grammar
+/// understates it.
+///
+/// Claimed:
+///
+/// - `ADD COLUMN`, with `DEFAULT` and `COLLATE`.
+/// - `ADD CONSTRAINT <name> CHECK (...)`, which rewrites the stored schema to
+///   carry a genuine table constraint. Note the ODBC bit is all-or-nothing
+///   while SQLite accepts only `CHECK` here — `UNIQUE`, `PRIMARY KEY` and
+///   `FOREIGN KEY` are still syntax errors.
+/// - `SQL_AT_CONSTRAINT_NAME_DEFINITION`, since that `CONSTRAINT <name>` clause
+///   is exactly what the bit describes.
+///
+/// Supported by SQLite but *unrepresentable*, so absent by necessity rather
+/// than because SQLite lacks them: unqualified `DROP COLUMN` (3.35.0+) and
+/// unqualified `DROP CONSTRAINT`, for which the bitmap offers only `CASCADE`
+/// and `RESTRICT` variants — and SQLite rejects both keywords, so claiming
+/// either would advertise a syntax an application would send and have refused.
+/// `RENAME TO` and `RENAME COLUMN` have no `SQL_AT_*` bit at all.
+///
+/// Genuinely absent: `ALTER COLUMN ... SET DEFAULT` and
+/// `ALTER COLUMN ... DROP DEFAULT` are not SQLite grammar.
+///
+/// Core previously defaulted this to 0, which said SQLite cannot alter a table
+/// in any way.
+///
+/// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlgetinfo-function>
+/// SQLite: <https://www.sqlite.org/lang_altertable.html>
+pub(crate) const SQLITE_ALTER_TABLE: u32 = SQL_AT_ADD_COLUMN_SINGLE
+    | SQL_AT_ADD_COLUMN_DEFAULT
+    | SQL_AT_ADD_COLUMN_COLLATION
+    | SQL_AT_ADD_TABLE_CONSTRAINT
+    | SQL_AT_CONSTRAINT_NAME_DEFINITION;
 
 /// `SQL_SQL92_PREDICATES`.
 ///
@@ -1042,23 +1086,26 @@ mod tests {
     }
     use super::*;
     use stackable_odbc_core::types::{
-        DEFAULT_IDENTIFIER_LEN, InfoType, InfoValue, SQL_AM_NONE, SQL_CA1_NEXT, SQL_CB_PRESERVE,
-        SQL_DRIVER_ODBC_VER_STRING, SQL_FN_CVT_CAST, SQL_FN_NUM_CEILING, SQL_FN_NUM_COS,
-        SQL_FN_NUM_FLOOR, SQL_FN_NUM_LOG, SQL_FN_NUM_MOD, SQL_FN_NUM_POWER, SQL_FN_NUM_RAND,
-        SQL_FN_NUM_SQRT, SQL_FN_NUM_TRUNCATE, SQL_FN_STR_BIT_LENGTH, SQL_FN_STR_CHAR_LENGTH,
-        SQL_FN_STR_CHARACTER_LENGTH, SQL_FN_STR_DIFFERENCE, SQL_FN_STR_INSERT, SQL_FN_STR_LEFT,
-        SQL_FN_STR_LOCATE, SQL_FN_STR_LOCATE_2, SQL_FN_STR_POSITION, SQL_FN_STR_REPEAT,
-        SQL_FN_STR_RIGHT, SQL_FN_STR_SPACE, SQL_FN_TD_DAYNAME, SQL_FN_TD_DAYOFMONTH,
-        SQL_FN_TD_EXTRACT, SQL_FN_TD_MONTH, SQL_FN_TD_MONTHNAME, SQL_FN_TD_QUARTER,
-        SQL_FN_TD_TIMESTAMPADD, SQL_FN_TD_TIMESTAMPDIFF, SQL_FN_TD_YEAR, SQL_GB_NO_RELATION,
-        SQL_GD_ANY_COLUMN, SQL_GD_ANY_ORDER, SQL_GD_BOUND, SQL_IC_MIXED, SQL_INSENSITIVE,
-        SQL_MAX_CURSOR_NAME_LEN, SQL_NC_LOW, SQL_OIC_CORE, SQL_SC_SQL92_ENTRY, SQL_SO_FORWARD_ONLY,
-        SQL_SP_MATCH_FULL, SQL_SP_MATCH_PARTIAL, SQL_SP_MATCH_UNIQUE_FULL,
-        SQL_SP_MATCH_UNIQUE_PARTIAL, SQL_SP_OVERLAPS, SQL_SP_QUANTIFIED_COMPARISON, SQL_SP_UNIQUE,
-        SQL_SQ_COMPARISON, SQL_SQ_CORRELATED_SUBQUERIES, SQL_SQ_EXISTS, SQL_SQ_IN,
-        SQL_SQ_QUANTIFIED, SQL_SRJO_CORRESPONDING_CLAUSE, SQL_SRJO_UNION_JOIN, SQL_TC_DML,
-        SQL_TXN_READ_COMMITTED, SQL_TXN_READ_UNCOMMITTED, SQL_TXN_REPEATABLE_READ,
-        SQL_TXN_SERIALIZABLE, SQL_U_UNION, SQL_U_UNION_ALL,
+        DEFAULT_IDENTIFIER_LEN, InfoType, InfoValue, SQL_AM_NONE, SQL_AT_DROP_COLUMN_CASCADE,
+        SQL_AT_DROP_COLUMN_DEFAULT, SQL_AT_DROP_COLUMN_RESTRICT,
+        SQL_AT_DROP_TABLE_CONSTRAINT_CASCADE, SQL_AT_DROP_TABLE_CONSTRAINT_RESTRICT,
+        SQL_AT_SET_COLUMN_DEFAULT, SQL_CA1_NEXT, SQL_CB_PRESERVE, SQL_DRIVER_ODBC_VER_STRING,
+        SQL_FN_CVT_CAST, SQL_FN_NUM_CEILING, SQL_FN_NUM_COS, SQL_FN_NUM_FLOOR, SQL_FN_NUM_LOG,
+        SQL_FN_NUM_MOD, SQL_FN_NUM_POWER, SQL_FN_NUM_RAND, SQL_FN_NUM_SQRT, SQL_FN_NUM_TRUNCATE,
+        SQL_FN_STR_BIT_LENGTH, SQL_FN_STR_CHAR_LENGTH, SQL_FN_STR_CHARACTER_LENGTH,
+        SQL_FN_STR_DIFFERENCE, SQL_FN_STR_INSERT, SQL_FN_STR_LEFT, SQL_FN_STR_LOCATE,
+        SQL_FN_STR_LOCATE_2, SQL_FN_STR_POSITION, SQL_FN_STR_REPEAT, SQL_FN_STR_RIGHT,
+        SQL_FN_STR_SPACE, SQL_FN_TD_DAYNAME, SQL_FN_TD_DAYOFMONTH, SQL_FN_TD_EXTRACT,
+        SQL_FN_TD_MONTH, SQL_FN_TD_MONTHNAME, SQL_FN_TD_QUARTER, SQL_FN_TD_TIMESTAMPADD,
+        SQL_FN_TD_TIMESTAMPDIFF, SQL_FN_TD_YEAR, SQL_GB_NO_RELATION, SQL_GD_ANY_COLUMN,
+        SQL_GD_ANY_ORDER, SQL_GD_BOUND, SQL_IC_MIXED, SQL_INSENSITIVE, SQL_MAX_CURSOR_NAME_LEN,
+        SQL_NC_LOW, SQL_OIC_CORE, SQL_SC_SQL92_ENTRY, SQL_SO_FORWARD_ONLY, SQL_SP_MATCH_FULL,
+        SQL_SP_MATCH_PARTIAL, SQL_SP_MATCH_UNIQUE_FULL, SQL_SP_MATCH_UNIQUE_PARTIAL,
+        SQL_SP_OVERLAPS, SQL_SP_QUANTIFIED_COMPARISON, SQL_SP_UNIQUE, SQL_SQ_COMPARISON,
+        SQL_SQ_CORRELATED_SUBQUERIES, SQL_SQ_EXISTS, SQL_SQ_IN, SQL_SQ_QUANTIFIED,
+        SQL_SRJO_CORRESPONDING_CLAUSE, SQL_SRJO_UNION_JOIN, SQL_TC_DML, SQL_TXN_READ_COMMITTED,
+        SQL_TXN_READ_UNCOMMITTED, SQL_TXN_REPEATABLE_READ, SQL_TXN_SERIALIZABLE, SQL_U_UNION,
+        SQL_U_UNION_ALL,
     };
 
     enum Expected {
@@ -1136,7 +1183,7 @@ mod tests {
         (InfoType::ScrollOptions,                 Expected::U32(SQL_SO_FORWARD_ONLY)),
         (InfoType::ConvertFunctions,              Expected::U32(SQL_FN_CVT_CAST)),
         (InfoType::TransactionIsolationProtocol,  Expected::U32(SQL_TXN_READ_UNCOMMITTED | SQL_TXN_READ_COMMITTED | SQL_TXN_REPEATABLE_READ | SQL_TXN_SERIALIZABLE)),
-        (InfoType::AlterTable,                    Expected::U32(0)),
+        (InfoType::AlterTable,                    Expected::U32(SQLITE_ALTER_TABLE)),
         (InfoType::MaxIndexSize,                  Expected::U32(0)),
         (InfoType::MaxRowSize,                    Expected::U32(0)),
         (InfoType::MaxStatementLen,               Expected::U32(0)),
@@ -1312,6 +1359,118 @@ mod tests {
                 "SQL_SCHEMA_USAGE must be 0 when schemas are unsupported"
             );
         }
+    }
+
+    /// Every `SQL_AT_*` bit this driver claims, proved by running the
+    /// `ALTER TABLE` it describes — and every bit it does *not* claim, proved
+    /// by the bundled library rejecting that syntax.
+    ///
+    /// The negative half is the point. A bitmap that only checks what it claims
+    /// can overclaim forever; these assertions fail the moment SQLite gains a
+    /// clause the bitmap still denies, which is the cheapest possible reminder
+    /// to widen it.
+    #[test]
+    fn alter_table_capabilities_are_each_live_probed() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t (id INTEGER)").unwrap();
+
+        // Claimed: each must be accepted.
+        for (bit, sql) in [
+            (SQL_AT_ADD_COLUMN_SINGLE, "ALTER TABLE t ADD COLUMN c1 TEXT"),
+            (
+                SQL_AT_ADD_COLUMN_DEFAULT,
+                "ALTER TABLE t ADD COLUMN c2 TEXT DEFAULT 'x'",
+            ),
+            (
+                SQL_AT_ADD_COLUMN_COLLATION,
+                "ALTER TABLE t ADD COLUMN c3 TEXT COLLATE NOCASE",
+            ),
+            (
+                SQL_AT_ADD_TABLE_CONSTRAINT | SQL_AT_CONSTRAINT_NAME_DEFINITION,
+                "ALTER TABLE t ADD CONSTRAINT ck CHECK (id > 0)",
+            ),
+        ] {
+            assert!(
+                SQLITE_ALTER_TABLE & bit == bit,
+                "probe listed for unclaimed bit {bit:#x}"
+            );
+            conn.execute_batch(sql).unwrap_or_else(|e| {
+                panic!("SQL_AT bit {bit:#x} claimed but SQLite rejected it: {e}\n  {sql}")
+            });
+        }
+
+        // ADD CONSTRAINT must produce a real table constraint, not a column
+        // that merely parses. Without this, `ADD CONSTRAINT ck CHECK (...)`
+        // could be read as a column named CONSTRAINT and the bit would be a
+        // lie that still passes the acceptance probe above.
+        let schema: String = conn
+            .query_row("SELECT sql FROM sqlite_master WHERE name = 't'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(
+            schema.contains("CONSTRAINT ck CHECK"),
+            "SQL_AT_ADD_TABLE_CONSTRAINT claimed, but the stored schema shows no \
+             named table constraint: {schema}"
+        );
+
+        // Not claimed: each must be rejected. ALTER COLUMN is not SQLite
+        // grammar at all; the CASCADE and RESTRICT qualifiers are not accepted
+        // on either DROP form, which is why those four bits stay off even
+        // though SQLite drops both columns and constraints.
+        for (bit, sql) in [
+            (
+                SQL_AT_SET_COLUMN_DEFAULT,
+                "ALTER TABLE t ALTER COLUMN c1 SET DEFAULT 'y'",
+            ),
+            (
+                SQL_AT_DROP_COLUMN_DEFAULT,
+                "ALTER TABLE t ALTER COLUMN c2 DROP DEFAULT",
+            ),
+            (
+                SQL_AT_DROP_COLUMN_CASCADE,
+                "ALTER TABLE t DROP COLUMN c1 CASCADE",
+            ),
+            (
+                SQL_AT_DROP_COLUMN_RESTRICT,
+                "ALTER TABLE t DROP COLUMN c1 RESTRICT",
+            ),
+            (
+                SQL_AT_DROP_TABLE_CONSTRAINT_CASCADE,
+                "ALTER TABLE t DROP CONSTRAINT ck CASCADE",
+            ),
+            (
+                SQL_AT_DROP_TABLE_CONSTRAINT_RESTRICT,
+                "ALTER TABLE t DROP CONSTRAINT ck RESTRICT",
+            ),
+        ] {
+            assert!(
+                SQLITE_ALTER_TABLE & bit == 0,
+                "negative probe listed for claimed bit {bit:#x}"
+            );
+            assert!(
+                conn.execute_batch(sql).is_err(),
+                "SQL_AT bit {bit:#x} is not claimed, but SQLite accepted it -- \
+                 SQLITE_ALTER_TABLE now understates and should be widened\n  {sql}"
+            );
+        }
+
+        // ADD CONSTRAINT only takes CHECK. The ODBC bit cannot express that
+        // narrowing, so it is recorded here instead.
+        assert!(
+            conn.execute_batch("ALTER TABLE t ADD CONSTRAINT uq UNIQUE (id)")
+                .is_err(),
+            "SQLite gained ADD CONSTRAINT ... UNIQUE; the doc comment on \
+             SQLITE_ALTER_TABLE says only CHECK is accepted and needs updating"
+        );
+
+        // Supported by SQLite but unrepresentable: neither unqualified form has
+        // a SQL_AT_* bit, so both are absent by necessity rather than because
+        // SQLite lacks them. Asserted so that is not mistaken for an oversight.
+        conn.execute_batch("ALTER TABLE t DROP CONSTRAINT ck")
+            .expect("SQLite supports unqualified DROP CONSTRAINT");
+        conn.execute_batch("ALTER TABLE t DROP COLUMN c1")
+            .expect("SQLite supports unqualified DROP COLUMN (3.35.0+)");
     }
 
     /// Every `SQL_OJ_*` bit this driver claims, proved by running the join it

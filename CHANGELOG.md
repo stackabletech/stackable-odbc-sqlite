@@ -27,6 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   advertised it and implemented nothing, so the driver reported that it
   destroyed cursors on commit while in fact preserving them.
 
+- `SQL_ALTER_TABLE` now reports `SQL_AT_ADD_COLUMN_SINGLE`,
+  `SQL_AT_ADD_COLUMN_DEFAULT`, `SQL_AT_ADD_COLUMN_COLLATION`,
+  `SQL_AT_ADD_TABLE_CONSTRAINT` and `SQL_AT_CONSTRAINT_NAME_DEFINITION` instead
+  of `0`, which claimed SQLite cannot alter a table in any way. Each bit is
+  verified by executing the clause against the bundled library, and the bits
+  that stay off are verified to be rejected by it. SQLite's unqualified
+  `DROP COLUMN` and `DROP CONSTRAINT`, and both `RENAME` forms, remain absent
+  from the bitmap: the ODBC value has no bit for them, and its `CASCADE` and
+  `RESTRICT` variants are syntax errors in SQLite.
+
 - `SQL_OUTER_JOIN_CAPABILITIES` now reports every outer-join form SQLite
   implements — `SQL_OJ_LEFT`, `SQL_OJ_RIGHT`, `SQL_OJ_FULL`, `SQL_OJ_NESTED`,
   `SQL_OJ_NOT_ORDERED`, `SQL_OJ_INNER` and `SQL_OJ_ALL_COMPARISON_OPS` — instead
