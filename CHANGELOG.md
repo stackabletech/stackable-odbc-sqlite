@@ -27,6 +27,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   advertised it and implemented nothing, so the driver reported that it
   destroyed cursors on commit while in fact preserving them.
 
+- `SQL_SQL_CONFORMANCE` now reports `0` — no SQL-92 level claimed — instead of
+  `SQL_SC_SQL92_ENTRY`. That value came from a `stackable-odbc-core` default
+  rather than any assessment of SQLite, and it contradicted this driver's own
+  answers: the spec ties entry level to `SQL_GB_GROUP_BY_EQUALS_SELECT`, while
+  SQLite accepts a bare non-aggregated column absent from `GROUP BY` and a
+  `GROUP BY` column absent from the select list. Raising the claim later means
+  auditing entry-level conformance properly.
+
+- `SQL_ALTER_TABLE` additionally reports `SQL_AT_ADD_CONSTRAINT`. Despite its
+  name that bit means "`ADD COLUMN` is supported with column constraints", and
+  SQLite accepts `NOT NULL`, `CHECK`, `REFERENCES` and a named `CONSTRAINT` on
+  an added column; only `UNIQUE` and `PRIMARY KEY` are refused. The bit was
+  unavailable when this driver first set the bitmap.
+
+- `SQL_GROUP_BY`, `SQL_NULL_COLLATION`, `SQL_CORRELATION_NAME`,
+  `SQL_NON_NULLABLE_COLUMNS`, `SQL_EXPRESSIONS_IN_ORDERBY`,
+  `SQL_TIMEDATE_ADD_INTERVALS` and `SQL_TIMEDATE_DIFF_INTERVALS` are now stated
+  by this driver rather than inherited. `SQL_CORRELATION_NAME`
+  (`SQL_CN_ANY`), `SQL_NON_NULLABLE_COLUMNS` (`SQL_NNC_NON_NULL`) and
+  `SQL_EXPRESSIONS_IN_ORDERBY` (`"Y"`) had never been asserted anywhere; the
+  two interval bitmaps report `0`, matching `SQL_TIMEDATE_FUNCTIONS`, which
+  does not claim `TIMESTAMPADD` or `TIMESTAMPDIFF`.
+
 - `SQL_TXN_ISOLATION_OPTION` now reports `SQL_TXN_SERIALIZABLE` alone, instead
   of also advertising `SQL_TXN_READ_UNCOMMITTED`, `SQL_TXN_READ_COMMITTED` and
   `SQL_TXN_REPEATABLE_READ`. Transactions in SQLite are serializable; READ

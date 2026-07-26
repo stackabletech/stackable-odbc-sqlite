@@ -6,6 +6,7 @@ use stackable_odbc_core::{
     errors::OdbcError,
     types::{
         ColumnDescriptor, ColumnValue, ConnectParams, CursorBehavior, ExecuteOutcome, InfoValue,
+        SQL_CN_ANY, SQL_GB_NO_RELATION, SQL_NC_LOW, SQL_NNC_NON_NULL, SQL_TXN_SERIALIZABLE,
         TypeInfoRow,
     },
 };
@@ -324,6 +325,135 @@ impl Backend for SqliteBackend {
     /// value.
     fn cursor_rollback_behavior() -> CursorBehavior {
         CursorBehavior::Preserve
+    }
+
+    /// SQLite has no ODBC catalogs: `metadata::tables` reports `TABLE_CAT` as
+    /// NULL for every row, and a `catalog = "%"` enumeration returns an empty
+    /// result set.
+    ///
+    /// Core derives the whole catalog group from this — `SQL_CATALOG_NAME`,
+    /// `SQL_CATALOG_TERM`, `SQL_CATALOG_NAME_SEPARATOR`,
+    /// `SQL_CATALOG_LOCATION` and `SQL_CATALOG_USAGE` — so this driver answers
+    /// none of them itself. Before the hook existed it answered three and let
+    /// the other two inherit defaults that named a catalog, telling an
+    /// application catalogs do not exist and giving their name in the same
+    /// breath.
+    fn supports_catalogs() -> bool {
+        false
+    }
+
+    /// SQLite has no ODBC schemas: a `schema = "%"` enumeration returns an
+    /// empty result set and `TABLE_SCHEM` is always NULL.
+    ///
+    /// Drives `SQL_SCHEMA_TERM` and `SQL_SCHEMA_USAGE`; see
+    /// [`SqliteBackend::supports_catalogs`].
+    fn supports_schemas() -> bool {
+        false
+    }
+
+    /// The `ALTER TABLE` clauses SQLite accepts, of those the ODBC bitmap can
+    /// express. See `info::SQLITE_ALTER_TABLE` for what is claimed, what is
+    /// supported-but-unrepresentable, and how each bit was verified.
+    fn alter_table_support() -> u32 {
+        info::SQLITE_ALTER_TABLE
+    }
+
+    /// Every outer-join form SQLite implements. See
+    /// `info::SQLITE_OUTER_JOIN_CAPABILITIES`.
+    fn outer_join_capabilities() -> u32 {
+        info::SQLITE_OUTER_JOIN_CAPABILITIES
+    }
+
+    /// "Transactions in SQLite are SERIALIZABLE."
+    ///
+    /// Core derives both `SQL_DEFAULT_TXN_ISOLATION` and the value
+    /// `SQLGetConnectAttr(SQL_ATTR_TXN_ISOLATION)` reports on a fresh
+    /// connection from this, so the two cannot disagree.
+    ///
+    /// Spec: <https://www.sqlite.org/isolation.html>
+    fn default_txn_isolation() -> u32 {
+        SQL_TXN_SERIALIZABLE
+    }
+
+    /// The only level reachable from this driver.
+    ///
+    /// READ COMMITTED and REPEATABLE READ are not SQLite concepts. READ
+    /// UNCOMMITTED needs shared-cache mode — "the only way that one database
+    /// connection can see uncommitted changes on a different database
+    /// connection" — and [`SqliteBackend::connect`] opens with a plain
+    /// `rusqlite::Connection::open`, so it is unreachable.
+    ///
+    /// Returning a single level also means core's default
+    /// [`Backend::set_txn_isolation`] is correct as-is: the one supported
+    /// level is always already in effect, and anything else is rejected with
+    /// `HY024` before it reaches the backend.
+    fn txn_isolation_options() -> u32 {
+        SQL_TXN_SERIALIZABLE
+    }
+
+    /// `SQL_GB_NO_RELATION`: SQLite relates the `GROUP BY` list and the select
+    /// list not at all. It accepts a bare non-aggregated column absent from
+    /// `GROUP BY` (returning an arbitrary row from each group), and accepts
+    /// `GROUP BY` columns and expressions absent from the select list.
+    ///
+    /// Verified in `group_by_is_unrelated_to_the_select_list`.
+    fn group_by() -> u16 {
+        SQL_GB_NO_RELATION
+    }
+
+    /// `SQL_NC_LOW`: SQLite sorts NULLs at the low end — first ascending, last
+    /// descending.
+    fn null_collation() -> u16 {
+        SQL_NC_LOW
+    }
+
+    /// `SQL_CN_ANY`: SQLite accepts a table alias with or without `AS`, and
+    /// places no restriction on the name.
+    fn correlation_name() -> u16 {
+        SQL_CN_ANY
+    }
+
+    /// `SQL_NNC_NON_NULL`: SQLite implements `NOT NULL` column constraints.
+    fn non_nullable_columns() -> u16 {
+        SQL_NNC_NON_NULL
+    }
+
+    /// SQLite takes arbitrary expressions in `ORDER BY`, including over columns
+    /// absent from the select list.
+    fn expressions_in_order_by() -> bool {
+        true
+    }
+
+    /// No SQL-92 conformance level is claimed.
+    ///
+    /// The previous `SQL_SC_SQL92_ENTRY` came from a core default, not from any
+    /// assessment of SQLite, and it contradicted this driver's own answers. The
+    /// spec ties entry level to three values: "a SQL-92 Entry level-conformant
+    /// driver will always return the SQL_GB_GROUP_BY_EQUALS_SELECT option as
+    /// supported", "will always return SQL_CN_ANY", and "will return
+    /// SQL_NNC_NON_NULL". This driver matches the last two and cannot match the
+    /// first — SQLite's `GROUP BY` is deliberately unrelated to the select list
+    /// (see [`SqliteBackend::group_by`]), which is a permissive extension, not
+    /// entry-level behaviour.
+    ///
+    /// `0` is the honest answer: it claims no level rather than asserting one
+    /// the driver demonstrably fails. Raising it later means auditing SQL-92
+    /// entry level properly, not restoring the value core used to invent.
+    fn sql_conformance() -> u32 {
+        0
+    }
+
+    /// `0`: `TIMESTAMPADD` is not supported. `SQLITE_TIMEDATE_FUNCTIONS`
+    /// deliberately omits `SQL_FN_TD_TIMESTAMPADD`, so claiming interval units
+    /// here would describe a function this driver does not offer.
+    fn timedate_add_intervals() -> u32 {
+        0
+    }
+
+    /// `0`: `TIMESTAMPDIFF` is not supported, for the same reason as
+    /// [`SqliteBackend::timedate_add_intervals`].
+    fn timedate_diff_intervals() -> u32 {
+        0
     }
 
     // --- Delegations ---

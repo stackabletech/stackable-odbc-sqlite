@@ -11,25 +11,23 @@ use stackable_odbc_core::types::{
     InfoType, InfoValue, MaxPrecision, MaxScale, Nullable, SQL_AF_ALL, SQL_AF_AVG, SQL_AF_COUNT,
     SQL_AF_DISTINCT, SQL_AF_MAX, SQL_AF_MIN, SQL_AF_SUM, SQL_AGGREGATE_FUNCTIONS,
     SQL_AT_ADD_COLUMN_COLLATION, SQL_AT_ADD_COLUMN_DEFAULT, SQL_AT_ADD_COLUMN_SINGLE,
-    SQL_AT_ADD_TABLE_CONSTRAINT, SQL_AT_CONSTRAINT_NAME_DEFINITION, SQL_CL_START, SQL_CODE_DATE,
-    SQL_CODE_TIME, SQL_CODE_TIMESTAMP, SQL_CU_DML_STATEMENTS, SQL_CU_INDEX_DEFINITION,
-    SQL_CU_TABLE_DEFINITION, SQL_FN_NUM_ABS, SQL_FN_NUM_ROUND, SQL_FN_NUM_SIGN, SQL_FN_STR_ASCII,
-    SQL_FN_STR_CHAR, SQL_FN_STR_CONCAT, SQL_FN_STR_LCASE, SQL_FN_STR_LENGTH, SQL_FN_STR_LTRIM,
-    SQL_FN_STR_OCTET_LENGTH, SQL_FN_STR_REPLACE, SQL_FN_STR_RTRIM, SQL_FN_STR_SOUNDEX,
-    SQL_FN_STR_SUBSTRING, SQL_FN_STR_UCASE, SQL_FN_SYS_IFNULL, SQL_FN_TD_CURDATE,
-    SQL_FN_TD_CURRENT_DATE, SQL_FN_TD_CURRENT_TIME, SQL_FN_TD_CURRENT_TIMESTAMP, SQL_FN_TD_CURTIME,
-    SQL_FN_TD_NOW, SQL_GD_ANY_COLUMN, SQL_GD_ANY_ORDER, SQL_GD_BOUND, SQL_IC_MIXED,
-    SQL_LIKE_ESCAPE_CLAUSE, SQL_NC_LOW, SQL_NUMERIC_FUNCTIONS, SQL_OJ_ALL_COMPARISON_OPS,
-    SQL_OJ_FULL, SQL_OJ_INNER, SQL_OJ_LEFT, SQL_OJ_NESTED, SQL_OJ_NOT_ORDERED, SQL_OJ_RIGHT,
-    SQL_OUTER_JOINS, SQL_SEARCHABLE, SQL_SP_BETWEEN, SQL_SP_COMPARISON, SQL_SP_EXISTS, SQL_SP_IN,
-    SQL_SP_ISNOTNULL, SQL_SP_ISNULL, SQL_SP_LIKE, SQL_SQL92_PREDICATES,
-    SQL_SQL92_RELATIONAL_JOIN_OPERATORS, SQL_SQL92_VALUE_EXPRESSIONS, SQL_SRJO_CROSS_JOIN,
-    SQL_SRJO_EXCEPT_JOIN, SQL_SRJO_FULL_OUTER_JOIN, SQL_SRJO_INNER_JOIN, SQL_SRJO_INTERSECT_JOIN,
-    SQL_SRJO_LEFT_OUTER_JOIN, SQL_SRJO_NATURAL_JOIN, SQL_SRJO_RIGHT_OUTER_JOIN,
-    SQL_STRING_FUNCTIONS, SQL_SU_DML_STATEMENTS, SQL_SU_INDEX_DEFINITION, SQL_SU_TABLE_DEFINITION,
-    SQL_SVE_CASE, SQL_SVE_CAST, SQL_SVE_COALESCE, SQL_SVE_NULLIF, SQL_SYSTEM_FUNCTIONS, SQL_TC_DML,
-    SQL_TIMEDATE_FUNCTIONS, SQL_TXN_SERIALIZABLE, SqlDataType, TypeInfoRow, catalog_column_size,
-    format_odbc_version, parse_dotted_version,
+    SQL_AT_ADD_CONSTRAINT, SQL_AT_ADD_TABLE_CONSTRAINT, SQL_AT_CONSTRAINT_NAME_DEFINITION,
+    SQL_CODE_DATE, SQL_CODE_TIME, SQL_CODE_TIMESTAMP, SQL_FN_NUM_ABS, SQL_FN_NUM_ROUND,
+    SQL_FN_NUM_SIGN, SQL_FN_STR_ASCII, SQL_FN_STR_CHAR, SQL_FN_STR_CONCAT, SQL_FN_STR_LCASE,
+    SQL_FN_STR_LENGTH, SQL_FN_STR_LTRIM, SQL_FN_STR_OCTET_LENGTH, SQL_FN_STR_REPLACE,
+    SQL_FN_STR_RTRIM, SQL_FN_STR_SOUNDEX, SQL_FN_STR_SUBSTRING, SQL_FN_STR_UCASE,
+    SQL_FN_SYS_IFNULL, SQL_FN_TD_CURDATE, SQL_FN_TD_CURRENT_DATE, SQL_FN_TD_CURRENT_TIME,
+    SQL_FN_TD_CURRENT_TIMESTAMP, SQL_FN_TD_CURTIME, SQL_FN_TD_NOW, SQL_GD_ANY_COLUMN,
+    SQL_GD_ANY_ORDER, SQL_GD_BOUND, SQL_IC_MIXED, SQL_LIKE_ESCAPE_CLAUSE, SQL_NUMERIC_FUNCTIONS,
+    SQL_OJ_ALL_COMPARISON_OPS, SQL_OJ_FULL, SQL_OJ_INNER, SQL_OJ_LEFT, SQL_OJ_NESTED,
+    SQL_OJ_NOT_ORDERED, SQL_OJ_RIGHT, SQL_OUTER_JOINS, SQL_SEARCHABLE, SQL_SP_BETWEEN,
+    SQL_SP_COMPARISON, SQL_SP_EXISTS, SQL_SP_IN, SQL_SP_ISNOTNULL, SQL_SP_ISNULL, SQL_SP_LIKE,
+    SQL_SQL92_PREDICATES, SQL_SQL92_RELATIONAL_JOIN_OPERATORS, SQL_SQL92_VALUE_EXPRESSIONS,
+    SQL_SRJO_CROSS_JOIN, SQL_SRJO_EXCEPT_JOIN, SQL_SRJO_FULL_OUTER_JOIN, SQL_SRJO_INNER_JOIN,
+    SQL_SRJO_INTERSECT_JOIN, SQL_SRJO_LEFT_OUTER_JOIN, SQL_SRJO_NATURAL_JOIN,
+    SQL_SRJO_RIGHT_OUTER_JOIN, SQL_STRING_FUNCTIONS, SQL_SVE_CASE, SQL_SVE_CAST, SQL_SVE_COALESCE,
+    SQL_SVE_NULLIF, SQL_SYSTEM_FUNCTIONS, SQL_TC_DML, SQL_TIMEDATE_FUNCTIONS, SQL_TXN_SERIALIZABLE,
+    SqlDataType, TypeInfoRow, catalog_column_size, format_odbc_version, parse_dotted_version,
 };
 
 use super::SqliteBackend;
@@ -39,35 +37,6 @@ use crate::type_conversion::{
     BLOB_DEFAULT_COLUMN_SIZE, DECIMAL_DEFAULT_COLUMN_SIZE, MAX_FRACTIONAL_SECONDS_PRECISION,
     VARCHAR_DEFAULT_COLUMN_SIZE,
 };
-
-/// Whether this driver exposes ODBC catalogs. It does not: `metadata::tables`
-/// reports `TABLE_CAT` as NULL for every row, and a `catalog = "%"` enumeration
-/// returns an empty result set.
-///
-/// The `SQLGetInfo` specification defines five separate info types in terms of
-/// this single fact — `SQL_CATALOG_NAME`, `SQL_CATALOG_TERM`,
-/// `SQL_CATALOG_NAME_SEPARATOR`, `SQL_CATALOG_LOCATION` and
-/// `SQL_CATALOG_USAGE` — so all five are derived from it here rather than
-/// answered independently.
-///
-/// That independence is what went wrong before: the driver answered
-/// `SQL_CATALOG_NAME`, `SQL_CATALOG_LOCATION` and `SQL_CATALOG_USAGE` itself
-/// and let `SQL_CATALOG_TERM` and `SQL_CATALOG_NAME_SEPARATOR` fall through to
-/// `stackable-odbc-core`'s defaults, which name a catalog and a separator. An
-/// application was told catalogs do not exist and given their name in the same
-/// breath. The spec is explicit for both: "An empty string is returned if
-/// catalogs are not supported by the data source."
-///
-/// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlgetinfo-function>
-const SUPPORTS_CATALOGS: bool = false;
-
-/// Whether this driver exposes ODBC schemas. It does not: a `schema = "%"`
-/// enumeration returns an empty result set and `TABLE_SCHEM` is always NULL.
-///
-/// Derives `SQL_SCHEMA_TERM` and `SQL_SCHEMA_USAGE`, for the same reason
-/// [`SUPPORTS_CATALOGS`] derives its five. The spec: "An empty string is
-/// returned if schemas are not supported by the data source."
-const SUPPORTS_SCHEMAS: bool = false;
 
 /// ODBC function IDs for functions this driver implements.
 /// Used by `SQLGetFunctions` to report supported capabilities.
@@ -627,69 +596,7 @@ fn sqlite_get_info(info_type: InfoType) -> Result<InfoValue, SqliteError> {
                 }
             }));
         }
-        // Catalogs and schemas: every value below is derived from
-        // SUPPORTS_CATALOGS / SUPPORTS_SCHEMAS rather than restated, because
-        // the SQLGetInfo spec defines each of them in terms of that one fact.
-        InfoType::CatalogName => {
-            return Ok(InfoValue::String(
-                if SUPPORTS_CATALOGS { "Y" } else { "N" }.into(),
-            ));
-        }
-        InfoType::CatalogTerm => {
-            return Ok(InfoValue::String(
-                if SUPPORTS_CATALOGS { "catalog" } else { "" }.into(),
-            ));
-        }
-        InfoType::CatalogNameSeparator => {
-            return Ok(InfoValue::String(
-                if SUPPORTS_CATALOGS { "." } else { "" }.into(),
-            ));
-        }
-        InfoType::CatalogLocation => {
-            return Ok(InfoValue::U16(if SUPPORTS_CATALOGS {
-                SQL_CL_START
-            } else {
-                0
-            }));
-        }
-        InfoType::CatalogUsage => {
-            return Ok(InfoValue::U32(if SUPPORTS_CATALOGS {
-                SQL_CU_DML_STATEMENTS | SQL_CU_TABLE_DEFINITION | SQL_CU_INDEX_DEFINITION
-            } else {
-                0
-            }));
-        }
-        InfoType::SchemaTerm => {
-            return Ok(InfoValue::String(
-                if SUPPORTS_SCHEMAS { "schema" } else { "" }.into(),
-            ));
-        }
-        InfoType::SchemaUsage => {
-            return Ok(InfoValue::U32(if SUPPORTS_SCHEMAS {
-                SQL_SU_DML_STATEMENTS | SQL_SU_TABLE_DEFINITION | SQL_SU_INDEX_DEFINITION
-            } else {
-                0
-            }));
-        }
-        // Every outer-join form SQLite implements, and every relaxation of
-        // the ON clause the spec asks about. Core's default is 0, which
-        // contradicted this driver's own SQL_OUTER_JOINS = "Y". Each bit is
-        // exercised by `outer_join_capabilities_are_each_live_probed`.
-        InfoType::AlterTable => return Ok(InfoValue::U32(SQLITE_ALTER_TABLE)),
-        InfoType::OuterJoinCapabilities => {
-            return Ok(InfoValue::U32(
-                SQL_OJ_LEFT
-                    | SQL_OJ_RIGHT
-                    | SQL_OJ_FULL
-                    | SQL_OJ_NESTED
-                    | SQL_OJ_NOT_ORDERED
-                    | SQL_OJ_INNER
-                    | SQL_OJ_ALL_COMPARISON_OPS,
-            ));
-        }
         InfoType::IdentifierCase => return Ok(InfoValue::U16(SQL_IC_MIXED)),
-        InfoType::NullCollation => return Ok(InfoValue::U16(SQL_NC_LOW)),
-        InfoType::DefaultTxnIsolation => return Ok(InfoValue::U32(SQL_TXN_SERIALIZABLE)),
         // Only SERIALIZABLE. "Transactions in SQLite are SERIALIZABLE", and
         // READ COMMITTED and REPEATABLE READ do not exist in SQLite at all.
         //
@@ -781,12 +688,30 @@ pub(crate) const SQLITE_AGGREGATE_FUNCTIONS: u32 =
 /// - `SQL_AT_CONSTRAINT_NAME_DEFINITION`, since that `CONSTRAINT <name>` clause
 ///   is exactly what the bit describes.
 ///
+/// - `SQL_AT_ADD_CONSTRAINT`, which despite its name means "`ADD COLUMN` is
+///   supported *with column constraints*", not table constraints. SQLite takes
+///   `NOT NULL` (given a non-null default), `CHECK`, `REFERENCES` and a named
+///   `CONSTRAINT` on an added column. Only `UNIQUE` and `PRIMARY KEY` are
+///   refused, with "Cannot add a UNIQUE column".
+///
 /// Supported by SQLite but *unrepresentable*, so absent by necessity rather
 /// than because SQLite lacks them: unqualified `DROP COLUMN` (3.35.0+) and
-/// unqualified `DROP CONSTRAINT`, for which the bitmap offers only `CASCADE`
-/// and `RESTRICT` variants — and SQLite rejects both keywords, so claiming
-/// either would advertise a syntax an application would send and have refused.
-/// `RENAME TO` and `RENAME COLUMN` have no `SQL_AT_*` bit at all.
+/// unqualified `DROP CONSTRAINT`, for which the ODBC 3.x bitmap offers only
+/// `CASCADE` and `RESTRICT` variants — and SQLite rejects both keywords, so
+/// claiming either would advertise a syntax an application would send and have
+/// refused. `sql.h` does carry ODBC 2.0-era `SQL_AT_ADD_COLUMN` and
+/// `SQL_AT_DROP_COLUMN` bits for the unqualified forms, but the ODBC 3.x
+/// `SQL_ALTER_TABLE` table does not define them, and this driver reports
+/// `SQL_OIC_CORE` against ODBC 3.x. `RENAME TO` and `RENAME COLUMN` have no
+/// bit at all.
+///
+/// Deliberately **not** claimed: the four `SQL_AT_CONSTRAINT_*` deferrability
+/// bits. SQLite implements deferred constraints only inside a foreign-key
+/// clause, and its parser additionally accepts `DEFERRABLE` after a `CHECK` or
+/// `NOT NULL` constraint, where SQL-92 does not allow it and where it has no
+/// effect. Accepting a token is not implementing the attribute, and deriving a
+/// general capability from an FK-only feature plus a permissive parser is
+/// exactly the overstatement these bitmaps invite.
 ///
 /// Genuinely absent: `ALTER COLUMN ... SET DEFAULT` and
 /// `ALTER COLUMN ... DROP DEFAULT` are not SQLite grammar.
@@ -796,9 +721,24 @@ pub(crate) const SQLITE_AGGREGATE_FUNCTIONS: u32 =
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlgetinfo-function>
 /// SQLite: <https://www.sqlite.org/lang_altertable.html>
+/// `SQL_OUTER_JOIN_CAPABILITIES` (115) — every outer-join form SQLite
+/// implements, and every relaxation of the `ON` clause the bitmap asks about.
+///
+/// Each bit is proved by executing the join it describes against the bundled
+/// library in `outer_join_capabilities_are_each_live_probed`; `RIGHT` and
+/// `FULL` arrived in SQLite 3.39.0.
+pub(crate) const SQLITE_OUTER_JOIN_CAPABILITIES: u32 = SQL_OJ_LEFT
+    | SQL_OJ_RIGHT
+    | SQL_OJ_FULL
+    | SQL_OJ_NESTED
+    | SQL_OJ_NOT_ORDERED
+    | SQL_OJ_INNER
+    | SQL_OJ_ALL_COMPARISON_OPS;
+
 pub(crate) const SQLITE_ALTER_TABLE: u32 = SQL_AT_ADD_COLUMN_SINGLE
     | SQL_AT_ADD_COLUMN_DEFAULT
     | SQL_AT_ADD_COLUMN_COLLATION
+    | SQL_AT_ADD_CONSTRAINT
     | SQL_AT_ADD_TABLE_CONSTRAINT
     | SQL_AT_CONSTRAINT_NAME_DEFINITION;
 
@@ -1101,23 +1041,23 @@ mod tests {
         DEFAULT_IDENTIFIER_LEN, InfoType, InfoValue, SQL_AM_NONE, SQL_AT_DROP_COLUMN_CASCADE,
         SQL_AT_DROP_COLUMN_DEFAULT, SQL_AT_DROP_COLUMN_RESTRICT,
         SQL_AT_DROP_TABLE_CONSTRAINT_CASCADE, SQL_AT_DROP_TABLE_CONSTRAINT_RESTRICT,
-        SQL_AT_SET_COLUMN_DEFAULT, SQL_CA1_NEXT, SQL_CB_PRESERVE, SQL_DRIVER_ODBC_VER_STRING,
-        SQL_FN_CVT_CAST, SQL_FN_NUM_CEILING, SQL_FN_NUM_COS, SQL_FN_NUM_FLOOR, SQL_FN_NUM_LOG,
-        SQL_FN_NUM_MOD, SQL_FN_NUM_POWER, SQL_FN_NUM_RAND, SQL_FN_NUM_SQRT, SQL_FN_NUM_TRUNCATE,
-        SQL_FN_STR_BIT_LENGTH, SQL_FN_STR_CHAR_LENGTH, SQL_FN_STR_CHARACTER_LENGTH,
-        SQL_FN_STR_DIFFERENCE, SQL_FN_STR_INSERT, SQL_FN_STR_LEFT, SQL_FN_STR_LOCATE,
-        SQL_FN_STR_LOCATE_2, SQL_FN_STR_POSITION, SQL_FN_STR_REPEAT, SQL_FN_STR_RIGHT,
-        SQL_FN_STR_SPACE, SQL_FN_TD_DAYNAME, SQL_FN_TD_DAYOFMONTH, SQL_FN_TD_EXTRACT,
-        SQL_FN_TD_MONTH, SQL_FN_TD_MONTHNAME, SQL_FN_TD_QUARTER, SQL_FN_TD_TIMESTAMPADD,
-        SQL_FN_TD_TIMESTAMPDIFF, SQL_FN_TD_YEAR, SQL_GB_NO_RELATION, SQL_GD_ANY_COLUMN,
-        SQL_GD_ANY_ORDER, SQL_GD_BOUND, SQL_IC_MIXED, SQL_INSENSITIVE, SQL_MAX_CURSOR_NAME_LEN,
-        SQL_NC_LOW, SQL_OIC_CORE, SQL_SC_SQL92_ENTRY, SQL_SO_FORWARD_ONLY, SQL_SP_MATCH_FULL,
-        SQL_SP_MATCH_PARTIAL, SQL_SP_MATCH_UNIQUE_FULL, SQL_SP_MATCH_UNIQUE_PARTIAL,
-        SQL_SP_OVERLAPS, SQL_SP_QUANTIFIED_COMPARISON, SQL_SP_UNIQUE, SQL_SQ_COMPARISON,
-        SQL_SQ_CORRELATED_SUBQUERIES, SQL_SQ_EXISTS, SQL_SQ_IN, SQL_SQ_QUANTIFIED,
-        SQL_SRJO_CORRESPONDING_CLAUSE, SQL_SRJO_UNION_JOIN, SQL_TC_DML, SQL_TXN_READ_COMMITTED,
-        SQL_TXN_READ_UNCOMMITTED, SQL_TXN_REPEATABLE_READ, SQL_TXN_SERIALIZABLE, SQL_U_UNION,
-        SQL_U_UNION_ALL,
+        SQL_AT_SET_COLUMN_DEFAULT, SQL_CA1_NEXT, SQL_CB_PRESERVE, SQL_CN_ANY,
+        SQL_DRIVER_ODBC_VER_STRING, SQL_FN_CVT_CAST, SQL_FN_NUM_CEILING, SQL_FN_NUM_COS,
+        SQL_FN_NUM_FLOOR, SQL_FN_NUM_LOG, SQL_FN_NUM_MOD, SQL_FN_NUM_POWER, SQL_FN_NUM_RAND,
+        SQL_FN_NUM_SQRT, SQL_FN_NUM_TRUNCATE, SQL_FN_STR_BIT_LENGTH, SQL_FN_STR_CHAR_LENGTH,
+        SQL_FN_STR_CHARACTER_LENGTH, SQL_FN_STR_DIFFERENCE, SQL_FN_STR_INSERT, SQL_FN_STR_LEFT,
+        SQL_FN_STR_LOCATE, SQL_FN_STR_LOCATE_2, SQL_FN_STR_POSITION, SQL_FN_STR_REPEAT,
+        SQL_FN_STR_RIGHT, SQL_FN_STR_SPACE, SQL_FN_TD_DAYNAME, SQL_FN_TD_DAYOFMONTH,
+        SQL_FN_TD_EXTRACT, SQL_FN_TD_MONTH, SQL_FN_TD_MONTHNAME, SQL_FN_TD_QUARTER,
+        SQL_FN_TD_TIMESTAMPADD, SQL_FN_TD_TIMESTAMPDIFF, SQL_FN_TD_YEAR, SQL_GB_NO_RELATION,
+        SQL_GD_ANY_COLUMN, SQL_GD_ANY_ORDER, SQL_GD_BOUND, SQL_IC_MIXED, SQL_INSENSITIVE,
+        SQL_MAX_CURSOR_NAME_LEN, SQL_NC_LOW, SQL_NNC_NON_NULL, SQL_OIC_CORE, SQL_SO_FORWARD_ONLY,
+        SQL_SP_MATCH_FULL, SQL_SP_MATCH_PARTIAL, SQL_SP_MATCH_UNIQUE_FULL,
+        SQL_SP_MATCH_UNIQUE_PARTIAL, SQL_SP_OVERLAPS, SQL_SP_QUANTIFIED_COMPARISON, SQL_SP_UNIQUE,
+        SQL_SQ_COMPARISON, SQL_SQ_CORRELATED_SUBQUERIES, SQL_SQ_EXISTS, SQL_SQ_IN,
+        SQL_SQ_QUANTIFIED, SQL_SRJO_CORRESPONDING_CLAUSE, SQL_SRJO_UNION_JOIN, SQL_TC_DML,
+        SQL_TXN_READ_COMMITTED, SQL_TXN_READ_UNCOMMITTED, SQL_TXN_REPEATABLE_READ,
+        SQL_TXN_SERIALIZABLE, SQL_U_UNION, SQL_U_UNION_ALL,
     };
 
     enum Expected {
@@ -1134,13 +1074,14 @@ mod tests {
         (InfoType::DriverOdbcVer,                 Expected::Str(SQL_DRIVER_ODBC_VER_STRING)),
         (InfoType::SearchPatternEscape,            Expected::Str("\\")),
         (InfoType::IdentifierQuoteChar,            Expected::Str("\"")),
-        // Empty, not "catalog": derived from SUPPORTS_CATALOGS. The spec
+        // Empty, not "catalog": core derives this from
+        // Backend::supports_catalogs, which this driver answers false. The spec
         // requires an empty string when catalogs are unsupported, which
         // SQL_CATALOG_NAME = "N" declares.
         (InfoType::CatalogTerm,                   Expected::Str("")),
-        // Empty, not "schema": derived from SUPPORTS_SCHEMAS, same spec rule.
+        // Empty, not "schema": derived from Backend::supports_schemas.
         (InfoType::SchemaTerm,                    Expected::Str("")),
-        // Empty, not ".": derived from SUPPORTS_CATALOGS, same spec rule.
+        // Empty, not ".": same hook, same spec rule.
         (InfoType::CatalogNameSeparator,           Expected::Str("")),
         (InfoType::ColumnAlias,                   Expected::Str("Y")),
         (InfoType::OrderByColumnsInSelect,         Expected::Str("N")),
@@ -1172,6 +1113,10 @@ mod tests {
         (InfoType::MaxCatalogNameLen,             Expected::U16(DEFAULT_IDENTIFIER_LEN)),
         (InfoType::MaxTableNameLen,               Expected::U16(DEFAULT_IDENTIFIER_LEN)),
         (InfoType::NullCollation,                 Expected::U16(SQL_NC_LOW)),
+        // These three were never in this snapshot: core invented them until it
+        // made them required Backend methods, so nothing here asserted them.
+        (InfoType::CorrelationName,               Expected::U16(SQL_CN_ANY)),
+        (InfoType::NonNullableColumns,            Expected::U16(SQL_NNC_NON_NULL)),
         (InfoType::MaxColumnsInGroupBy,           Expected::U16(0)),
         (InfoType::MaxColumnsInIndex,             Expected::U16(0)),
         (InfoType::MaxColumnsInOrderBy,           Expected::U16(0)),
@@ -1207,7 +1152,11 @@ mod tests {
         (InfoType::OuterJoinCapabilities,         Expected::U32(
             SQL_OJ_LEFT | SQL_OJ_RIGHT | SQL_OJ_FULL | SQL_OJ_NESTED
                 | SQL_OJ_NOT_ORDERED | SQL_OJ_INNER | SQL_OJ_ALL_COMPARISON_OPS)),
-        (InfoType::SqlConformance,                Expected::U32(SQL_SC_SQL92_ENTRY)),
+        // 0, not SQL_SC_SQL92_ENTRY: entry level requires
+        // SQL_GB_GROUP_BY_EQUALS_SELECT, and SQLite accepts a bare
+        // non-aggregated column absent from GROUP BY. See
+        // SqliteBackend::sql_conformance.
+        (InfoType::SqlConformance,                Expected::U32(0)),
         (InfoType::OdbcInterfaceConformance,      Expected::U32(SQL_OIC_CORE)),
         (InfoType::AsyncMode,                     Expected::U32(SQL_AM_NONE)),
         (InfoType::AsyncDbcFunctions,             Expected::U32(0)),
@@ -1308,6 +1257,39 @@ mod tests {
     /// If a future `rusqlite`/`libsqlite3-sys` bump silently drops one of
     /// these compile flags, this test fails with a clear "no such function"
     /// error instead of the bitmap silently overclaiming forever.
+    /// SQLite's `GROUP BY` is unrelated to the select list, which is what
+    /// `SQL_GB_NO_RELATION` means and what rules out the SQL-92 entry level.
+    ///
+    /// The spec: "a SQL-92 Entry level-conformant driver will always return the
+    /// SQL_GB_GROUP_BY_EQUALS_SELECT option as supported." SQLite does the
+    /// opposite in both directions, so `SqliteBackend::sql_conformance` claims
+    /// no level rather than one this contradicts.
+    #[test]
+    fn group_by_is_unrelated_to_the_select_list() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE gb (a INTEGER, b TEXT);
+             INSERT INTO gb VALUES (1, 'x'), (1, 'y'), (2, 'z');",
+        )
+        .unwrap();
+
+        // A non-aggregated column absent from GROUP BY: rejected by anything
+        // stricter than SQL_GB_NO_RELATION.
+        conn.prepare("SELECT a, b, count(*) FROM gb GROUP BY a")
+            .expect("SQLite accepts a bare non-aggregated column");
+
+        // And the converse: a GROUP BY column absent from the select list.
+        conn.prepare("SELECT count(*) FROM gb GROUP BY b")
+            .expect("SQLite accepts a GROUP BY column absent from the select list");
+
+        assert_eq!(SqliteBackend::group_by(), SQL_GB_NO_RELATION);
+        assert_eq!(
+            SqliteBackend::sql_conformance(),
+            0,
+            "SQL_GB_NO_RELATION rules out the SQL-92 entry level"
+        );
+    }
+
     /// The five catalog info types and the two schema info types must agree
     /// with each other. This is the test the previous arrangement lacked:
     /// `SQL_CATALOG_NAME`, `SQL_CATALOG_LOCATION` and `SQL_CATALOG_USAGE` said
@@ -1316,7 +1298,8 @@ mod tests {
     /// one, and nothing tied the two groups together.
     ///
     /// Asserts the spec's rule, not the current values, so it keeps holding if
-    /// [`SUPPORTS_CATALOGS`] or [`SUPPORTS_SCHEMAS`] ever flips.
+    /// [`SqliteBackend::supports_catalogs`] or
+    /// [`SqliteBackend::supports_schemas`] ever flips.
     #[test]
     fn catalog_and_schema_info_types_agree_with_each_other() {
         let get = |t: InfoType| sqlite_get_info(t).expect("info type answered");
@@ -1326,8 +1309,9 @@ mod tests {
             InfoValue::String(ref s) if s == "Y"
         );
         assert_eq!(
-            catalogs_supported, SUPPORTS_CATALOGS,
-            "SQL_CATALOG_NAME must follow SUPPORTS_CATALOGS"
+            catalogs_supported,
+            SqliteBackend::supports_catalogs(),
+            "SQL_CATALOG_NAME must follow Backend::supports_catalogs"
         );
 
         if catalogs_supported {
@@ -1360,7 +1344,7 @@ mod tests {
             );
         }
 
-        if SUPPORTS_SCHEMAS {
+        if SqliteBackend::supports_schemas() {
             assert_ne!(get(InfoType::SchemaTerm), InfoValue::String(String::new()));
         } else {
             assert_eq!(
