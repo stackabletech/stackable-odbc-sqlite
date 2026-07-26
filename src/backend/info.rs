@@ -597,6 +597,26 @@ fn sqlite_get_info(info_type: InfoType) -> Result<InfoValue, SqliteError> {
             }));
         }
         InfoType::IdentifierCase => return Ok(InfoValue::U16(SQL_IC_MIXED)),
+        // "Y": SQLite implements the whole Integrity Enhancement Facility --
+        // PRIMARY KEY, UNIQUE, NOT NULL, CHECK, DEFAULT and FOREIGN KEY with
+        // referential actions -- and this build enforces all of it. Core
+        // defaults to "N", which is the right conservative answer for a data
+        // source without it and the wrong one here.
+        //
+        // Referential integrity in particular is enforced by construction, not
+        // by chance: the bundled library is compiled with
+        // SQLITE_DEFAULT_FOREIGN_KEYS, so `PRAGMA foreign_keys` is already on
+        // when a connection opens. Plain SQLite defaults it off for backward
+        // compatibility, so this claim is a property of *this* build.
+        // `integrity_enhancement_facility_is_actually_enforced` asserts that,
+        // and fails loudly if a dependency change ever takes the compile
+        // option away -- switching `rusqlite` off `bundled` to a system SQLite
+        // would.
+        //
+        // `SQLForeignKeys` is genuinely implemented (`metadata::foreign_keys`,
+        // over `PRAGMA foreign_key_list`), so an application that acts on this
+        // "Y" finds the metadata it then asks for.
+        InfoType::Integrity => return Ok(InfoValue::String("Y".into())),
         // Only SERIALIZABLE. "Transactions in SQLite are SERIALIZABLE", and
         // READ COMMITTED and REPEATABLE READ do not exist in SQLite at all.
         //
@@ -1092,7 +1112,9 @@ mod tests {
         (InfoType::DataSourceReadOnly,             Expected::Str("N")),
         (InfoType::AccessibleTables,              Expected::Str("Y")),
         (InfoType::AccessibleProcedures,          Expected::Str("N")),
-        (InfoType::Integrity,                     Expected::Str("N")),
+        // "Y", not "N": SQLite implements and enforces the Integrity
+        // Enhancement Facility. See the arm in sqlite_get_info.
+        (InfoType::Integrity,                     Expected::Str("Y")),
         (InfoType::SpecialCharacters,             Expected::Str("")),
         (InfoType::XopenCliYear,                  Expected::Str("1995")),
         (InfoType::CollationSeq,                  Expected::Str("")),
@@ -1257,6 +1279,64 @@ mod tests {
     /// If a future `rusqlite`/`libsqlite3-sys` bump silently drops one of
     /// these compile flags, this test fails with a clear "no such function"
     /// error instead of the bitmap silently overclaiming forever.
+    /// Every part of the Integrity Enhancement Facility this driver claims via
+    /// `SQL_INTEGRITY = "Y"`, proved by making the bundled library reject a
+    /// violation rather than by reading its documentation.
+    ///
+    /// Referential integrity is the fragile one. Plain SQLite defaults
+    /// `PRAGMA foreign_keys` to off for backward compatibility; this build is
+    /// compiled with `SQLITE_DEFAULT_FOREIGN_KEYS`, so it is on before the
+    /// driver does anything. Dropping `rusqlite`'s `bundled` feature for a
+    /// system SQLite would silently turn enforcement off and make the claim
+    /// false, so the pragma is asserted directly.
+    #[test]
+    fn integrity_enhancement_facility_is_actually_enforced() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+
+        let fk_on: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            fk_on, 1,
+            "foreign keys are off, so SQL_INTEGRITY = \"Y\" is a false claim -- \
+             this build should carry SQLITE_DEFAULT_FOREIGN_KEYS"
+        );
+
+        conn.execute_batch(
+            "CREATE TABLE parent (id INTEGER PRIMARY KEY);
+             CREATE TABLE child (pid INTEGER REFERENCES parent(id) ON DELETE CASCADE);
+             CREATE TABLE con (v INTEGER CHECK (v > 0), u INTEGER UNIQUE, n INTEGER NOT NULL DEFAULT 7);",
+        )
+        .unwrap();
+
+        for (feature, sql) in [
+            ("FOREIGN KEY", "INSERT INTO child VALUES (999)"),
+            ("CHECK", "INSERT INTO con (v, n) VALUES (-1, 1)"),
+            ("NOT NULL", "INSERT INTO con (v, n) VALUES (1, NULL)"),
+            (
+                "UNIQUE",
+                "INSERT INTO con (u, n) VALUES (1, 1); INSERT INTO con (u, n) VALUES (1, 2)",
+            ),
+        ] {
+            assert!(
+                conn.execute_batch(sql).is_err(),
+                "{feature} is not enforced, so SQL_INTEGRITY = \"Y\" overstates\n  {sql}"
+            );
+        }
+
+        // DEFAULT, and a referential action rather than mere rejection.
+        conn.execute_batch("INSERT INTO con (v, u) VALUES (1, 42)")
+            .expect("DEFAULT should supply the NOT NULL column");
+        conn.execute_batch("INSERT INTO parent VALUES (1); INSERT INTO child VALUES (1);")
+            .unwrap();
+        conn.execute_batch("DELETE FROM parent WHERE id = 1")
+            .unwrap();
+        let orphans: i64 = conn
+            .query_row("SELECT count(*) FROM child", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(orphans, 0, "ON DELETE CASCADE did not cascade");
+    }
+
     /// SQLite's `GROUP BY` is unrelated to the select list, which is what
     /// `SQL_GB_NO_RELATION` means and what rules out the SQL-92 entry level.
     ///
