@@ -58,6 +58,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an added column; only `UNIQUE` and `PRIMARY KEY` are refused. The bit was
   unavailable when this driver first set the bitmap.
 
+- `SQL_SUBQUERIES`, `SQL_COLUMN_ALIAS`, `SQL_CONCAT_NULL_BEHAVIOR`,
+  `SQL_UNION`, `SQL_CONVERT_FUNCTIONS`, `SQL_ORDER_BY_COLUMNS_IN_SELECT`,
+  `SQL_ACCESSIBLE_TABLES`, `SQL_DATA_SOURCE_READ_ONLY` and
+  `SQL_SEARCH_PATTERN_ESCAPE` are now stated by this driver rather than
+  inherited from `stackable-odbc-core`, which had no way to know most of them.
+  Every value was verified against the bundled library; only `SQL_SUBQUERIES`
+  changed (see `Fixed`).
+
 - `SQL_GROUP_BY`, `SQL_NULL_COLLATION`, `SQL_CORRELATION_NAME`,
   `SQL_NON_NULLABLE_COLUMNS`, `SQL_EXPRESSIONS_IN_ORDERBY`,
   `SQL_TIMEDATE_ADD_INTERVALS` and `SQL_TIMEDATE_DIFF_INTERVALS` are now stated
@@ -95,6 +103,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it describes against the bundled library, not assumed from release notes.
 
 ### Fixed
+
+- `SQL_SUBQUERIES` no longer claims `SQL_SQ_QUANTIFIED`. `< ALL`, `< ANY` and
+  `< SOME` are all syntax errors in SQLite, which this driver already recorded
+  by excluding `SQL_SP_QUANTIFIED_COMPARISON` from `SQL_SQL92_PREDICATES` — so
+  the same capability was denied by one info type and advertised by another,
+  the advertised half coming from a `stackable-odbc-core` default. A tool
+  reading `SQL_SUBQUERIES` would have pushed down a predicate SQLite rejects.
+
+- `SQL_KEYWORDS` now lists SQLite's own keywords instead of an empty string.
+  The list is read out of the linked library through `sqlite3_keyword_count` /
+  `sqlite3_keyword_name` and filtered against the ODBC reserved list, which the
+  specification defines this value as excluding. An empty list claimed SQLite
+  has no keywords of its own — it has `AUTOINCREMENT`, `PRAGMA`, `VACUUM`,
+  `GLOB`, `REGEXP` and many more, and applications read this to decide which
+  identifiers need quoting.
 
 - `{fn CURRENT_DATE()}`, `{fn CURRENT_TIME()}` and `{fn CURRENT_TIMESTAMP()}`
   now execute. `SQL_TIMEDATE_FUNCTIONS` advertised all three, but nothing

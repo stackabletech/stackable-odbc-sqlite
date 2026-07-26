@@ -12,22 +12,25 @@ use stackable_odbc_core::types::{
     SQL_AF_DISTINCT, SQL_AF_MAX, SQL_AF_MIN, SQL_AF_SUM, SQL_AGGREGATE_FUNCTIONS,
     SQL_AT_ADD_COLUMN_COLLATION, SQL_AT_ADD_COLUMN_DEFAULT, SQL_AT_ADD_COLUMN_SINGLE,
     SQL_AT_ADD_CONSTRAINT, SQL_AT_ADD_TABLE_CONSTRAINT, SQL_AT_CONSTRAINT_NAME_DEFINITION,
-    SQL_CODE_DATE, SQL_CODE_TIME, SQL_CODE_TIMESTAMP, SQL_FN_NUM_ABS, SQL_FN_NUM_ROUND,
-    SQL_FN_NUM_SIGN, SQL_FN_STR_ASCII, SQL_FN_STR_CHAR, SQL_FN_STR_CONCAT, SQL_FN_STR_LCASE,
-    SQL_FN_STR_LENGTH, SQL_FN_STR_LTRIM, SQL_FN_STR_OCTET_LENGTH, SQL_FN_STR_REPLACE,
-    SQL_FN_STR_RTRIM, SQL_FN_STR_SOUNDEX, SQL_FN_STR_SUBSTRING, SQL_FN_STR_UCASE,
-    SQL_FN_SYS_IFNULL, SQL_FN_TD_CURDATE, SQL_FN_TD_CURRENT_DATE, SQL_FN_TD_CURRENT_TIME,
-    SQL_FN_TD_CURRENT_TIMESTAMP, SQL_FN_TD_CURTIME, SQL_FN_TD_NOW, SQL_GD_ANY_COLUMN,
-    SQL_GD_ANY_ORDER, SQL_GD_BOUND, SQL_IC_MIXED, SQL_LIKE_ESCAPE_CLAUSE, SQL_NUMERIC_FUNCTIONS,
-    SQL_OJ_ALL_COMPARISON_OPS, SQL_OJ_FULL, SQL_OJ_INNER, SQL_OJ_LEFT, SQL_OJ_NESTED,
-    SQL_OJ_NOT_ORDERED, SQL_OJ_RIGHT, SQL_OUTER_JOINS, SQL_SEARCHABLE, SQL_SP_BETWEEN,
-    SQL_SP_COMPARISON, SQL_SP_EXISTS, SQL_SP_IN, SQL_SP_ISNOTNULL, SQL_SP_ISNULL, SQL_SP_LIKE,
-    SQL_SQL92_PREDICATES, SQL_SQL92_RELATIONAL_JOIN_OPERATORS, SQL_SQL92_VALUE_EXPRESSIONS,
-    SQL_SRJO_CROSS_JOIN, SQL_SRJO_EXCEPT_JOIN, SQL_SRJO_FULL_OUTER_JOIN, SQL_SRJO_INNER_JOIN,
-    SQL_SRJO_INTERSECT_JOIN, SQL_SRJO_LEFT_OUTER_JOIN, SQL_SRJO_NATURAL_JOIN,
-    SQL_SRJO_RIGHT_OUTER_JOIN, SQL_STRING_FUNCTIONS, SQL_SVE_CASE, SQL_SVE_CAST, SQL_SVE_COALESCE,
-    SQL_SVE_NULLIF, SQL_SYSTEM_FUNCTIONS, SQL_TC_DML, SQL_TIMEDATE_FUNCTIONS, SQL_TXN_SERIALIZABLE,
-    SqlDataType, TypeInfoRow, catalog_column_size, format_odbc_version, parse_dotted_version,
+    SQL_CODE_DATE, SQL_CODE_TIME, SQL_CODE_TIMESTAMP, SQL_FN_CVT_CAST, SQL_FN_NUM_ABS,
+    SQL_FN_NUM_ROUND, SQL_FN_NUM_SIGN, SQL_FN_STR_ASCII, SQL_FN_STR_CHAR, SQL_FN_STR_CONCAT,
+    SQL_FN_STR_LCASE, SQL_FN_STR_LENGTH, SQL_FN_STR_LTRIM, SQL_FN_STR_OCTET_LENGTH,
+    SQL_FN_STR_REPLACE, SQL_FN_STR_RTRIM, SQL_FN_STR_SOUNDEX, SQL_FN_STR_SUBSTRING,
+    SQL_FN_STR_UCASE, SQL_FN_SYS_IFNULL, SQL_FN_TD_CURDATE, SQL_FN_TD_CURRENT_DATE,
+    SQL_FN_TD_CURRENT_TIME, SQL_FN_TD_CURRENT_TIMESTAMP, SQL_FN_TD_CURTIME, SQL_FN_TD_NOW,
+    SQL_GD_ANY_COLUMN, SQL_GD_ANY_ORDER, SQL_GD_BOUND, SQL_IC_MIXED, SQL_KEYWORDS,
+    SQL_LIKE_ESCAPE_CLAUSE, SQL_NUMERIC_FUNCTIONS, SQL_OJ_ALL_COMPARISON_OPS, SQL_OJ_FULL,
+    SQL_OJ_INNER, SQL_OJ_LEFT, SQL_OJ_NESTED, SQL_OJ_NOT_ORDERED, SQL_OJ_RIGHT, SQL_OUTER_JOINS,
+    SQL_SEARCHABLE, SQL_SP_BETWEEN, SQL_SP_COMPARISON, SQL_SP_EXISTS, SQL_SP_IN, SQL_SP_ISNOTNULL,
+    SQL_SP_ISNULL, SQL_SP_LIKE, SQL_SQ_COMPARISON, SQL_SQ_CORRELATED_SUBQUERIES, SQL_SQ_EXISTS,
+    SQL_SQ_IN, SQL_SQL92_PREDICATES, SQL_SQL92_RELATIONAL_JOIN_OPERATORS,
+    SQL_SQL92_VALUE_EXPRESSIONS, SQL_SRJO_CROSS_JOIN, SQL_SRJO_EXCEPT_JOIN,
+    SQL_SRJO_FULL_OUTER_JOIN, SQL_SRJO_INNER_JOIN, SQL_SRJO_INTERSECT_JOIN,
+    SQL_SRJO_LEFT_OUTER_JOIN, SQL_SRJO_NATURAL_JOIN, SQL_SRJO_RIGHT_OUTER_JOIN,
+    SQL_STRING_FUNCTIONS, SQL_SVE_CASE, SQL_SVE_CAST, SQL_SVE_COALESCE, SQL_SVE_NULLIF,
+    SQL_SYSTEM_FUNCTIONS, SQL_TC_DML, SQL_TIMEDATE_FUNCTIONS, SQL_TXN_SERIALIZABLE, SQL_U_UNION,
+    SQL_U_UNION_ALL, SqlDataType, TypeInfoRow, catalog_column_size, format_odbc_version,
+    parse_dotted_version,
 };
 
 use super::SqliteBackend;
@@ -741,6 +744,24 @@ pub(crate) const SQLITE_AGGREGATE_FUNCTIONS: u32 =
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlgetinfo-function>
 /// SQLite: <https://www.sqlite.org/lang_altertable.html>
+/// `SQL_SUBQUERIES` (95) — the subquery forms SQLite accepts.
+///
+/// `SQL_SQ_QUANTIFIED` is deliberately absent. It covers `< ALL` / `< ANY` /
+/// `< SOME`, which SQLite does not parse — the same finding
+/// `sql92_predicates_excludes_quantified_comparison_and_match` records for
+/// `SQL_SP_QUANTIFIED_COMPARISON`. Core's default claimed it, so this driver
+/// denied quantified comparison in one info type and asserted it in another.
+/// Each remaining bit is exercised by `subqueries_are_each_live_probed`.
+pub(crate) const SQLITE_SUBQUERIES: u32 =
+    SQL_SQ_COMPARISON | SQL_SQ_EXISTS | SQL_SQ_IN | SQL_SQ_CORRELATED_SUBQUERIES;
+
+/// `SQL_UNION` (96) — SQLite has both `UNION` and `UNION ALL`.
+pub(crate) const SQLITE_UNION: u32 = SQL_U_UNION | SQL_U_UNION_ALL;
+
+/// `SQL_CONVERT_FUNCTIONS` (48) — SQLite's `CAST(x AS type)`. It has no
+/// ODBC `CONVERT` scalar function, so only the `CAST` bit is claimed.
+pub(crate) const SQLITE_CONVERT_FUNCTIONS: u32 = SQL_FN_CVT_CAST;
+
 /// `SQL_OUTER_JOIN_CAPABILITIES` (115) — every outer-join form SQLite
 /// implements, and every relaxation of the `ON` clause the bitmap asks about.
 ///
@@ -881,6 +902,313 @@ pub(crate) const SQLITE_TIMEDATE_FUNCTIONS: u32 = SQL_FN_TD_NOW
     | SQL_FN_TD_CURRENT_TIME
     | SQL_FN_TD_CURRENT_TIMESTAMP;
 
+/// The ODBC reserved keywords, from Appendix C of the specification.
+///
+/// `SQL_KEYWORDS` is defined as the data source's keywords *excluding* these:
+/// "This list does not contain keywords specific to ODBC or keywords used by
+/// both the data source and ODBC." Roughly the SQL-92 reserved list, which is
+/// why one list suffices.
+///
+/// Written in the order the specification page lists them rather than sorted,
+/// so a reviewer can diff it against the source. Nothing here depends on the
+/// order — [`sqlite_specific_keywords`] does a linear membership test, and
+/// `odbc_reserved_keywords_are_unique` guards the one property that matters.
+///
+/// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/reserved-keywords>
+const ODBC_RESERVED_KEYWORDS: &[&str] = &[
+    "ABSOLUTE",
+    "ACTION",
+    "ADA",
+    "ADD",
+    "ALL",
+    "ALLOCATE",
+    "ALTER",
+    "AND",
+    "ANY",
+    "ARE",
+    "AS",
+    "ASC",
+    "ASSERTION",
+    "AT",
+    "AUTHORIZATION",
+    "AVG",
+    "BEGIN",
+    "BETWEEN",
+    "BIT",
+    "BIT_LENGTH",
+    "BOTH",
+    "BY",
+    "CASCADE",
+    "CASCADED",
+    "CASE",
+    "CAST",
+    "CATALOG",
+    "CHAR",
+    "CHAR_LENGTH",
+    "CHARACTER",
+    "CHARACTER_LENGTH",
+    "CHECK",
+    "CLOSE",
+    "COALESCE",
+    "COLLATE",
+    "COLLATION",
+    "COLUMN",
+    "COMMIT",
+    "CONNECT",
+    "CONNECTION",
+    "CONSTRAINT",
+    "CONSTRAINTS",
+    "CONTINUE",
+    "CONVERT",
+    "CORRESPONDING",
+    "COUNT",
+    "CREATE",
+    "CROSS",
+    "CURRENT",
+    "CURRENT_DATE",
+    "CURRENT_TIME",
+    "CURRENT_TIMESTAMP",
+    "CURRENT_USER",
+    "CURSOR",
+    "DATE",
+    "DAY",
+    "DEALLOCATE",
+    "DEC",
+    "DECIMAL",
+    "DECLARE",
+    "DEFAULT",
+    "DEFERRABLE",
+    "DEFERRED",
+    "DELETE",
+    "DESC",
+    "DESCRIBE",
+    "DESCRIPTOR",
+    "DIAGNOSTICS",
+    "DISCONNECT",
+    "DISTINCT",
+    "DOMAIN",
+    "DOUBLE",
+    "DROP",
+    "ELSE",
+    "END",
+    "END-EXEC",
+    "ESCAPE",
+    "EXCEPT",
+    "EXCEPTION",
+    "EXEC",
+    "EXECUTE",
+    "EXISTS",
+    "EXTERNAL",
+    "EXTRACT",
+    "FALSE",
+    "FETCH",
+    "FIRST",
+    "FLOAT",
+    "FOR",
+    "FOREIGN",
+    "FORTRAN",
+    "FOUND",
+    "FROM",
+    "FULL",
+    "GET",
+    "GLOBAL",
+    "GO",
+    "GOTO",
+    "GRANT",
+    "GROUP",
+    "HAVING",
+    "HOUR",
+    "IDENTITY",
+    "IMMEDIATE",
+    "IN",
+    "INCLUDE",
+    "INDEX",
+    "INDICATOR",
+    "INITIALLY",
+    "INNER",
+    "INPUT",
+    "INSENSITIVE",
+    "INSERT",
+    "INT",
+    "INTEGER",
+    "INTERSECT",
+    "INTERVAL",
+    "INTO",
+    "IS",
+    "ISOLATION",
+    "JOIN",
+    "KEY",
+    "LANGUAGE",
+    "LAST",
+    "LEADING",
+    "LEFT",
+    "LEVEL",
+    "LIKE",
+    "LOCAL",
+    "LOWER",
+    "MATCH",
+    "MAX",
+    "MIN",
+    "MINUTE",
+    "MODULE",
+    "MONTH",
+    "NAMES",
+    "NATIONAL",
+    "NATURAL",
+    "NCHAR",
+    "NEXT",
+    "NO",
+    "NONE",
+    "NOT",
+    "NULL",
+    "NULLIF",
+    "NUMERIC",
+    "OCTET_LENGTH",
+    "OF",
+    "ON",
+    "ONLY",
+    "OPEN",
+    "OPTION",
+    "OR",
+    "ORDER",
+    "OUTER",
+    "OUTPUT",
+    "OVERLAPS",
+    "PAD",
+    "PARTIAL",
+    "PASCAL",
+    "POSITION",
+    "PRECISION",
+    "PREPARE",
+    "PRESERVE",
+    "PRIMARY",
+    "PRIOR",
+    "PRIVILEGES",
+    "PROCEDURE",
+    "PUBLIC",
+    "READ",
+    "REAL",
+    "REFERENCES",
+    "RELATIVE",
+    "RESTRICT",
+    "REVOKE",
+    "RIGHT",
+    "ROLLBACK",
+    "ROWS",
+    "SCHEMA",
+    "SCROLL",
+    "SECOND",
+    "SECTION",
+    "SELECT",
+    "SESSION",
+    "SESSION_USER",
+    "SET",
+    "SIZE",
+    "SMALLINT",
+    "SOME",
+    "SPACE",
+    "SQL",
+    "SQLCA",
+    "SQLCODE",
+    "SQLERROR",
+    "SQLSTATE",
+    "SQLWARNING",
+    "SUBSTRING",
+    "SUM",
+    "SYSTEM_USER",
+    "TABLE",
+    "TEMPORARY",
+    "THEN",
+    "TIME",
+    "TIMESTAMP",
+    "TIMEZONE_HOUR",
+    "TIMEZONE_MINUTE",
+    "TO",
+    "TRAILING",
+    "TRANSACTION",
+    "TRANSLATE",
+    "TRANSLATION",
+    "TRIM",
+    "TRUE",
+    "UNION",
+    "UNIQUE",
+    "UNKNOWN",
+    "UPDATE",
+    "UPPER",
+    "USAGE",
+    "USER",
+    "USING",
+    "VALUE",
+    "VALUES",
+    "VARCHAR",
+    "VARYING",
+    "VIEW",
+    "WHEN",
+    "WHENEVER",
+    "WHERE",
+    "WITH",
+    "WORK",
+    "WRITE",
+    "YEAR",
+    "ZONE",
+];
+
+/// `SQL_KEYWORDS` (89): SQLite's own keywords, minus those ODBC already
+/// reserves, as a comma-separated list.
+///
+/// The list is read out of the linked SQLite library through
+/// `sqlite3_keyword_count` / `sqlite3_keyword_name` rather than transcribed
+/// from <https://www.sqlite.org/lang_keywords.html>. A hand-copied list would
+/// describe whichever SQLite the author was reading about; this describes the
+/// one the driver is actually linked against, and needs no maintenance when
+/// that changes. It is the same reason the `ALTER TABLE` and outer-join
+/// bitmaps are live-probed.
+///
+/// `stackable-odbc-core` answers this info type with an empty string, which is
+/// a valid empty list and says SQLite has no keywords of its own. It has
+/// plenty — `AUTOINCREMENT`, `PRAGMA`, `VACUUM`, `GLOB`, `REGEXP` — and
+/// applications read this to decide which identifiers need quoting, so an
+/// empty list can leave a generated identifier unquoted where it collides.
+///
+/// Computed once: the underlying table is fixed at link time.
+fn sqlite_specific_keywords() -> &'static str {
+    static KEYWORDS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    KEYWORDS.get_or_init(|| {
+        let count = unsafe { rusqlite::ffi::sqlite3_keyword_count() };
+        let mut names: Vec<&'static str> = Vec::with_capacity(count.max(0) as usize);
+
+        for i in 0..count {
+            let mut ptr: *const std::ffi::c_char = std::ptr::null();
+            let mut len: std::ffi::c_int = 0;
+            // SAFETY: `i` is in `0..sqlite3_keyword_count()`, the range the API
+            // defines. On success it writes a pointer into SQLite's own static
+            // keyword table, valid for the life of the process, and its length;
+            // neither is owned by the caller, so the `'static` borrow is sound.
+            let rc = unsafe { rusqlite::ffi::sqlite3_keyword_name(i, &mut ptr, &mut len) };
+            if rc != rusqlite::ffi::SQLITE_OK || ptr.is_null() || len <= 0 {
+                continue;
+            }
+            // SAFETY: as above — `ptr`/`len` describe a live, static, ASCII
+            // keyword that SQLite never mutates or frees.
+            let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+            let Ok(name) = std::str::from_utf8(bytes) else {
+                continue;
+            };
+            if !ODBC_RESERVED_KEYWORDS
+                .iter()
+                .any(|r| r.eq_ignore_ascii_case(name))
+            {
+                names.push(name);
+            }
+        }
+
+        // SQLite reports them in its own table order; sort so the value is
+        // stable for anything that diffs or caches it.
+        names.sort_unstable();
+        names.join(",")
+    })
+}
+
 pub(super) fn get_info_raw(
     _conn: &SqliteConnection,
     info_type: u16,
@@ -928,6 +1256,11 @@ pub(super) fn get_info_raw(
         // since 3.39.0; this build is 3.53.2).
         SQL_LIKE_ESCAPE_CLAUSE => Some(Ok(InfoValue::String("Y".into()))),
         SQL_OUTER_JOINS => Some(Ok(InfoValue::String("Y".into()))),
+        // SQLite's own keywords, read from the linked library. Core answers
+        // this with an empty string, which claims SQLite has none of its own.
+        SQL_KEYWORDS => Some(Ok(InfoValue::String(
+            sqlite_specific_keywords().to_string(),
+        ))),
         _ => common_get_info_raw::<SqliteBackend>(info_type).map(Ok),
     }
 }
@@ -1062,9 +1395,9 @@ mod tests {
         SQL_AT_DROP_COLUMN_CASCADE, SQL_AT_DROP_COLUMN_DEFAULT, SQL_AT_DROP_COLUMN_RESTRICT,
         SQL_AT_DROP_TABLE_CONSTRAINT_CASCADE, SQL_AT_DROP_TABLE_CONSTRAINT_RESTRICT,
         SQL_AT_SET_COLUMN_DEFAULT, SQL_CA1_NEXT, SQL_CB_PRESERVE, SQL_CN_ANY,
-        SQL_DRIVER_ODBC_VER_STRING, SQL_FN_CVT_CAST, SQL_FN_NUM_CEILING, SQL_FN_NUM_COS,
-        SQL_FN_NUM_FLOOR, SQL_FN_NUM_LOG, SQL_FN_NUM_MOD, SQL_FN_NUM_POWER, SQL_FN_NUM_RAND,
-        SQL_FN_NUM_SQRT, SQL_FN_NUM_TRUNCATE, SQL_FN_STR_BIT_LENGTH, SQL_FN_STR_CHAR_LENGTH,
+        SQL_DRIVER_ODBC_VER_STRING, SQL_FN_NUM_CEILING, SQL_FN_NUM_COS, SQL_FN_NUM_FLOOR,
+        SQL_FN_NUM_LOG, SQL_FN_NUM_MOD, SQL_FN_NUM_POWER, SQL_FN_NUM_RAND, SQL_FN_NUM_SQRT,
+        SQL_FN_NUM_TRUNCATE, SQL_FN_STR_BIT_LENGTH, SQL_FN_STR_CHAR_LENGTH,
         SQL_FN_STR_CHARACTER_LENGTH, SQL_FN_STR_DIFFERENCE, SQL_FN_STR_INSERT, SQL_FN_STR_LEFT,
         SQL_FN_STR_LOCATE, SQL_FN_STR_LOCATE_2, SQL_FN_STR_POSITION, SQL_FN_STR_REPEAT,
         SQL_FN_STR_RIGHT, SQL_FN_STR_SPACE, SQL_FN_TD_DAYNAME, SQL_FN_TD_DAYOFMONTH,
@@ -1077,7 +1410,7 @@ mod tests {
         SQL_SQ_COMPARISON, SQL_SQ_CORRELATED_SUBQUERIES, SQL_SQ_EXISTS, SQL_SQ_IN,
         SQL_SQ_QUANTIFIED, SQL_SRJO_CORRESPONDING_CLAUSE, SQL_SRJO_UNION_JOIN, SQL_TC_DML,
         SQL_TXN_READ_COMMITTED, SQL_TXN_READ_UNCOMMITTED, SQL_TXN_REPEATABLE_READ,
-        SQL_TXN_SERIALIZABLE, SQL_U_UNION, SQL_U_UNION_ALL,
+        SQL_TXN_SERIALIZABLE,
     };
 
     enum Expected {
@@ -1156,11 +1489,14 @@ mod tests {
         // CursorSensitivity is SQLUINTEGER per spec, not SQLUSMALLINT -- see
         // the matching comment in stackable-odbc-core's default_get_info.
         (InfoType::CursorSensitivity,             Expected::U32(SQL_INSENSITIVE as u32)),
-        (InfoType::Subqueries,                    Expected::U32(SQL_SQ_COMPARISON | SQL_SQ_EXISTS | SQL_SQ_IN | SQL_SQ_QUANTIFIED | SQL_SQ_CORRELATED_SUBQUERIES)),
-        (InfoType::UnionStatement,                Expected::U32(SQL_U_UNION | SQL_U_UNION_ALL)),
+        // SQL_SQ_QUANTIFIED dropped: `< ALL` / `< ANY` / `< SOME` do not
+        // parse, which SQL_SQL92_PREDICATES already recorded. Core's default
+        // claimed it, so the two info types disagreed.
+        (InfoType::Subqueries,                    Expected::U32(SQLITE_SUBQUERIES)),
+        (InfoType::UnionStatement,                Expected::U32(SQLITE_UNION)),
         (InfoType::DefaultTxnIsolation,           Expected::U32(SQL_TXN_SERIALIZABLE)),
         (InfoType::ScrollOptions,                 Expected::U32(SQL_SO_FORWARD_ONLY)),
-        (InfoType::ConvertFunctions,              Expected::U32(SQL_FN_CVT_CAST)),
+        (InfoType::ConvertFunctions,              Expected::U32(SQLITE_CONVERT_FUNCTIONS)),
         // SERIALIZABLE only: READ COMMITTED and REPEATABLE READ do not exist
         // in SQLite, and READ UNCOMMITTED needs shared-cache mode, which this
         // driver never enables.
@@ -1340,6 +1676,125 @@ mod tests {
             .query_row("SELECT count(*) FROM child", [], |r| r.get(0))
             .unwrap();
         assert_eq!(orphans, 0, "ON DELETE CASCADE did not cascade");
+    }
+
+    /// Every `SQL_SUBQUERIES` bit this driver claims, proved by preparing the
+    /// subquery form it describes — and the one it does not claim, proved by
+    /// the bundled library rejecting it.
+    ///
+    /// `SQL_SQ_QUANTIFIED` is the point. Core's default claimed it while this
+    /// driver's `SQL_SQL92_PREDICATES` denied `SQL_SP_QUANTIFIED_COMPARISON`,
+    /// so the same capability was advertised and denied by two info types. A
+    /// BI tool reading `SQL_SUBQUERIES` would push down `< ALL` and get a
+    /// syntax error.
+    #[test]
+    fn subqueries_are_each_live_probed() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t (a INTEGER, b INTEGER); CREATE TABLE u (b INTEGER);")
+            .unwrap();
+
+        for (bit, sql) in [
+            (
+                SQL_SQ_COMPARISON,
+                "SELECT * FROM t WHERE a < (SELECT max(b) FROM u)",
+            ),
+            (
+                SQL_SQ_EXISTS,
+                "SELECT * FROM t WHERE EXISTS (SELECT 1 FROM u)",
+            ),
+            (SQL_SQ_IN, "SELECT * FROM t WHERE a IN (SELECT b FROM u)"),
+            (
+                SQL_SQ_CORRELATED_SUBQUERIES,
+                "SELECT * FROM t WHERE a IN (SELECT b FROM u WHERE u.b = t.b)",
+            ),
+        ] {
+            assert!(
+                SQLITE_SUBQUERIES & bit == bit,
+                "probe listed for unclaimed bit {bit:#x}"
+            );
+            conn.prepare(sql).unwrap_or_else(|e| {
+                panic!("SQL_SQ bit {bit:#x} claimed but SQLite rejected it: {e}\n  {sql}")
+            });
+        }
+
+        assert_eq!(
+            SQLITE_SUBQUERIES & SQL_SQ_QUANTIFIED,
+            0,
+            "SQL_SQ_QUANTIFIED must not be claimed while SQL_SQL92_PREDICATES \
+             denies SQL_SP_QUANTIFIED_COMPARISON"
+        );
+        for sql in [
+            "SELECT * FROM t WHERE a < ALL (SELECT b FROM u)",
+            "SELECT * FROM t WHERE a < ANY (SELECT b FROM u)",
+            "SELECT * FROM t WHERE a < SOME (SELECT b FROM u)",
+        ] {
+            assert!(
+                conn.prepare(sql).is_err(),
+                "SQLite now parses a quantified comparison, so SQL_SQ_QUANTIFIED \
+                 and SQL_SP_QUANTIFIED_COMPARISON should both be claimed\n  {sql}"
+            );
+        }
+    }
+
+    /// `SQL_KEYWORDS` lists SQLite's own keywords and excludes the ones ODBC
+    /// already reserves.
+    ///
+    /// The list is read out of the linked library, so this asserts properties
+    /// rather than a fixed string: a `rusqlite` bump may legitimately add a
+    /// keyword, and pinning the exact value would turn that into a failure.
+    #[test]
+    fn sql_keywords_lists_sqlite_specific_keywords_only() {
+        let keywords = sqlite_specific_keywords();
+        let listed: Vec<&str> = keywords.split(',').filter(|s| !s.is_empty()).collect();
+
+        assert!(
+            !listed.is_empty(),
+            "SQLite has keywords of its own; an empty list is the claim core's \
+             default made and this arm exists to correct"
+        );
+
+        // Present: unmistakably SQLite, and absent from the ODBC list.
+        for expected in ["AUTOINCREMENT", "PRAGMA", "VACUUM", "GLOB", "REGEXP"] {
+            assert!(
+                listed.contains(&expected),
+                "{expected} is a SQLite keyword but is missing from SQL_KEYWORDS"
+            );
+        }
+
+        // Absent: reserved by ODBC, so excluded by the spec's definition.
+        for reserved in ["SELECT", "FROM", "WHERE", "PRIMARY", "TABLE"] {
+            assert!(
+                !listed.contains(&reserved),
+                "{reserved} is an ODBC reserved keyword and must not appear in \
+                 SQL_KEYWORDS"
+            );
+        }
+
+        let mut sorted = listed.clone();
+        sorted.sort_unstable();
+        assert_eq!(listed, sorted, "SQL_KEYWORDS should be sorted");
+        assert!(
+            !keywords.contains(", "),
+            "the spec asks for a comma-separated list, not comma-space"
+        );
+    }
+
+    /// The ODBC reserved list is transcribed from the specification page, so
+    /// the one mistake worth guarding is a duplicated entry from a bad merge.
+    #[test]
+    fn odbc_reserved_keywords_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for k in ODBC_RESERVED_KEYWORDS {
+            assert!(
+                seen.insert(*k),
+                "{k} appears twice in ODBC_RESERVED_KEYWORDS"
+            );
+            assert_eq!(
+                *k,
+                k.to_ascii_uppercase(),
+                "{k} should be uppercase, matching the spec page"
+            );
+        }
     }
 
     /// SQLite's `GROUP BY` is unrelated to the select list, which is what

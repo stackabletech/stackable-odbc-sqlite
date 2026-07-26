@@ -6,8 +6,8 @@ use stackable_odbc_core::{
     errors::OdbcError,
     types::{
         ColumnDescriptor, ColumnValue, ConnectParams, CursorBehavior, ExecuteOutcome, InfoValue,
-        SQL_CN_ANY, SQL_GB_NO_RELATION, SQL_NC_LOW, SQL_NNC_NON_NULL, SQL_TXN_SERIALIZABLE,
-        TypeInfoRow,
+        SQL_CB_NULL, SQL_CN_ANY, SQL_GB_NO_RELATION, SQL_NC_LOW, SQL_NNC_NON_NULL,
+        SQL_TXN_SERIALIZABLE, TypeInfoRow,
     },
 };
 
@@ -474,6 +474,70 @@ impl Backend for SqliteBackend {
     /// [`SqliteBackend::timedate_add_intervals`].
     fn timedate_diff_intervals() -> u32 {
         0
+    }
+
+    /// See `info::SQLITE_SUBQUERIES`. Notably excludes `SQL_SQ_QUANTIFIED`,
+    /// which core's default claimed while this driver's
+    /// `SQL_SQL92_PREDICATES` denied it.
+    fn subqueries() -> u32 {
+        info::SQLITE_SUBQUERIES
+    }
+
+    /// SQLite accepts `SELECT a AS x`, and `AS` is optional.
+    fn column_alias() -> bool {
+        true
+    }
+
+    /// `SQL_CB_NULL`: concatenating a NULL yields NULL — `'a' || NULL` is
+    /// NULL, not `'a'`.
+    fn concat_null_behavior() -> u16 {
+        SQL_CB_NULL
+    }
+
+    /// See `info::SQLITE_UNION` — both `UNION` and `UNION ALL`.
+    fn union_support() -> u32 {
+        info::SQLITE_UNION
+    }
+
+    /// See `info::SQLITE_CONVERT_FUNCTIONS` — `CAST` only.
+    fn convert_functions() -> u32 {
+        info::SQLITE_CONVERT_FUNCTIONS
+    }
+
+    /// `false`: SQLite orders by expressions and by columns absent from the
+    /// select list, so `ORDER BY` is not restricted to selected columns. Same
+    /// permissiveness as [`SqliteBackend::group_by`].
+    fn order_by_columns_in_select() -> bool {
+        false
+    }
+
+    /// `true`: SQLite has no per-table permissions. Every table `SQLTables`
+    /// returns is one the connection can `SELECT` from, because opening the
+    /// database file is the only access check there is.
+    ///
+    /// This is the one value in this group that is a claim about the connected
+    /// principal rather than about SQL. It is safe here precisely because
+    /// SQLite has no principal.
+    fn accessible_tables() -> bool {
+        true
+    }
+
+    /// `false`: the driver opens the database read-write.
+    ///
+    /// This describes the driver's own behaviour, not the file. A database on
+    /// read-only media, or one whose file permissions deny writes, still
+    /// reports `false` here and fails the write itself — which is what the
+    /// spec's "data source is set to READ ONLY mode" means.
+    fn data_source_read_only() -> bool {
+        false
+    }
+
+    /// Backslash: SQLite's `LIKE ... ESCAPE` takes any character, and this
+    /// driver reports `SQL_LIKE_ESCAPE_CLAUSE = "Y"`. Backslash is the
+    /// conventional choice and the one `SQLTables`-style pattern arguments are
+    /// documented against.
+    fn search_pattern_escape() -> &'static str {
+        "\\"
     }
 
     // --- Delegations ---
