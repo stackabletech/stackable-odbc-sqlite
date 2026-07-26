@@ -313,7 +313,7 @@ impl Backend for SqliteBackend {
     ///
     /// If result sets ever become lazily streamed, revisit both hooks — and
     /// note that `SQL_CB_CLOSE` would then also require a real
-    /// [`StatementBackend::close_cursor`].
+    /// [`stackable_odbc_core::backend::StatementBackend::close_cursor`].
     ///
     /// Spec: <https://www.sqlite.org/lang_transaction.html>
     fn cursor_commit_behavior() -> CursorBehavior {
