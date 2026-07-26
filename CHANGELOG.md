@@ -104,6 +104,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `SQL_MAX_COLUMNS_IN_SELECT`, `_IN_TABLE`, `_IN_GROUP_BY`, `_IN_ORDER_BY`,
+  `_IN_INDEX`, `SQL_MAX_STATEMENT_LEN` and `SQL_MAX_ROW_SIZE` now report the
+  connection's actual limits instead of `0`. The spec allows `0` for "no
+  specified limit or the limit is unknown", and `stackable-odbc-core` answers
+  that because it cannot know — but SQLite enforces real limits, and a tool
+  deciding whether to chunk a wide `SELECT` or a long `IN` list reads exactly
+  these. They are read per connection through `sqlite3_limit` rather than
+  hardcoded, because `sqlite3_limit` also *sets* them, so any constant would be
+  wrong for a connection that changed one. `SQL_MAX_TABLES_IN_SELECT` stays `0`:
+  SQLite's 64-table join cap has no `sqlite3_limit` to read it from, and
+  transcribing the constant is what has gone stale twice in this crate.
+
+- `SQL_MAX_CATALOG_NAME_LEN` and `SQL_MAX_SCHEMA_NAME_LEN` now report `0`
+  instead of the generic identifier length. This driver supports neither
+  catalogs nor schemas, so there is no name for these to bound; they were
+  stating a maximum length for something the same driver says does not exist.
+
 - `SQL_SUBQUERIES` no longer claims `SQL_SQ_QUANTIFIED`. `< ALL`, `< ANY` and
   `< SOME` are all syntax errors in SQLite, which this driver already recorded
   by excluding `SQL_SP_QUANTIFIED_COMPARISON` from `SQL_SQL92_PREDICATES` — so

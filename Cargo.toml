@@ -15,7 +15,9 @@ categories = ["database", "external-ffi-bindings", "api-bindings"]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-rusqlite = { version = "0.40", features = ["bundled", "column_decltype"] }
+# "limits" is dependency-free; it exposes sqlite3_limit, which SQL_MAX_* is
+# read from rather than hardcoded.
+rusqlite = { version = "0.40", features = ["bundled", "column_decltype", "limits"] }
 snafu = "0.9"
 # TODO: switch to a crates.io version dep once stackable-odbc-core is published.
 stackable-odbc-core = { path = "../stackable-odbc-core" }

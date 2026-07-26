@@ -36,6 +36,7 @@ use stackable_odbc_core::types::{
 use super::SqliteBackend;
 use super::SqliteConnection;
 use super::SqliteError;
+use super::map_sqlite_error;
 use crate::type_conversion::{
     BLOB_DEFAULT_COLUMN_SIZE, DECIMAL_DEFAULT_COLUMN_SIZE, MAX_FRACTIONAL_SECONDS_PRECISION,
     VARCHAR_DEFAULT_COLUMN_SIZE,
@@ -600,6 +601,18 @@ fn sqlite_get_info(info_type: InfoType) -> Result<InfoValue, SqliteError> {
             }));
         }
         InfoType::IdentifierCase => return Ok(InfoValue::U16(SQL_IC_MIXED)),
+        // 0, not an identifier length: this driver reports no catalogs and no
+        // schemas, so there is no name whose maximum length these could
+        // describe. Core defaults them to its generic identifier length, which
+        // states a bound on something it has just said does not exist. The
+        // spec defines 0 as "no maximum length or the length is unknown",
+        // which is the closest available reading of "not applicable".
+        InfoType::MaxCatalogNameLen if !SqliteBackend::supports_catalogs() => {
+            return Ok(InfoValue::U16(0));
+        }
+        InfoType::MaxSchemaNameLen if !SqliteBackend::supports_schemas() => {
+            return Ok(InfoValue::U16(0));
+        }
         // "Y": SQLite implements the whole Integrity Enhancement Facility --
         // PRIMARY KEY, UNIQUE, NOT NULL, CHECK, DEFAULT and FOREIGN KEY with
         // referential actions -- and this build enforces all of it. Core
@@ -674,10 +687,79 @@ fn sqlite_get_info(info_type: InfoType) -> Result<InfoValue, SqliteError> {
 }
 
 pub(super) fn get_info(
-    _conn: &SqliteConnection,
+    conn: &SqliteConnection,
     info_type: InfoType,
 ) -> Result<InfoValue, SqliteError> {
+    if let Some(value) = connection_limit(conn, info_type)? {
+        return Ok(value);
+    }
     sqlite_get_info(info_type)
+}
+
+/// The `SQL_MAX_*` values SQLite can be asked for directly, via
+/// `sqlite3_limit` (`rusqlite::Connection::limit`, a safe wrapper).
+///
+/// The spec allows `0` for "no specified limit or the limit is unknown", and
+/// core answers `0` for exactly that reason — it has no way to know. This
+/// driver does: these are real, enforced limits, and an application reads them
+/// to decide whether to chunk a wide `SELECT` or a long `IN` list. `0` tells it
+/// there is nothing to chunk around.
+///
+/// They are read per connection rather than hardcoded because they are
+/// per-connection settable: `sqlite3_limit` both reads and writes, so a
+/// compile-time constant would be wrong for any connection that changed one.
+///
+/// Returns `None` for every other info type, leaving `sqlite_get_info` to
+/// answer. `get_info_pre_connect` has no connection and so keeps reporting
+/// `0` — with no connection the limit genuinely is unknown, which is what `0`
+/// means.
+fn connection_limit(
+    conn: &SqliteConnection,
+    info_type: InfoType,
+) -> Result<Option<InfoValue>, SqliteError> {
+    use rusqlite::limits::Limit;
+
+    let limit = match info_type {
+        // All five are bounded by the per-connection column limit: SQLite
+        // applies SQLITE_LIMIT_COLUMN to a table definition, a result set, and
+        // the terms of a GROUP BY / ORDER BY / index alike.
+        InfoType::MaxColumnsInSelect
+        | InfoType::MaxColumnsInTable
+        | InfoType::MaxColumnsInGroupBy
+        | InfoType::MaxColumnsInOrderBy
+        | InfoType::MaxColumnsInIndex => Limit::SQLITE_LIMIT_COLUMN,
+        InfoType::MaxStatementLen => Limit::SQLITE_LIMIT_SQL_LENGTH,
+        // SQL_MAX_ROW_SIZE is the largest row the data source will accept.
+        // SQLITE_LIMIT_LENGTH bounds any single string or blob, which is the
+        // binding constraint on a row: SQLite imposes no separate row width.
+        InfoType::MaxRowSize => Limit::SQLITE_LIMIT_LENGTH,
+        // Deliberately absent: SQL_MAX_TABLES_IN_SELECT. SQLite caps a join at
+        // 64 tables, but that is a compile-time constant with no sqlite3_limit
+        // to read it from, and hardcoding 64 here would be the kind of
+        // transcribed-from-documentation value that has gone stale twice in
+        // this crate. It keeps core's 0, "unknown".
+        _ => return Ok(None),
+    };
+
+    let db = conn.conn.lock().map_err(|e| SqliteError::General {
+        message: format!("Mutex poisoned: {e}"),
+    })?;
+    let raw = db.limit(limit).map_err(map_sqlite_error)?;
+
+    // sqlite3_limit returns the current value, always non-negative in practice;
+    // a negative would mean "query, do not set" leaked through, so treat it as
+    // unknown rather than wrapping it into a huge unsigned number.
+    if raw < 0 {
+        return Ok(None);
+    }
+
+    Ok(Some(match info_type {
+        InfoType::MaxStatementLen | InfoType::MaxRowSize => InfoValue::U32(raw as u32),
+        // The column limits are SQLUSMALLINT. SQLite caps SQLITE_LIMIT_COLUMN
+        // at 32767 so this cannot truncate, but clamp rather than cast so a
+        // future cap increase understates instead of wrapping to a small number.
+        _ => InfoValue::U16(u16::try_from(raw).unwrap_or(u16::MAX)),
+    }))
 }
 
 pub(super) fn get_info_pre_connect(info_type: InfoType) -> Result<InfoValue, OdbcError> {
@@ -1464,8 +1546,8 @@ mod tests {
         (InfoType::IdentifierCase,                Expected::U16(SQL_IC_MIXED)),
         (InfoType::MaxColumnNameLen,              Expected::U16(DEFAULT_IDENTIFIER_LEN)),
         (InfoType::MaxCursorNameLen,              Expected::U16(SQL_MAX_CURSOR_NAME_LEN)),
-        (InfoType::MaxSchemaNameLen,              Expected::U16(DEFAULT_IDENTIFIER_LEN)),
-        (InfoType::MaxCatalogNameLen,             Expected::U16(DEFAULT_IDENTIFIER_LEN)),
+        (InfoType::MaxSchemaNameLen,              Expected::U16(0)),
+        (InfoType::MaxCatalogNameLen,             Expected::U16(0)),
         (InfoType::MaxTableNameLen,               Expected::U16(DEFAULT_IDENTIFIER_LEN)),
         (InfoType::NullCollation,                 Expected::U16(SQL_NC_LOW)),
         // These three were never in this snapshot: core invented them until it
@@ -1676,6 +1758,109 @@ mod tests {
             .query_row("SELECT count(*) FROM child", [], |r| r.get(0))
             .unwrap();
         assert_eq!(orphans, 0, "ON DELETE CASCADE did not cascade");
+    }
+
+    /// The `SQL_MAX_*` values that SQLite can be asked for come from the
+    /// connection, not from a constant.
+    ///
+    /// Asserted by *changing* the limit and watching the reported value follow.
+    /// Checking it merely equals SQLite's default would pass just as well
+    /// against a hardcoded 2000, which is the thing this is meant to rule out.
+    #[test]
+    fn max_limits_are_read_from_the_connection() {
+        let params = ConnectParams::parse("Database=:memory:").unwrap();
+        let sqlite_conn = SqliteBackend::connect(&params).expect("connect");
+
+        let column_limited = [
+            InfoType::MaxColumnsInSelect,
+            InfoType::MaxColumnsInTable,
+            InfoType::MaxColumnsInGroupBy,
+            InfoType::MaxColumnsInOrderBy,
+            InfoType::MaxColumnsInIndex,
+        ];
+
+        // Default: whatever the bundled library carries, but never core's 0.
+        for info_type in column_limited {
+            match get_info(&sqlite_conn, info_type) {
+                Ok(InfoValue::U16(v)) => assert!(
+                    v > 0,
+                    "{info_type:?} reported 0 -- the connection limit was not read"
+                ),
+                other => panic!("{info_type:?} unexpected: {other:?}"),
+            }
+        }
+
+        // Lower SQLITE_LIMIT_COLUMN and every one of them must move with it.
+        {
+            let db = sqlite_conn.conn.lock().expect("lock");
+            db.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_COLUMN, 42)
+                .expect("set limit");
+        }
+        for info_type in column_limited {
+            assert_eq!(
+                get_info(&sqlite_conn, info_type).expect("info"),
+                InfoValue::U16(42),
+                "{info_type:?} did not follow SQLITE_LIMIT_COLUMN"
+            );
+        }
+
+        // The two SQLUINTEGER limits, same argument.
+        for (info_type, limit) in [
+            (
+                InfoType::MaxStatementLen,
+                rusqlite::limits::Limit::SQLITE_LIMIT_SQL_LENGTH,
+            ),
+            (
+                InfoType::MaxRowSize,
+                rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH,
+            ),
+        ] {
+            {
+                let db = sqlite_conn.conn.lock().expect("lock");
+                db.set_limit(limit, 4096).expect("set limit");
+            }
+            assert_eq!(
+                get_info(&sqlite_conn, info_type).expect("info"),
+                InfoValue::U32(4096),
+                "{info_type:?} did not follow its sqlite3_limit"
+            );
+        }
+
+        // Not claimed: SQLite's 64-table join cap has no sqlite3_limit, so this
+        // stays core's 0 rather than a transcribed constant.
+        assert_eq!(
+            get_info(&sqlite_conn, InfoType::MaxTablesInSelect).expect("info"),
+            InfoValue::U16(0),
+            "SQL_MAX_TABLES_IN_SELECT has no limit to read and should stay 0"
+        );
+    }
+
+    /// A maximum name length for a namespace this driver says does not exist
+    /// is a bound on nothing. Kept in step with the two hooks rather than
+    /// pinned to 0, so it stays right if either ever flips.
+    #[test]
+    fn catalog_and_schema_name_lengths_follow_their_support_hooks() {
+        let max_catalog = sqlite_get_info(InfoType::MaxCatalogNameLen).expect("info");
+        let max_schema = sqlite_get_info(InfoType::MaxSchemaNameLen).expect("info");
+
+        if SqliteBackend::supports_catalogs() {
+            assert_ne!(max_catalog, InfoValue::U16(0));
+        } else {
+            assert_eq!(
+                max_catalog,
+                InfoValue::U16(0),
+                "SQL_MAX_CATALOG_NAME_LEN bounds a name that cannot exist"
+            );
+        }
+        if SqliteBackend::supports_schemas() {
+            assert_ne!(max_schema, InfoValue::U16(0));
+        } else {
+            assert_eq!(
+                max_schema,
+                InfoValue::U16(0),
+                "SQL_MAX_SCHEMA_NAME_LEN bounds a name that cannot exist"
+            );
+        }
     }
 
     /// Every `SQL_SUBQUERIES` bit this driver claims, proved by preparing the
