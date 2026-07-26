@@ -27,16 +27,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   advertised it and implemented nothing, so the driver reported that it
   destroyed cursors on commit while in fact preserving them.
 
+- Connections now enable foreign key enforcement: `connect` issues
+  `PRAGMA foreign_keys = ON`. SQLite leaves it off for backward compatibility,
+  and the bundled library only happened to be compiled with
+  `SQLITE_DEFAULT_FOREIGN_KEYS` — a property of one dependency's build rather
+  than of SQLite. On the current build this changes nothing; it stops
+  referential integrity from turning itself off if that dependency ever
+  changes.
+
 - `SQL_INTEGRITY` now reports `"Y"` instead of `"N"`. SQLite implements the
   whole Integrity Enhancement Facility — `PRIMARY KEY`, `UNIQUE`, `NOT NULL`,
-  `CHECK`, `DEFAULT`, and `FOREIGN KEY` with referential actions — and this
-  build enforces all of it: the bundled library is compiled with
-  `SQLITE_DEFAULT_FOREIGN_KEYS`, so `PRAGMA foreign_keys` is on before the
-  driver does anything. `"N"` was `stackable-odbc-core`'s default, and the
-  earlier justification for keeping it — that SQLite leaves foreign keys off
-  unless asked — is not true of this build. A test asserts each constraint is
-  actually enforced, so dropping `rusqlite`'s `bundled` feature for a system
-  SQLite fails loudly rather than making the claim quietly false.
+  `CHECK`, `DEFAULT`, and `FOREIGN KEY` with referential actions — and, with
+  the pragma above, the driver enforces all of it. `"N"` was
+  `stackable-odbc-core`'s default, and the earlier justification for keeping
+  it — that SQLite leaves foreign keys off unless asked — no longer applies now
+  that the driver asks. A test exercises each constraint and an
+  `ON DELETE CASCADE` through `connect`.
 
 - `SQL_SQL_CONFORMANCE` now reports `0` — no SQL-92 level claimed — instead of
   `SQL_SC_SQL92_ENTRY`. That value came from a `stackable-odbc-core` default

@@ -1058,8 +1058,8 @@ mod tests {
     }
     use super::*;
     use stackable_odbc_core::types::{
-        DEFAULT_IDENTIFIER_LEN, InfoType, InfoValue, SQL_AM_NONE, SQL_AT_DROP_COLUMN_CASCADE,
-        SQL_AT_DROP_COLUMN_DEFAULT, SQL_AT_DROP_COLUMN_RESTRICT,
+        ConnectParams, DEFAULT_IDENTIFIER_LEN, InfoType, InfoValue, SQL_AM_NONE,
+        SQL_AT_DROP_COLUMN_CASCADE, SQL_AT_DROP_COLUMN_DEFAULT, SQL_AT_DROP_COLUMN_RESTRICT,
         SQL_AT_DROP_TABLE_CONSTRAINT_CASCADE, SQL_AT_DROP_TABLE_CONSTRAINT_RESTRICT,
         SQL_AT_SET_COLUMN_DEFAULT, SQL_CA1_NEXT, SQL_CB_PRESERVE, SQL_CN_ANY,
         SQL_DRIVER_ODBC_VER_STRING, SQL_FN_CVT_CAST, SQL_FN_NUM_CEILING, SQL_FN_NUM_COS,
@@ -1284,22 +1284,27 @@ mod tests {
     /// violation rather than by reading its documentation.
     ///
     /// Referential integrity is the fragile one. Plain SQLite defaults
-    /// `PRAGMA foreign_keys` to off for backward compatibility; this build is
-    /// compiled with `SQLITE_DEFAULT_FOREIGN_KEYS`, so it is on before the
-    /// driver does anything. Dropping `rusqlite`'s `bundled` feature for a
-    /// system SQLite would silently turn enforcement off and make the claim
-    /// false, so the pragma is asserted directly.
+    /// `PRAGMA foreign_keys` to off for backward compatibility, so
+    /// [`SqliteBackend::connect`] turns it on explicitly rather than relying on
+    /// the bundled library's `SQLITE_DEFAULT_FOREIGN_KEYS`.
+    ///
+    /// This goes through `connect` rather than opening a `rusqlite` connection
+    /// directly, because `connect` is where the guarantee lives — a raw
+    /// connection would only re-test the dependency's build configuration,
+    /// which is exactly what the driver stopped depending on.
     #[test]
     fn integrity_enhancement_facility_is_actually_enforced() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let params = ConnectParams::parse("Database=:memory:").unwrap();
+        let sqlite_conn = SqliteBackend::connect(&params).expect("connect");
+        let conn = sqlite_conn.conn.lock().expect("lock");
 
         let fk_on: i64 = conn
             .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
             .unwrap();
         assert_eq!(
             fk_on, 1,
-            "foreign keys are off, so SQL_INTEGRITY = \"Y\" is a false claim -- \
-             this build should carry SQLITE_DEFAULT_FOREIGN_KEYS"
+            "SqliteBackend::connect did not enable foreign keys, so \
+             SQL_INTEGRITY = \"Y\" is a false claim"
         );
 
         conn.execute_batch(

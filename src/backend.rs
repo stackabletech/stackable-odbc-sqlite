@@ -227,6 +227,26 @@ impl Backend for SqliteBackend {
     fn connect(params: &ConnectParams) -> Result<SqliteConnection, SqliteError> {
         let p = types::connect_params::SqliteConnectParams::try_from(params)?;
         let conn = rusqlite::Connection::open(p.database()).map_err(map_sqlite_error)?;
+
+        // Enforce foreign keys explicitly, so that `SQL_INTEGRITY = "Y"` is
+        // true by construction rather than by build configuration.
+        //
+        // SQLite defaults this off for backward compatibility. The bundled
+        // library happens to be compiled with `SQLITE_DEFAULT_FOREIGN_KEYS`,
+        // so it was already on — but that is a property of one dependency's
+        // build, not of SQLite, and dropping `rusqlite`'s `bundled` feature
+        // for a system library would silently turn referential integrity off
+        // while the driver went on advertising it.
+        //
+        // The pragma is per-connection and a no-op inside a transaction; here
+        // there is not one yet. `PRAGMA foreign_keys` is also a no-op rather
+        // than an error on a build compiled with `SQLITE_OMIT_FOREIGN_KEY`,
+        // which is why `Backend::connect` cannot treat success as proof —
+        // `integrity_enhancement_facility_is_actually_enforced` reads the
+        // value back through this function.
+        conn.execute_batch("PRAGMA foreign_keys = ON")
+            .map_err(map_sqlite_error)?;
+
         Ok(SqliteConnection {
             conn: Mutex::new(conn),
             manual_commit: std::sync::atomic::AtomicBool::new(false),
