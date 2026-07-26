@@ -9,23 +9,27 @@ use stackable_odbc_core::errors::OdbcError;
 use stackable_odbc_core::function_id::FunctionId;
 use stackable_odbc_core::types::{
     InfoType, InfoValue, MaxPrecision, MaxScale, Nullable, SQL_AF_ALL, SQL_AF_AVG, SQL_AF_COUNT,
-    SQL_AF_DISTINCT, SQL_AF_MAX, SQL_AF_MIN, SQL_AF_SUM, SQL_AGGREGATE_FUNCTIONS, SQL_CODE_DATE,
-    SQL_CODE_TIME, SQL_CODE_TIMESTAMP, SQL_FN_NUM_ABS, SQL_FN_NUM_ROUND, SQL_FN_NUM_SIGN,
-    SQL_FN_STR_ASCII, SQL_FN_STR_CHAR, SQL_FN_STR_CONCAT, SQL_FN_STR_LCASE, SQL_FN_STR_LENGTH,
-    SQL_FN_STR_LTRIM, SQL_FN_STR_OCTET_LENGTH, SQL_FN_STR_REPLACE, SQL_FN_STR_RTRIM,
-    SQL_FN_STR_SOUNDEX, SQL_FN_STR_SUBSTRING, SQL_FN_STR_UCASE, SQL_FN_SYS_IFNULL,
-    SQL_FN_TD_CURDATE, SQL_FN_TD_CURRENT_DATE, SQL_FN_TD_CURRENT_TIME, SQL_FN_TD_CURRENT_TIMESTAMP,
-    SQL_FN_TD_CURTIME, SQL_FN_TD_NOW, SQL_GD_ANY_COLUMN, SQL_GD_ANY_ORDER, SQL_GD_BOUND,
-    SQL_IC_MIXED, SQL_LIKE_ESCAPE_CLAUSE, SQL_NC_LOW, SQL_NUMERIC_FUNCTIONS, SQL_OUTER_JOINS,
-    SQL_SEARCHABLE, SQL_SP_BETWEEN, SQL_SP_COMPARISON, SQL_SP_EXISTS, SQL_SP_IN, SQL_SP_ISNOTNULL,
-    SQL_SP_ISNULL, SQL_SP_LIKE, SQL_SQL92_PREDICATES, SQL_SQL92_RELATIONAL_JOIN_OPERATORS,
+    SQL_AF_DISTINCT, SQL_AF_MAX, SQL_AF_MIN, SQL_AF_SUM, SQL_AGGREGATE_FUNCTIONS, SQL_CL_START,
+    SQL_CODE_DATE, SQL_CODE_TIME, SQL_CODE_TIMESTAMP, SQL_CU_DML_STATEMENTS,
+    SQL_CU_INDEX_DEFINITION, SQL_CU_TABLE_DEFINITION, SQL_FN_NUM_ABS, SQL_FN_NUM_ROUND,
+    SQL_FN_NUM_SIGN, SQL_FN_STR_ASCII, SQL_FN_STR_CHAR, SQL_FN_STR_CONCAT, SQL_FN_STR_LCASE,
+    SQL_FN_STR_LENGTH, SQL_FN_STR_LTRIM, SQL_FN_STR_OCTET_LENGTH, SQL_FN_STR_REPLACE,
+    SQL_FN_STR_RTRIM, SQL_FN_STR_SOUNDEX, SQL_FN_STR_SUBSTRING, SQL_FN_STR_UCASE,
+    SQL_FN_SYS_IFNULL, SQL_FN_TD_CURDATE, SQL_FN_TD_CURRENT_DATE, SQL_FN_TD_CURRENT_TIME,
+    SQL_FN_TD_CURRENT_TIMESTAMP, SQL_FN_TD_CURTIME, SQL_FN_TD_NOW, SQL_GD_ANY_COLUMN,
+    SQL_GD_ANY_ORDER, SQL_GD_BOUND, SQL_IC_MIXED, SQL_LIKE_ESCAPE_CLAUSE, SQL_NC_LOW,
+    SQL_NUMERIC_FUNCTIONS, SQL_OJ_ALL_COMPARISON_OPS, SQL_OJ_FULL, SQL_OJ_INNER, SQL_OJ_LEFT,
+    SQL_OJ_NESTED, SQL_OJ_NOT_ORDERED, SQL_OJ_RIGHT, SQL_OUTER_JOINS, SQL_SEARCHABLE,
+    SQL_SP_BETWEEN, SQL_SP_COMPARISON, SQL_SP_EXISTS, SQL_SP_IN, SQL_SP_ISNOTNULL, SQL_SP_ISNULL,
+    SQL_SP_LIKE, SQL_SQL92_PREDICATES, SQL_SQL92_RELATIONAL_JOIN_OPERATORS,
     SQL_SQL92_VALUE_EXPRESSIONS, SQL_SRJO_CROSS_JOIN, SQL_SRJO_EXCEPT_JOIN,
     SQL_SRJO_FULL_OUTER_JOIN, SQL_SRJO_INNER_JOIN, SQL_SRJO_INTERSECT_JOIN,
     SQL_SRJO_LEFT_OUTER_JOIN, SQL_SRJO_NATURAL_JOIN, SQL_SRJO_RIGHT_OUTER_JOIN,
-    SQL_STRING_FUNCTIONS, SQL_SVE_CASE, SQL_SVE_CAST, SQL_SVE_COALESCE, SQL_SVE_NULLIF,
-    SQL_SYSTEM_FUNCTIONS, SQL_TC_DML, SQL_TIMEDATE_FUNCTIONS, SQL_TXN_READ_COMMITTED,
-    SQL_TXN_READ_UNCOMMITTED, SQL_TXN_REPEATABLE_READ, SQL_TXN_SERIALIZABLE, SqlDataType,
-    TypeInfoRow, catalog_column_size, format_odbc_version, parse_dotted_version,
+    SQL_STRING_FUNCTIONS, SQL_SU_DML_STATEMENTS, SQL_SU_INDEX_DEFINITION, SQL_SU_TABLE_DEFINITION,
+    SQL_SVE_CASE, SQL_SVE_CAST, SQL_SVE_COALESCE, SQL_SVE_NULLIF, SQL_SYSTEM_FUNCTIONS, SQL_TC_DML,
+    SQL_TIMEDATE_FUNCTIONS, SQL_TXN_READ_COMMITTED, SQL_TXN_READ_UNCOMMITTED,
+    SQL_TXN_REPEATABLE_READ, SQL_TXN_SERIALIZABLE, SqlDataType, TypeInfoRow, catalog_column_size,
+    format_odbc_version, parse_dotted_version,
 };
 
 use super::SqliteBackend;
@@ -35,6 +39,35 @@ use crate::type_conversion::{
     BLOB_DEFAULT_COLUMN_SIZE, DECIMAL_DEFAULT_COLUMN_SIZE, MAX_FRACTIONAL_SECONDS_PRECISION,
     VARCHAR_DEFAULT_COLUMN_SIZE,
 };
+
+/// Whether this driver exposes ODBC catalogs. It does not: `metadata::tables`
+/// reports `TABLE_CAT` as NULL for every row, and a `catalog = "%"` enumeration
+/// returns an empty result set.
+///
+/// The `SQLGetInfo` specification defines five separate info types in terms of
+/// this single fact — `SQL_CATALOG_NAME`, `SQL_CATALOG_TERM`,
+/// `SQL_CATALOG_NAME_SEPARATOR`, `SQL_CATALOG_LOCATION` and
+/// `SQL_CATALOG_USAGE` — so all five are derived from it here rather than
+/// answered independently.
+///
+/// That independence is what went wrong before: the driver answered
+/// `SQL_CATALOG_NAME`, `SQL_CATALOG_LOCATION` and `SQL_CATALOG_USAGE` itself
+/// and let `SQL_CATALOG_TERM` and `SQL_CATALOG_NAME_SEPARATOR` fall through to
+/// `stackable-odbc-core`'s defaults, which name a catalog and a separator. An
+/// application was told catalogs do not exist and given their name in the same
+/// breath. The spec is explicit for both: "An empty string is returned if
+/// catalogs are not supported by the data source."
+///
+/// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlgetinfo-function>
+const SUPPORTS_CATALOGS: bool = false;
+
+/// Whether this driver exposes ODBC schemas. It does not: a `schema = "%"`
+/// enumeration returns an empty result set and `TABLE_SCHEM` is always NULL.
+///
+/// Derives `SQL_SCHEMA_TERM` and `SQL_SCHEMA_USAGE`, for the same reason
+/// [`SUPPORTS_CATALOGS`] derives its five. The spec: "An empty string is
+/// returned if schemas are not supported by the data source."
+const SUPPORTS_SCHEMAS: bool = false;
 
 /// ODBC function IDs for functions this driver implements.
 /// Used by `SQLGetFunctions` to report supported capabilities.
@@ -594,10 +627,65 @@ fn sqlite_get_info(info_type: InfoType) -> Result<InfoValue, SqliteError> {
                 }
             }));
         }
-        InfoType::SchemaUsage => return Ok(InfoValue::U32(0)), // SQLite has no schemas
-        InfoType::CatalogUsage => return Ok(InfoValue::U32(0)), // SQLite has no catalogs
-        InfoType::CatalogLocation => return Ok(InfoValue::U16(0)), // catalogs not supported
-        InfoType::CatalogName => return Ok(InfoValue::String("N".into())),
+        // Catalogs and schemas: every value below is derived from
+        // SUPPORTS_CATALOGS / SUPPORTS_SCHEMAS rather than restated, because
+        // the SQLGetInfo spec defines each of them in terms of that one fact.
+        InfoType::CatalogName => {
+            return Ok(InfoValue::String(
+                if SUPPORTS_CATALOGS { "Y" } else { "N" }.into(),
+            ));
+        }
+        InfoType::CatalogTerm => {
+            return Ok(InfoValue::String(
+                if SUPPORTS_CATALOGS { "catalog" } else { "" }.into(),
+            ));
+        }
+        InfoType::CatalogNameSeparator => {
+            return Ok(InfoValue::String(
+                if SUPPORTS_CATALOGS { "." } else { "" }.into(),
+            ));
+        }
+        InfoType::CatalogLocation => {
+            return Ok(InfoValue::U16(if SUPPORTS_CATALOGS {
+                SQL_CL_START
+            } else {
+                0
+            }));
+        }
+        InfoType::CatalogUsage => {
+            return Ok(InfoValue::U32(if SUPPORTS_CATALOGS {
+                SQL_CU_DML_STATEMENTS | SQL_CU_TABLE_DEFINITION | SQL_CU_INDEX_DEFINITION
+            } else {
+                0
+            }));
+        }
+        InfoType::SchemaTerm => {
+            return Ok(InfoValue::String(
+                if SUPPORTS_SCHEMAS { "schema" } else { "" }.into(),
+            ));
+        }
+        InfoType::SchemaUsage => {
+            return Ok(InfoValue::U32(if SUPPORTS_SCHEMAS {
+                SQL_SU_DML_STATEMENTS | SQL_SU_TABLE_DEFINITION | SQL_SU_INDEX_DEFINITION
+            } else {
+                0
+            }));
+        }
+        // Every outer-join form SQLite implements, and every relaxation of
+        // the ON clause the spec asks about. Core's default is 0, which
+        // contradicted this driver's own SQL_OUTER_JOINS = "Y". Each bit is
+        // exercised by `outer_join_capabilities_are_each_live_probed`.
+        InfoType::OuterJoinCapabilities => {
+            return Ok(InfoValue::U32(
+                SQL_OJ_LEFT
+                    | SQL_OJ_RIGHT
+                    | SQL_OJ_FULL
+                    | SQL_OJ_NESTED
+                    | SQL_OJ_NOT_ORDERED
+                    | SQL_OJ_INNER
+                    | SQL_OJ_ALL_COMPARISON_OPS,
+            ));
+        }
         InfoType::IdentifierCase => return Ok(InfoValue::U16(SQL_IC_MIXED)),
         InfoType::NullCollation => return Ok(InfoValue::U16(SQL_NC_LOW)),
         InfoType::DefaultTxnIsolation => return Ok(InfoValue::U32(SQL_TXN_SERIALIZABLE)),
@@ -987,9 +1075,14 @@ mod tests {
         (InfoType::DriverOdbcVer,                 Expected::Str(SQL_DRIVER_ODBC_VER_STRING)),
         (InfoType::SearchPatternEscape,            Expected::Str("\\")),
         (InfoType::IdentifierQuoteChar,            Expected::Str("\"")),
-        (InfoType::CatalogTerm,                   Expected::Str("catalog")),
-        (InfoType::SchemaTerm,                    Expected::Str("schema")),
-        (InfoType::CatalogNameSeparator,           Expected::Str(".")),
+        // Empty, not "catalog": derived from SUPPORTS_CATALOGS. The spec
+        // requires an empty string when catalogs are unsupported, which
+        // SQL_CATALOG_NAME = "N" declares.
+        (InfoType::CatalogTerm,                   Expected::Str("")),
+        // Empty, not "schema": derived from SUPPORTS_SCHEMAS, same spec rule.
+        (InfoType::SchemaTerm,                    Expected::Str("")),
+        // Empty, not ".": derived from SUPPORTS_CATALOGS, same spec rule.
+        (InfoType::CatalogNameSeparator,           Expected::Str("")),
         (InfoType::ColumnAlias,                   Expected::Str("Y")),
         (InfoType::OrderByColumnsInSelect,         Expected::Str("N")),
         (InfoType::CatalogName,                   Expected::Str("N")),
@@ -1047,7 +1140,11 @@ mod tests {
         (InfoType::MaxIndexSize,                  Expected::U32(0)),
         (InfoType::MaxRowSize,                    Expected::U32(0)),
         (InfoType::MaxStatementLen,               Expected::U32(0)),
-        (InfoType::OuterJoinCapabilities,         Expected::U32(0)),
+        // Not 0: SQLite implements every outer-join form the spec asks
+        // about. Core's default of 0 contradicted SQL_OUTER_JOINS = "Y".
+        (InfoType::OuterJoinCapabilities,         Expected::U32(
+            SQL_OJ_LEFT | SQL_OJ_RIGHT | SQL_OJ_FULL | SQL_OJ_NESTED
+                | SQL_OJ_NOT_ORDERED | SQL_OJ_INNER | SQL_OJ_ALL_COMPARISON_OPS)),
         (InfoType::SqlConformance,                Expected::U32(SQL_SC_SQL92_ENTRY)),
         (InfoType::OdbcInterfaceConformance,      Expected::U32(SQL_OIC_CORE)),
         (InfoType::AsyncMode,                     Expected::U32(SQL_AM_NONE)),
@@ -1149,6 +1246,171 @@ mod tests {
     /// If a future `rusqlite`/`libsqlite3-sys` bump silently drops one of
     /// these compile flags, this test fails with a clear "no such function"
     /// error instead of the bitmap silently overclaiming forever.
+    /// The five catalog info types and the two schema info types must agree
+    /// with each other. This is the test the previous arrangement lacked:
+    /// `SQL_CATALOG_NAME`, `SQL_CATALOG_LOCATION` and `SQL_CATALOG_USAGE` said
+    /// catalogs do not exist while `SQL_CATALOG_TERM` and
+    /// `SQL_CATALOG_NAME_SEPARATOR` fell through to core's defaults and named
+    /// one, and nothing tied the two groups together.
+    ///
+    /// Asserts the spec's rule, not the current values, so it keeps holding if
+    /// [`SUPPORTS_CATALOGS`] or [`SUPPORTS_SCHEMAS`] ever flips.
+    #[test]
+    fn catalog_and_schema_info_types_agree_with_each_other() {
+        let get = |t: InfoType| sqlite_get_info(t).expect("info type answered");
+
+        let catalogs_supported = matches!(
+            get(InfoType::CatalogName),
+            InfoValue::String(ref s) if s == "Y"
+        );
+        assert_eq!(
+            catalogs_supported, SUPPORTS_CATALOGS,
+            "SQL_CATALOG_NAME must follow SUPPORTS_CATALOGS"
+        );
+
+        if catalogs_supported {
+            assert_ne!(get(InfoType::CatalogTerm), InfoValue::String(String::new()));
+            assert_ne!(get(InfoType::CatalogLocation), InfoValue::U16(0));
+        } else {
+            // Spec: "An empty string is returned if catalogs are not supported
+            // by the data source" (SQL_CATALOG_TERM, SQL_CATALOG_NAME_SEPARATOR);
+            // "A value of 0 is returned if catalogs are not supported"
+            // (SQL_CATALOG_LOCATION, SQL_CATALOG_USAGE).
+            assert_eq!(
+                get(InfoType::CatalogTerm),
+                InfoValue::String(String::new()),
+                "SQL_CATALOG_TERM must be empty when catalogs are unsupported"
+            );
+            assert_eq!(
+                get(InfoType::CatalogNameSeparator),
+                InfoValue::String(String::new()),
+                "SQL_CATALOG_NAME_SEPARATOR must be empty when catalogs are unsupported"
+            );
+            assert_eq!(
+                get(InfoType::CatalogLocation),
+                InfoValue::U16(0),
+                "SQL_CATALOG_LOCATION must be 0 when catalogs are unsupported"
+            );
+            assert_eq!(
+                get(InfoType::CatalogUsage),
+                InfoValue::U32(0),
+                "SQL_CATALOG_USAGE must be 0 when catalogs are unsupported"
+            );
+        }
+
+        if SUPPORTS_SCHEMAS {
+            assert_ne!(get(InfoType::SchemaTerm), InfoValue::String(String::new()));
+        } else {
+            assert_eq!(
+                get(InfoType::SchemaTerm),
+                InfoValue::String(String::new()),
+                "SQL_SCHEMA_TERM must be empty when schemas are unsupported"
+            );
+            assert_eq!(
+                get(InfoType::SchemaUsage),
+                InfoValue::U32(0),
+                "SQL_SCHEMA_USAGE must be 0 when schemas are unsupported"
+            );
+        }
+    }
+
+    /// Every `SQL_OJ_*` bit this driver claims, proved by running the join it
+    /// describes rather than by reading release notes. `RIGHT` and `FULL`
+    /// arrived in SQLite 3.39.0; if a `rusqlite`/`libsqlite3-sys` downgrade
+    /// ever took the bundled library below that, this fails with a parse error
+    /// instead of the bitmap overclaiming forever.
+    ///
+    /// Core's default for `SQL_OUTER_JOIN_CAPABILITIES` is 0, which said
+    /// SQLite supports no outer joins at all while this driver's own
+    /// `SQL_OUTER_JOINS` said "Y".
+    #[test]
+    fn outer_join_capabilities_are_each_live_probed() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE l (id INTEGER, v TEXT);
+             CREATE TABLE r (id INTEGER, w TEXT);
+             CREATE TABLE m (id INTEGER, x TEXT);
+             INSERT INTO l VALUES (1, 'a'), (2, 'b');
+             INSERT INTO r VALUES (2, 'B'), (3, 'C');
+             -- m.id = 2 so it meets the row r contributes to the outer join;
+             -- the SQL_OJ_INNER probe below needs a real match, not just a
+             -- statement SQLite is willing to parse.
+             INSERT INTO m VALUES (2, 'y'), (3, 'z');",
+        )
+        .unwrap();
+
+        // SQL_OJ_LEFT / SQL_OJ_RIGHT / SQL_OJ_FULL — the three join forms.
+        for (bit, sql) in [
+            (
+                SQL_OJ_LEFT,
+                "SELECT COUNT(*) FROM l LEFT OUTER JOIN r ON l.id = r.id",
+            ),
+            (
+                SQL_OJ_RIGHT,
+                "SELECT COUNT(*) FROM l RIGHT OUTER JOIN r ON l.id = r.id",
+            ),
+            (
+                SQL_OJ_FULL,
+                "SELECT COUNT(*) FROM l FULL OUTER JOIN r ON l.id = r.id",
+            ),
+        ] {
+            let n: i64 = conn
+                .query_row(sql, [], |row| row.get(0))
+                .unwrap_or_else(|e| {
+                    panic!("SQL_OJ bit {bit:#x} claimed but the join failed: {e}\n  {sql}")
+                });
+            assert!(n > 0, "SQL_OJ bit {bit:#x}: {sql} returned no rows");
+        }
+
+        // SQL_OJ_NESTED — an outer join whose operand is itself an outer join.
+        let nested: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM (l LEFT OUTER JOIN r ON l.id = r.id) \
+                 LEFT OUTER JOIN m ON r.id = m.id",
+                [],
+                |row| row.get(0),
+            )
+            .expect("SQL_OJ_NESTED claimed but a nested outer join failed");
+        assert!(nested > 0, "SQL_OJ_NESTED probe returned no rows");
+
+        // SQL_OJ_NOT_ORDERED — the ON-clause column order need not follow the
+        // table order in the FROM clause.
+        let not_ordered: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM l LEFT OUTER JOIN r ON r.id = l.id",
+                [],
+                |row| row.get(0),
+            )
+            .expect("SQL_OJ_NOT_ORDERED claimed but a reversed ON clause failed");
+        assert!(not_ordered > 0, "SQL_OJ_NOT_ORDERED probe returned no rows");
+
+        // SQL_OJ_INNER — the inner table of an outer join may also be used in
+        // an inner join.
+        let inner: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM l LEFT OUTER JOIN r ON l.id = r.id \
+                 INNER JOIN m ON m.id = r.id",
+                [],
+                |row| row.get(0),
+            )
+            .expect("SQL_OJ_INNER claimed but mixing an inner join in failed");
+        assert!(inner > 0, "SQL_OJ_INNER probe returned no rows");
+
+        // SQL_OJ_ALL_COMPARISON_OPS — the ON clause takes any comparison
+        // operator, not just equality.
+        let any_op: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM l LEFT OUTER JOIN r ON l.id < r.id",
+                [],
+                |row| row.get(0),
+            )
+            .expect("SQL_OJ_ALL_COMPARISON_OPS claimed but a non-equality ON failed");
+        assert!(
+            any_op > 0,
+            "SQL_OJ_ALL_COMPARISON_OPS probe returned no rows"
+        );
+    }
+
     #[test]
     fn live_sqlite_supports_sign_soundex_and_octet_length() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();

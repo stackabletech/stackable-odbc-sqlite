@@ -27,7 +27,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   advertised it and implemented nothing, so the driver reported that it
   destroyed cursors on commit while in fact preserving them.
 
+- `SQL_OUTER_JOIN_CAPABILITIES` now reports every outer-join form SQLite
+  implements — `SQL_OJ_LEFT`, `SQL_OJ_RIGHT`, `SQL_OJ_FULL`, `SQL_OJ_NESTED`,
+  `SQL_OJ_NOT_ORDERED`, `SQL_OJ_INNER` and `SQL_OJ_ALL_COMPARISON_OPS` — instead
+  of `0`. It previously inherited `stackable-odbc-core`'s default of `0`, which
+  said SQLite supports no outer joins at all while this driver's own
+  `SQL_OUTER_JOINS` reported `"Y"`. Each bit is verified by executing the join
+  it describes against the bundled library, not assumed from release notes.
+
 ### Fixed
+
+- `SQL_CATALOG_TERM`, `SQL_CATALOG_NAME_SEPARATOR` and `SQL_SCHEMA_TERM` now
+  report empty strings instead of `"catalog"`, `"."` and `"schema"`. The
+  `SQLGetInfo` specification requires an empty string from all three when the
+  data source supports neither catalogs nor schemas, which this driver has
+  always declared through `SQL_CATALOG_NAME`, `SQL_CATALOG_LOCATION`,
+  `SQL_CATALOG_USAGE` and `SQL_SCHEMA_USAGE`. Applications were told catalogs do
+  not exist and given their name in the same breath. All seven values now derive
+  from a single `SUPPORTS_CATALOGS` / `SUPPORTS_SCHEMAS` pair, and a test asserts
+  they agree.
 
 - `SQLCloseCursor` after a statement that produced no result set now returns
   `24000` rather than succeeding. An `INSERT` opens no cursor, so there is
