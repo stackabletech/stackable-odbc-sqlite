@@ -26,7 +26,7 @@ import threading
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_DIR = (SCRIPT_DIR / ".." / "..").resolve()
+PROJECT_DIR = (SCRIPT_DIR / "..").resolve()
 OPENSSL_CNF = PROJECT_DIR / "windows" / "openssl_legacy.cnf"
 
 REMOTE_DIR = r"C:\odbc_test"
