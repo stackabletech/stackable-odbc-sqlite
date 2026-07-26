@@ -45,9 +45,9 @@ jobs:
       - name: Run unit tests
         run: cargo test
 
-  # Unlike the sibling Trino driver, whose integration suite needs a
-  # Dockerised coordinator and Postgres, this one needs only unixODBC and the
-  # sqlite3 CLI and runs comfortably on a standard runner.
+  # This suite needs only unixODBC and the sqlite3 CLI, no server and no
+  # container, so it runs on a standard runner in seconds and is worth
+  # gating every pull request on.
   sqlite-integration:
     name: SQLite Integration Tests
     runs-on: ubuntu-latest

@@ -15,8 +15,8 @@
 //!   * repeat_get_data — SQLGetData called BENCH_REPEAT_GET_DATA times per cell
 //!
 //! Run:
-//!   cargo bench -p stackable-odbc-sqlite
-//!   BENCH_ROWS=1000000 cargo bench -p stackable-odbc-sqlite
+//!   cargo bench
+//!   BENCH_ROWS=1000000 cargo bench
 
 use std::ffi::c_void;
 use std::hint::black_box;

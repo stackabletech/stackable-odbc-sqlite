@@ -5,7 +5,7 @@
 //! the bundled 3.53.2 build spells differently from ODBC.
 //!
 //! The remap table is traceable to the `SQL_*_FUNCTIONS` bitmaps
-//! `crates/stackable-odbc-sqlite/src/backend/info.rs` advertises for SQLite.
+//! `src/backend/info.rs` advertises for SQLite.
 //! Every arm below corresponds to one advertised `SQL_FN_*`
 //! bit whose ODBC name SQLite spells differently *and* for which a bare name
 //! substitution (`stackable_odbc_core::escape` only ever swaps the identifier in front

@@ -1203,7 +1203,7 @@ fn sql_columns_w_result_set_reports_wvarchar_identifiers_and_narrow_data_type() 
     //   - DATA_TYPE (a SQL_SMALLINT column) has precision 5, not the old 50
     //     -- a SMALLINT cannot have 50 digits of precision.
     // A regression that reintroduces the old literals in
-    // crates/stackable-odbc-sqlite/src/backend/metadata.rs would only be caught
+    // src/backend/metadata.rs would only be caught
     // by the Python integration suite without this test.
     unsafe {
         let (env, conn, stmt) = alloc_handles();
