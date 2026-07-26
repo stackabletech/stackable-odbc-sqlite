@@ -27,6 +27,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   advertised it and implemented nothing, so the driver reported that it
   destroyed cursors on commit while in fact preserving them.
 
+- `SQL_TXN_ISOLATION_OPTION` now reports `SQL_TXN_SERIALIZABLE` alone, instead
+  of also advertising `SQL_TXN_READ_UNCOMMITTED`, `SQL_TXN_READ_COMMITTED` and
+  `SQL_TXN_REPEATABLE_READ`. Transactions in SQLite are serializable; READ
+  COMMITTED and REPEATABLE READ are not SQLite concepts, and READ UNCOMMITTED
+  additionally requires shared-cache mode, which this driver never enables.
+  Nothing applied the level an application set in any case —
+  `SQL_ATTR_TXN_ISOLATION` is stored on the connection and read back unchanged
+  — so the three extra levels promised behaviour no code path delivered.
+
 - `SQL_ALTER_TABLE` now reports `SQL_AT_ADD_COLUMN_SINGLE`,
   `SQL_AT_ADD_COLUMN_DEFAULT`, `SQL_AT_ADD_COLUMN_COLLATION`,
   `SQL_AT_ADD_TABLE_CONSTRAINT` and `SQL_AT_CONSTRAINT_NAME_DEFINITION` instead

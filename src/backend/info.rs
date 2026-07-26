@@ -28,8 +28,7 @@ use stackable_odbc_core::types::{
     SQL_SRJO_LEFT_OUTER_JOIN, SQL_SRJO_NATURAL_JOIN, SQL_SRJO_RIGHT_OUTER_JOIN,
     SQL_STRING_FUNCTIONS, SQL_SU_DML_STATEMENTS, SQL_SU_INDEX_DEFINITION, SQL_SU_TABLE_DEFINITION,
     SQL_SVE_CASE, SQL_SVE_CAST, SQL_SVE_COALESCE, SQL_SVE_NULLIF, SQL_SYSTEM_FUNCTIONS, SQL_TC_DML,
-    SQL_TIMEDATE_FUNCTIONS, SQL_TXN_READ_COMMITTED, SQL_TXN_READ_UNCOMMITTED,
-    SQL_TXN_REPEATABLE_READ, SQL_TXN_SERIALIZABLE, SqlDataType, TypeInfoRow, catalog_column_size,
+    SQL_TIMEDATE_FUNCTIONS, SQL_TXN_SERIALIZABLE, SqlDataType, TypeInfoRow, catalog_column_size,
     format_odbc_version, parse_dotted_version,
 };
 
@@ -691,13 +690,26 @@ fn sqlite_get_info(info_type: InfoType) -> Result<InfoValue, SqliteError> {
         InfoType::IdentifierCase => return Ok(InfoValue::U16(SQL_IC_MIXED)),
         InfoType::NullCollation => return Ok(InfoValue::U16(SQL_NC_LOW)),
         InfoType::DefaultTxnIsolation => return Ok(InfoValue::U32(SQL_TXN_SERIALIZABLE)),
+        // Only SERIALIZABLE. "Transactions in SQLite are SERIALIZABLE", and
+        // READ COMMITTED and REPEATABLE READ do not exist in SQLite at all.
+        //
+        // READ UNCOMMITTED is deliberately not claimed either. It requires
+        // shared-cache mode as well as `PRAGMA read_uncommitted`: "The
+        // combined use of shared cache mode and the read_uncommitted pragma is
+        // the only way that one database connection can see uncommitted
+        // changes on a different database connection." This driver opens with
+        // a plain `rusqlite::Connection::open`, so shared cache is off and the
+        // level is unreachable.
+        //
+        // This previously advertised all four levels. Nothing applies the
+        // value an application sets -- `SQL_ATTR_TXN_ISOLATION` is stored on
+        // the connection and read back, never pushed to SQLite -- so an
+        // application that asked for REPEATABLE READ was told it had it while
+        // running serializable.
+        //
+        // Spec: <https://www.sqlite.org/isolation.html>
         InfoType::TransactionIsolationProtocol => {
-            return Ok(InfoValue::U32(
-                SQL_TXN_READ_UNCOMMITTED
-                    | SQL_TXN_READ_COMMITTED
-                    | SQL_TXN_REPEATABLE_READ
-                    | SQL_TXN_SERIALIZABLE,
-            ));
+            return Ok(InfoValue::U32(SQL_TXN_SERIALIZABLE));
         }
         // SQL_TXN_CAPABLE is `An SQLUSMALLINT value` per the SQLGetInfo spec,
         // not SQLUINTEGER -- found by the info-type conformance test
@@ -1182,7 +1194,10 @@ mod tests {
         (InfoType::DefaultTxnIsolation,           Expected::U32(SQL_TXN_SERIALIZABLE)),
         (InfoType::ScrollOptions,                 Expected::U32(SQL_SO_FORWARD_ONLY)),
         (InfoType::ConvertFunctions,              Expected::U32(SQL_FN_CVT_CAST)),
-        (InfoType::TransactionIsolationProtocol,  Expected::U32(SQL_TXN_READ_UNCOMMITTED | SQL_TXN_READ_COMMITTED | SQL_TXN_REPEATABLE_READ | SQL_TXN_SERIALIZABLE)),
+        // SERIALIZABLE only: READ COMMITTED and REPEATABLE READ do not exist
+        // in SQLite, and READ UNCOMMITTED needs shared-cache mode, which this
+        // driver never enables.
+        (InfoType::TransactionIsolationProtocol,  Expected::U32(SQL_TXN_SERIALIZABLE)),
         (InfoType::AlterTable,                    Expected::U32(SQLITE_ALTER_TABLE)),
         (InfoType::MaxIndexSize,                  Expected::U32(0)),
         (InfoType::MaxRowSize,                    Expected::U32(0)),
@@ -1357,6 +1372,52 @@ mod tests {
                 get(InfoType::SchemaUsage),
                 InfoValue::U32(0),
                 "SQL_SCHEMA_USAGE must be 0 when schemas are unsupported"
+            );
+        }
+    }
+
+    /// `SQL_DEFAULT_TXN_ISOLATION` must name a level that
+    /// `SQL_TXN_ISOLATION_OPTION` actually offers, and this driver offers
+    /// exactly one.
+    ///
+    /// SQLite is serializable and has no way to be anything else here: READ
+    /// COMMITTED and REPEATABLE READ are not SQLite concepts, and READ
+    /// UNCOMMITTED needs shared-cache mode, which `SqliteBackend::connect`
+    /// never enables. The bitmap previously advertised all four.
+    ///
+    /// This matters more than an unused info value usually would, because
+    /// nothing applies what an application sets: `SQL_ATTR_TXN_ISOLATION` is
+    /// stored on the connection and read back unchanged, never pushed to
+    /// SQLite. Advertising a level therefore promises something no code path
+    /// delivers.
+    #[test]
+    fn transaction_isolation_offers_only_the_level_sqlite_implements() {
+        let supported = match sqlite_get_info(InfoType::TransactionIsolationProtocol) {
+            Ok(InfoValue::U32(v)) => v,
+            other => panic!("unexpected shape: {other:?}"),
+        };
+        let default = match sqlite_get_info(InfoType::DefaultTxnIsolation) {
+            Ok(InfoValue::U32(v)) => v,
+            other => panic!("unexpected shape: {other:?}"),
+        };
+
+        assert_eq!(
+            supported, SQL_TXN_SERIALIZABLE,
+            "SQLite is serializable and offers no other level reachable from this driver"
+        );
+        assert!(
+            supported & default == default,
+            "SQL_DEFAULT_TXN_ISOLATION ({default:#x}) is not in \
+             SQL_TXN_ISOLATION_OPTION ({supported:#x})"
+        );
+        for absent in [
+            SQL_TXN_READ_UNCOMMITTED,
+            SQL_TXN_READ_COMMITTED,
+            SQL_TXN_REPEATABLE_READ,
+        ] {
+            assert!(
+                supported & absent == 0,
+                "isolation level {absent:#x} advertised, but SQLite cannot provide it"
             );
         }
     }
