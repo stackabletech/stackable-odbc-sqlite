@@ -4,7 +4,10 @@ use snafu::Snafu;
 use stackable_odbc_core::{
     backend::Backend,
     errors::OdbcError,
-    types::{ColumnDescriptor, ColumnValue, ConnectParams, ExecuteOutcome, InfoValue, TypeInfoRow},
+    types::{
+        ColumnDescriptor, ColumnValue, ConnectParams, CursorBehavior, ExecuteOutcome, InfoValue,
+        TypeInfoRow,
+    },
 };
 
 mod execute;
@@ -292,6 +295,35 @@ impl Backend for SqliteBackend {
                 .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
         }
         Ok(())
+    }
+
+    /// `Preserve` for both commit and rollback.
+    ///
+    /// This driver materialises every result set eagerly
+    /// (`execute::exec_direct`), so no `rusqlite::Statement` is live when
+    /// `end_tran` runs and neither SQLite failure mode is reachable: COMMIT
+    /// cannot hit `SQLITE_BUSY` on a pending write, and ROLLBACK cannot abort
+    /// a pending read. The materialised rows and the cursor index survive both
+    /// untouched.
+    ///
+    /// Raw SQLite is stricter than that. From 3.7.11 a ROLLBACK aborts pending
+    /// statements with `SQLITE_ABORT`, which would make rollback
+    /// `SQL_CB_CLOSE`. The value below is a property of this driver's
+    /// architecture, not of SQLite.
+    ///
+    /// If result sets ever become lazily streamed, revisit both hooks — and
+    /// note that `SQL_CB_CLOSE` would then also require a real
+    /// [`StatementBackend::close_cursor`].
+    ///
+    /// Spec: <https://www.sqlite.org/lang_transaction.html>
+    fn cursor_commit_behavior() -> CursorBehavior {
+        CursorBehavior::Preserve
+    }
+
+    /// See [`SqliteBackend::cursor_commit_behavior`] — same reasoning, same
+    /// value.
+    fn cursor_rollback_behavior() -> CursorBehavior {
+        CursorBehavior::Preserve
     }
 
     // --- Delegations ---

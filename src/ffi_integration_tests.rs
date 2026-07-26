@@ -1323,11 +1323,8 @@ fn exec_direct_insert_then_select_roundtrip() {
         );
         assert_eq!(row_count, 1);
 
-        // Close the DML cursor so we can issue the SELECT on the same handle.
-        assert_eq!(
-            ffi::cursor::sql_close_cursor::<SqliteBackend>(stmt),
-            SqlReturn::SUCCESS
-        );
+        // No SQLCloseCursor here: an INSERT produces no result set, so no
+        // cursor is open and the SELECT can reuse this handle directly.
 
         // SELECT — verify the inserted row is readable.
         assert_eq!(
@@ -3348,10 +3345,8 @@ fn autocommit_off_then_rollback_discards_changes() {
             exec_direct(stmt, "INSERT INTO tx_test VALUES (1)"),
             SqlReturn::SUCCESS
         );
-        assert_eq!(
-            ffi::cursor::sql_close_cursor::<SqliteBackend>(stmt),
-            SqlReturn::SUCCESS
-        );
+        // No SQLCloseCursor between the two INSERTs: neither opens a cursor,
+        // so the handle is immediately reusable.
         assert_eq!(
             exec_direct(stmt, "INSERT INTO tx_test VALUES (2)"),
             SqlReturn::SUCCESS
@@ -3851,11 +3846,8 @@ fn data_at_execution_insert() {
             SqlReturn::SUCCESS
         );
 
-        // Close cursor from the INSERT before issuing a SELECT on the same handle.
-        assert_eq!(
-            ffi::cursor::sql_close_cursor::<SqliteBackend>(stmt),
-            SqlReturn::SUCCESS
-        );
+        // No SQLCloseCursor after the INSERT: it produced no result set, so no
+        // cursor is open and the SELECT can reuse this handle directly.
 
         // Verify the inserted row via ODBC SELECT.
         assert_eq!(
@@ -4574,6 +4566,92 @@ fn escape_fn_now_executes_as_sqlite_datetime() {
             now.as_bytes()[16],
             b':',
             "{{fn NOW()}} result missing ':' separator after minute: {now:?}"
+        );
+
+        cleanup(env, conn, stmt);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SQLEndTran cursor behaviour
+// ---------------------------------------------------------------------------
+
+/// Pins the two `SQLEndTran` cursor-behaviour values through the real FFI entry
+/// point, so that neither a change to `SqliteBackend`'s hooks nor a change to
+/// `stackable-odbc-core`'s defaults can move them silently.
+///
+/// Both are `SQL_CB_PRESERVE` because this driver materialises result sets
+/// eagerly; see `SqliteBackend::cursor_commit_behavior` for why that, and not
+/// SQLite's own semantics, decides the answer. SQLite would abort a pending
+/// read on ROLLBACK (`SQLITE_ABORT`, >= 3.7.11), which would be
+/// `SQL_CB_CLOSE` — but this driver never has one pending.
+#[test]
+fn end_tran_cursor_behaviour_is_preserve_for_commit_and_rollback() {
+    use stackable_odbc_core::types::{SQL_CB_PRESERVE, SQL_CURSOR_ROLLBACK_BEHAVIOR};
+
+    unsafe {
+        let (env, conn, stmt) = alloc_handles();
+        assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
+
+        // SQL_CURSOR_COMMIT_BEHAVIOR (23) has an InfoType variant.
+        assert_get_info_u16(conn, InfoType::CursorCommitBehaviour, SQL_CB_PRESERVE);
+
+        // SQL_CURSOR_ROLLBACK_BEHAVIOR (24) has none, so it goes through
+        // get_info_raw and must be requested by its raw value.
+        let mut value: u16 = 0xDEAD;
+        let mut str_len: i16 = 0;
+        let ret = ffi::info::sql_get_info_w::<SqliteBackend>(
+            conn,
+            SQL_CURSOR_ROLLBACK_BEHAVIOR,
+            &mut value as *mut u16 as *mut c_void,
+            2,
+            &mut str_len,
+        );
+        assert_eq!(ret, SqlReturn::SUCCESS, "SQL_CURSOR_ROLLBACK_BEHAVIOR");
+        assert_eq!(str_len, 2, "SQL_CURSOR_ROLLBACK_BEHAVIOR string_length_ptr");
+        assert_eq!(
+            value, SQL_CB_PRESERVE,
+            "SQL_CURSOR_ROLLBACK_BEHAVIOR must be SQL_CB_PRESERVE (2): no \
+             rusqlite::Statement is live when end_tran runs, so ROLLBACK \
+             cannot abort a pending read"
+        );
+
+        cleanup(env, conn, stmt);
+    }
+}
+
+/// `SQLCloseCursor` after a DML statement returns 24000. An INSERT produces no
+/// result set, so no cursor is ever open on that statement.
+///
+/// `stackable-odbc-core` used to infer cursor state from whether a backend
+/// statement existed, which let this succeed silently; it now tracks
+/// `cursor_open` explicitly and rejects the call, which is what the ODBC
+/// statement transition table requires.
+#[test]
+fn close_cursor_after_dml_returns_no_cursor_open() {
+    unsafe {
+        let (env, conn, stmt) = alloc_handles();
+        assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
+
+        assert_eq!(
+            exec_direct(stmt, "CREATE TABLE dml_cc (v INTEGER)"),
+            SqlReturn::SUCCESS
+        );
+        assert_eq!(
+            exec_direct(stmt, "INSERT INTO dml_cc VALUES (1)"),
+            SqlReturn::SUCCESS
+        );
+
+        // No result set, so no cursor: SQLSTATE 24000, invalid cursor state.
+        assert_eq!(
+            ffi::cursor::sql_close_cursor::<SqliteBackend>(stmt),
+            SqlReturn::ERROR
+        );
+
+        // The handle is still usable — the rejected close changed nothing.
+        assert_eq!(
+            exec_direct(stmt, "SELECT v FROM dml_cc"),
+            SqlReturn::SUCCESS
         );
 
         cleanup(env, conn, stmt);

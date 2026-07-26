@@ -635,11 +635,10 @@ fn sqlite_get_info(info_type: InfoType) -> Result<InfoValue, SqliteError> {
     }
 
     // Fall through to shared defaults
-    default_get_info(info_type, &SqliteBackend::catalog_result_column_widths()).ok_or_else(|| {
-        SqliteError::NotImplemented {
+    default_get_info::<SqliteBackend>(info_type, &SqliteBackend::catalog_result_column_widths())
+        .ok_or_else(|| SqliteError::NotImplemented {
             feature: format!("get_info({info_type:?})"),
-        }
-    })
+        })
 }
 
 pub(super) fn get_info(
@@ -825,7 +824,7 @@ pub(super) fn get_info_raw(
         // since 3.39.0; this build is 3.53.2).
         SQL_LIKE_ESCAPE_CLAUSE => Some(Ok(InfoValue::String("Y".into()))),
         SQL_OUTER_JOINS => Some(Ok(InfoValue::String("Y".into()))),
-        _ => common_get_info_raw(info_type).map(Ok),
+        _ => common_get_info_raw::<SqliteBackend>(info_type).map(Ok),
     }
 }
 
@@ -955,7 +954,7 @@ mod tests {
     }
     use super::*;
     use stackable_odbc_core::types::{
-        DEFAULT_IDENTIFIER_LEN, InfoType, InfoValue, SQL_AM_NONE, SQL_CA1_NEXT,
+        DEFAULT_IDENTIFIER_LEN, InfoType, InfoValue, SQL_AM_NONE, SQL_CA1_NEXT, SQL_CB_PRESERVE,
         SQL_DRIVER_ODBC_VER_STRING, SQL_FN_CVT_CAST, SQL_FN_NUM_CEILING, SQL_FN_NUM_COS,
         SQL_FN_NUM_FLOOR, SQL_FN_NUM_LOG, SQL_FN_NUM_MOD, SQL_FN_NUM_POWER, SQL_FN_NUM_RAND,
         SQL_FN_NUM_SQRT, SQL_FN_NUM_TRUNCATE, SQL_FN_STR_BIT_LENGTH, SQL_FN_STR_CHAR_LENGTH,
@@ -1010,7 +1009,10 @@ mod tests {
         (InfoType::MaxDriverConnections,          Expected::U16(0)),
         (InfoType::MaxConcurrentActivities,       Expected::U16(0)),
         (InfoType::ConcatNullBehavior,            Expected::U16(0)),
-        (InfoType::CursorCommitBehaviour,         Expected::U16(0)),
+        // SQL_CB_PRESERVE (2), derived from Backend::cursor_commit_behavior.
+        // Not SQL_CB_DELETE: this driver materialises result sets eagerly, so
+        // SQLEndTran cannot disturb an open cursor. See the hook in backend.rs.
+        (InfoType::CursorCommitBehaviour,         Expected::U16(SQL_CB_PRESERVE)),
         (InfoType::IdentifierCase,                Expected::U16(SQL_IC_MIXED)),
         (InfoType::MaxColumnNameLen,              Expected::U16(DEFAULT_IDENTIFIER_LEN)),
         (InfoType::MaxCursorNameLen,              Expected::U16(SQL_MAX_CURSOR_NAME_LEN)),
