@@ -16,8 +16,9 @@ use stackable_odbc_core::{
         ParamType, SQL_AUTOCOMMIT_OFF, SQL_AUTOCOMMIT_ON, SQL_CASCADE, SQL_CD_FALSE,
         SQL_CURSOR_FORWARD_ONLY, SQL_DIAG_MESSAGE_TEXT, SQL_DRIVER_ODBC_VER_STRING,
         SQL_GD_ANY_COLUMN, SQL_GD_ANY_ORDER, SQL_GD_BOUND, SQL_IC_SENSITIVE, SQL_INDEX_UNIQUE,
-        SQL_QUICK, SQL_RESTRICT, SqlDataType, SqlReturn, StatementAttribute, Timestamp,
-        expected_kind,
+        SQL_QUICK, SQL_RESTRICT, SQL_TXN_READ_COMMITTED, SQL_TXN_READ_UNCOMMITTED,
+        SQL_TXN_REPEATABLE_READ, SQL_TXN_SERIALIZABLE, SqlDataType, SqlReturn, StatementAttribute,
+        Timestamp, expected_kind,
     },
 };
 
@@ -308,22 +309,6 @@ fn get_data_returns_correct_values() {
     }
 }
 
-/// Mirrors `Timestamp` (`SQL_TIMESTAMP_STRUCT`)'s field layout so
-/// this test file can read a `SQL_C_TYPE_TIMESTAMP` buffer without adding
-/// `odbc-sys` as a direct dependency of this crate (it is only reached today
-/// through `stackable-odbc-core`'s re-exports, none of which cover this struct).
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RawTimestamp {
-    year: i16,
-    month: u16,
-    day: u16,
-    hour: u16,
-    minute: u16,
-    second: u16,
-    fraction: u32,
-}
-
 /// SQLite is dynamically typed, and its own documentation defines three storage
 /// formats for a `DATETIME` column: ISO-8601 text, an integer count of seconds
 /// since the epoch, or a floating point Julian day number. Because this driver
@@ -362,7 +347,7 @@ fn get_data_datetime_column_handles_integer_and_real_storage() {
             ffi::fetch::sql_fetch::<SqliteBackend>(stmt),
             SqlReturn::SUCCESS
         );
-        let mut buf = RawTimestamp {
+        let mut buf = Timestamp {
             year: 0,
             month: 0,
             day: 0,
@@ -376,8 +361,8 @@ fn get_data_datetime_column_handles_integer_and_real_storage() {
             stmt,
             2,
             CDataType::TypeTimestamp as i16,
-            &mut buf as *mut RawTimestamp as *mut c_void,
-            std::mem::size_of::<RawTimestamp>() as isize,
+            &mut buf as *mut Timestamp as *mut c_void,
+            std::mem::size_of::<Timestamp>() as isize,
             &mut ind,
         );
         assert_eq!(ret, SqlReturn::SUCCESS, "integer-encoded datetime");
@@ -400,8 +385,8 @@ fn get_data_datetime_column_handles_integer_and_real_storage() {
             stmt,
             2,
             CDataType::TypeTimestamp as i16,
-            &mut buf2 as *mut RawTimestamp as *mut c_void,
-            std::mem::size_of::<RawTimestamp>() as isize,
+            &mut buf2 as *mut Timestamp as *mut c_void,
+            std::mem::size_of::<Timestamp>() as isize,
             &mut ind2,
         );
         assert_eq!(
@@ -3864,6 +3849,85 @@ unsafe fn last_sqlstate(stmt: *mut c_void) -> String {
     unsafe { last_diag_rec(stmt).0 }
 }
 
+/// Read the first diagnostic record's 5-character SQLSTATE off a *connection*
+/// handle. `SQLSetConnectAttr` posts its diagnostics there, not on a statement.
+unsafe fn last_conn_sqlstate(conn: *mut c_void) -> String {
+    let mut state = [0u16; 6];
+    let mut native: i32 = 0;
+    let mut msg = [0u16; 512];
+    let mut msg_len: i16 = 0;
+    unsafe {
+        assert_eq!(
+            ffi::diag::sql_get_diag_rec_w::<SqliteBackend>(
+                HandleType::Dbc as i16,
+                conn,
+                1,
+                state.as_mut_ptr(),
+                &mut native,
+                msg.as_mut_ptr(),
+                msg.len() as i16,
+                &mut msg_len,
+            ),
+            SqlReturn::SUCCESS,
+            "no diagnostic record was pushed on the connection"
+        );
+    }
+    String::from_utf16_lossy(&state[..5])
+}
+
+#[test]
+fn txn_isolation_accepts_only_the_level_sqlite_implements() {
+    // SQLite runs serializable and nothing else: READ COMMITTED and
+    // REPEATABLE READ are not SQLite concepts, and READ UNCOMMITTED needs
+    // shared-cache mode, which `connect` does not open. So
+    // SQL_TXN_ISOLATION_OPTION advertises exactly one level, and setting any
+    // other is now refused with HY024 rather than stored and echoed back.
+    //
+    // The spec assigns this check to the driver: the Driver Manager validates
+    // only attributes "that accept a discrete set of values". An application
+    // that asked for READ COMMITTED previously got SQL_SUCCESS and serializable
+    // behaviour anyway -- it had no way to find out it had not been honoured.
+    unsafe {
+        let (env, conn, stmt) = alloc_handles();
+        assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
+
+        assert_eq!(
+            ffi::connect_attr::sql_set_connect_attr_w::<SqliteBackend>(
+                conn,
+                ConnectionAttribute::TXN_ISOLATION.0,
+                std::ptr::without_provenance_mut(SQL_TXN_SERIALIZABLE as usize),
+                0,
+            ),
+            SqlReturn::SUCCESS,
+            "the one advertised level must be accepted"
+        );
+
+        for level in [
+            SQL_TXN_READ_UNCOMMITTED,
+            SQL_TXN_READ_COMMITTED,
+            SQL_TXN_REPEATABLE_READ,
+        ] {
+            assert_eq!(
+                ffi::connect_attr::sql_set_connect_attr_w::<SqliteBackend>(
+                    conn,
+                    ConnectionAttribute::TXN_ISOLATION.0,
+                    std::ptr::without_provenance_mut(level as usize),
+                    0,
+                ),
+                SqlReturn::ERROR,
+                "level {level:#x} is not advertised and must be refused"
+            );
+            assert_eq!(
+                last_conn_sqlstate(conn),
+                stackable_odbc_core::types::sql_state::INVALID_ATTRIBUTE_VALUE,
+                "level {level:#x}"
+            );
+        }
+
+        cleanup(env, conn, stmt);
+    }
+}
+
 /// Read the first diagnostic record off `stmt` as (SQLSTATE, native code,
 /// message).
 unsafe fn last_diag_rec(stmt: *mut c_void) -> (String, i32, String) {
@@ -4166,7 +4230,7 @@ fn timestamp_column_stored_as_text_read_as_type_timestamp() {
             ffi::fetch::sql_fetch::<SqliteBackend>(stmt),
             SqlReturn::SUCCESS
         );
-        let mut buf = RawTimestamp {
+        let mut buf = Timestamp {
             year: 0,
             month: 0,
             day: 0,
@@ -4180,8 +4244,8 @@ fn timestamp_column_stored_as_text_read_as_type_timestamp() {
             stmt,
             1,
             CDataType::TypeTimestamp as i16,
-            &mut buf as *mut RawTimestamp as *mut c_void,
-            std::mem::size_of::<RawTimestamp>() as isize,
+            &mut buf as *mut Timestamp as *mut c_void,
+            std::mem::size_of::<Timestamp>() as isize,
             &mut ind,
         );
         assert_eq!(ret, SqlReturn::SUCCESS, "text-encoded datetime");
@@ -4199,8 +4263,8 @@ fn timestamp_column_stored_as_text_read_as_type_timestamp() {
             stmt,
             1,
             CDataType::TypeTimestamp as i16,
-            &mut buf2 as *mut RawTimestamp as *mut c_void,
-            std::mem::size_of::<RawTimestamp>() as isize,
+            &mut buf2 as *mut Timestamp as *mut c_void,
+            std::mem::size_of::<Timestamp>() as isize,
             &mut ind2,
         );
         assert_eq!(ret2, SqlReturn::ERROR);

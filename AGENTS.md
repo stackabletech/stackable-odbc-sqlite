@@ -121,9 +121,15 @@ spec values are already modelled:
 
 All are re-exported from `stackable_odbc_core::types`. **This crate takes no
 direct `odbc-sys` dependency** — it reaches those types only through core's
-re-exports. That is deliberate: `src/ffi_integration_tests.rs` defines a local
-`RawTimestamp` mirroring `SQL_TIMESTAMP_STRUCT` rather than pull the crate in.
-Do not add `odbc-sys` to `Cargo.toml`.
+re-exports. Do not add `odbc-sys` to `Cargo.toml`.
+
+Core also re-exports the crate wholesale as `stackable_odbc_core::odbc_sys`,
+so a type with no `types` re-export of its own is still reachable without a
+direct dependency. Reach for that rather than hand-rolling a `#[repr(C)]`
+mirror: `src/ffi_integration_tests.rs` used to carry a local `RawTimestamp`
+duplicating `SQL_TIMESTAMP_STRUCT`, and a mirror that drifts from the real
+struct is two different types to the compiler and one silent ABI mismatch to
+the application.
 
 ### Type cast safety
 
@@ -137,6 +143,22 @@ between `usize`, `i64`, `u16` and `i16` in this crate.
 **Route every `rusqlite` error through `map_sqlite_error`** (`src/backend.rs`).
 Never hand-build a `SqliteError` or `OdbcError` from a `rusqlite::Error` at the
 call site; that function is the single place that decides the SQLSTATE.
+
+`map_sqlite_error` keeps the `rusqlite::Error` it classified in the variant's
+`cause` field, and `From<SqliteError> for OdbcError` turns that into
+`with_native_error` (SQLite's *extended* result code, which is what separates
+`SQLITE_CONSTRAINT_NOTNULL` from `SQLITE_CONSTRAINT_FOREIGNKEY` — the SQLSTATE
+cannot) and `with_source` (the causal chain). A new classified variant must
+carry `cause` too, or it silently reports native code `0`.
+
+**One error type, both directions.** Every `Backend` and `StatementBackend`
+method returns `Result<_, SqliteError>` — core requires
+`Into<OdbcError> + From<OdbcError> + Error + Send + Sync + 'static`. The
+`From<OdbcError>` direction is what lets a defaulted trait body construct an
+error and still name `Self::Error`, and `SqliteError::Odbc` is where such an
+error lands. Return `OdbcError::NoResultSet` and friends through `.into()`
+rather than reclassifying them: the round trip is lossless, and reclassifying
+would discard the SQLSTATE core chose.
 
 Convert raw integers to typed enums at the boundary with the `xxx_from_raw()`
 functions from core — never `transmute`.
@@ -156,12 +178,22 @@ database file is `08001`. Failures after that point are `08S01`.
 
 `Backend` has around two dozen **required** methods that state what SQLite can
 do — `alter_table_support`, `outer_join_capabilities`, `subqueries`,
-`sql_conformance`, `supports_catalogs`, `txn_isolation_options` and the rest.
-They are required, with no default, deliberately: a defaulted capability is a
-claim no backend ever made, and every one of them was a bug here before core
-made it a compile error.
+`sql_conformance`, `supports_catalogs`, `identifier_case`,
+`txn_isolation_options` and the rest. They are required, with no default,
+deliberately: a defaulted capability is a claim no backend ever made, and every
+one of them was a bug here before core made it a compile error.
 
-Three rules, all learned the hard way:
+Four rules, all learned the hard way:
+
+**Declare it once.** A capability with a hook is answered *only* through the
+hook — never also in `get_info_raw`. Core derives the info type from the hook,
+so a second answer is a value that can disagree with itself, and the one an
+application sees depends on which core consults first. `SQL_IDENTIFIER_CASE`
+was stated in both places; so was `SQL_GETDATA_EXTENSIONS`, which is not even a
+fact about SQLite — it describes core's own fetch path, and belongs to core for
+the same reason. The snapshot test (`get_info_snapshot`) pins the value an
+application sees regardless of who answers it, which is what makes moving an
+answer safe.
 
 **Probe the bundled library, never the documentation or the system CLI.**
 `rusqlite` links its own SQLite (3.53.2 via the `bundled` feature); the
@@ -221,8 +253,18 @@ be `SQL_CB_CLOSE`, and a COMMIT with pending writes fails with `SQLITE_BUSY`.
 
 If result sets ever become lazily streamed, both hooks must be revisited, and
 `SQL_CB_CLOSE` would additionally require a real
-`StatementBackend::close_cursor`. `end_tran_cursor_behaviour_is_preserve_for_commit_and_rollback`
-pins the reported values through the FFI entry point.
+`StatementBackend::close_cursor` — which is fallible now (`Result<(),
+Self::Error>`), because under `SQL_CB_CLOSE` it is the only thing that closes
+the cursor during `SQLEndTran`, and a failure has to reach the statement's
+diagnostic queue rather than be swallowed. Here it only resets an index into an
+already-materialised `Vec`, so it cannot fail.
+`end_tran_cursor_behaviour_is_preserve_for_commit_and_rollback` pins the
+reported values through the FFI entry point.
+
+`SQL_ATTR_TXN_ISOLATION` is validated by core against `txn_isolation_options`,
+which this driver answers with `SQL_TXN_SERIALIZABLE` alone. Setting any other
+level is refused with `HY024` rather than stored and echoed back — see
+`txn_isolation_accepts_only_the_level_sqlite_implements`.
 
 ## Architecture of this crate
 
@@ -277,6 +319,24 @@ both the per-module unit tests and `src/ffi_integration_tests.rs`, which drives
 the real exported entry points against real handles. Prefer adding to the FFI
 tests when the behaviour is observable by an application: they catch the
 marshalling and cursor-state bugs that unit tests on the backend cannot.
+
+Core's `conformance` module and its connection attach/detach helpers sit behind
+its default-off `test-support` feature, enabled here under `[dev-dependencies]`
+so `cargo test` sees it and `cargo build` does not. It is test code that would
+otherwise ship inside the driver binary.
+
+**Set up test data through the FFI, not by reaching into the handle.** Core's
+`handles` module is `pub(crate)`, so `ConnectionHandle` and the
+`rusqlite::Connection` inside it are no longer reachable from here — use the
+`setup_sql`, `query_scalar_i64` and `query_row_two_strings` helpers, which go
+through `SQLExecDirect`/`SQLFetch`/`SQLGetData`. Each allocates its own
+statement handle rather than borrowing the caller's, because the statement a
+test is asserting on usually holds live state (a cursor, a prepared statement,
+bound parameters) that setup would destroy. Driving setup through the driver
+also means a setup path that breaks fails loudly, instead of leaving the test
+asserting against an empty table. `test_support::attach_connection` is the
+supported route for the different job of exercising core's connected paths
+with no data source open.
 
 ### Integration tests
 

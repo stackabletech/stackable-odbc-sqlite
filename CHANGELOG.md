@@ -62,6 +62,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   follows a `stackable-odbc-core` change; the driver's behaviour is unchanged
   beyond what it reports.
 
+- `SQLSetConnectAttr(SQL_ATTR_TXN_ISOLATION)` refuses any level other than
+  `SQL_TXN_SERIALIZABLE` with SQLSTATE `HY024`, where it previously stored
+  whatever it was given and echoed it back. Serializable is the only level
+  SQLite runs at and the only one `SQL_TXN_ISOLATION_OPTION` advertises: READ
+  COMMITTED and REPEATABLE READ are not SQLite concepts, and READ UNCOMMITTED
+  needs shared-cache mode, which `connect` does not open. An application that
+  asked for another level previously got `SQL_SUCCESS` and serializable
+  behaviour regardless, with no way to learn its request had not been honoured.
+
 - `SQL_IDENTIFIER_CASE` is now declared through the backend's
   `identifier_case` hook rather than answered directly. The value is unchanged
   (`SQL_IC_MIXED`): SQLite stores an unquoted identifier as written and matches

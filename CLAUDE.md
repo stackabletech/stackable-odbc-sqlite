@@ -14,11 +14,21 @@ Read and follow @AGENTS.md — it contains architecture, patterns, and procedure
   SQLSTATEs are returned by the Driver Manager, not the driver.
 - **Route every client error through `map_sqlite_error`.** Never hand-build an
   `OdbcError` or `SqliteError` from a `rusqlite::Error` at the call site; that
-  function is the single place that decides the SQLSTATE.
+  function is the single place that decides the SQLSTATE. A new classified
+  variant must carry the originating error in its `cause` field, or the
+  diagnostic reports native code `0`.
+- **One error type.** Every `Backend` and `StatementBackend` method returns
+  `Result<_, SqliteError>`. An `OdbcError` core produced travels back through
+  `SqliteError::Odbc` via `.into()` — never reclassify it, which would discard
+  the SQLSTATE core chose.
+- **Declare each capability once.** A `SQLGetInfo` value with a `Backend` hook
+  is answered through the hook only, never also in `get_info_raw`. Two answers
+  are a value that can disagree with itself.
 - **Use `odbc-sys` types** — never redefine enums, structs, or constants it
-  already provides. They are re-exported from `stackable_odbc_core::types`. Do
-  **not** add `odbc-sys` as a direct dependency: this crate deliberately reaches
-  those types only through core's re-exports.
+  already provides. Reach them through `stackable_odbc_core::types`, or through
+  `stackable_odbc_core::odbc_sys` for anything `types` does not re-export. Do
+  **not** add `odbc-sys` as a direct dependency, and do not hand-roll a
+  `#[repr(C)]` mirror of one of its structs.
 - **Convert raw integers to typed enums at the boundary** — use the
   `xxx_from_raw()` functions from core, never `transmute`.
 - **Do not make result-set fetching lazy.** `exec_direct` materialises every row
