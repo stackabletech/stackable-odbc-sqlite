@@ -5,10 +5,9 @@
 //! bitmaps (`SQLITE_*`).
 
 use stackable_odbc_core::backend::{Backend, common_get_info_raw, default_get_info};
-use stackable_odbc_core::errors::OdbcError;
-use stackable_odbc_core::function_id::FunctionId;
+use stackable_odbc_core::function_id::{CORE_EXPORTED_FUNCTIONS, FunctionId};
 use stackable_odbc_core::types::{
-    InfoType, InfoValue, MaxPrecision, MaxScale, Nullable, SQL_AF_ALL, SQL_AF_AVG, SQL_AF_COUNT,
+    InfoType, InfoValue, MaxPrecision, MaxScale, SQL_AF_ALL, SQL_AF_AVG, SQL_AF_COUNT,
     SQL_AF_DISTINCT, SQL_AF_MAX, SQL_AF_MIN, SQL_AF_SUM, SQL_AGGREGATE_FUNCTIONS,
     SQL_AT_ADD_COLUMN_COLLATION, SQL_AT_ADD_COLUMN_DEFAULT, SQL_AT_ADD_COLUMN_SINGLE,
     SQL_AT_ADD_CONSTRAINT, SQL_AT_ADD_TABLE_CONSTRAINT, SQL_AT_CONSTRAINT_NAME_DEFINITION,
@@ -18,9 +17,8 @@ use stackable_odbc_core::types::{
     SQL_FN_STR_REPLACE, SQL_FN_STR_RTRIM, SQL_FN_STR_SOUNDEX, SQL_FN_STR_SUBSTRING,
     SQL_FN_STR_UCASE, SQL_FN_SYS_IFNULL, SQL_FN_TD_CURDATE, SQL_FN_TD_CURRENT_DATE,
     SQL_FN_TD_CURRENT_TIME, SQL_FN_TD_CURRENT_TIMESTAMP, SQL_FN_TD_CURTIME, SQL_FN_TD_NOW,
-    SQL_GD_ANY_COLUMN, SQL_GD_ANY_ORDER, SQL_GD_BOUND, SQL_IC_MIXED, SQL_LIKE_ESCAPE_CLAUSE,
-    SQL_NUMERIC_FUNCTIONS, SQL_OJ_ALL_COMPARISON_OPS, SQL_OJ_FULL, SQL_OJ_INNER, SQL_OJ_LEFT,
-    SQL_OJ_NESTED, SQL_OJ_NOT_ORDERED, SQL_OJ_RIGHT, SQL_OUTER_JOINS, SQL_SEARCHABLE,
+    SQL_LIKE_ESCAPE_CLAUSE, SQL_NUMERIC_FUNCTIONS, SQL_OJ_ALL_COMPARISON_OPS, SQL_OJ_FULL,
+    SQL_OJ_INNER, SQL_OJ_LEFT, SQL_OJ_NESTED, SQL_OJ_NOT_ORDERED, SQL_OJ_RIGHT, SQL_OUTER_JOINS,
     SQL_SP_BETWEEN, SQL_SP_COMPARISON, SQL_SP_EXISTS, SQL_SP_IN, SQL_SP_ISNOTNULL, SQL_SP_ISNULL,
     SQL_SP_LIKE, SQL_SQ_COMPARISON, SQL_SQ_CORRELATED_SUBQUERIES, SQL_SQ_EXISTS, SQL_SQ_IN,
     SQL_SQL92_PREDICATES, SQL_SQL92_RELATIONAL_JOIN_OPERATORS, SQL_SQL92_VALUE_EXPRESSIONS,
@@ -44,6 +42,11 @@ use crate::type_conversion::{
 /// ODBC function IDs for functions this driver implements.
 /// Used by `SQLGetFunctions` to report supported capabilities.
 /// Reference: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlgetfunctions-function>
+///
+/// Superseded by [`CORE_EXPORTED_FUNCTIONS`], which [`get_functions`] returns
+/// instead; kept only so `supported_functions_are_all_exported_by_core` can
+/// assert the two agree. See that test for why the hand-written list went.
+#[cfg(test)]
 static SUPPORTED_FUNCTIONS: &[FunctionId] = &[
     FunctionId::BindCol,
     FunctionId::ColAttribute,
@@ -126,275 +129,123 @@ static SQLITE_TYPE_INFO: &[TypeInfoRow] = &[
     // actually satisfies the invariant for every text-affinity declared
     // type; the SQL_VARCHAR/SQL_CHAR rows further down this list
     // exist only for Windows DM/pyodbc ANSI compatibility.
-    TypeInfoRow {
-        type_name: "WVARCHAR",
-        data_type: SqlDataType::EXT_W_VARCHAR,
-        column_size: catalog_column_size(
+    TypeInfoRow::new("WVARCHAR", SqlDataType::EXT_W_VARCHAR)
+        .with_column_size(catalog_column_size(
             SqlDataType::EXT_W_VARCHAR,
             MaxPrecision(VARCHAR_DEFAULT_COLUMN_SIZE),
             MaxScale(0),
-        ),
-        literal_prefix: Some("'"),
-        literal_suffix: Some("'"),
-        create_params: Some("max length"),
-        nullable: Nullable::SqlNullable as i16,
-        case_sensitive: true,
-        searchable: SQL_SEARCHABLE,
-        unsigned: None,
-        fixed_prec_scale: false,
-        auto_unique_value: None,
-        local_type_name: None,
-        minimum_scale: None,
-        maximum_scale: None,
-        sql_data_type: SqlDataType::EXT_W_VARCHAR.0,
-        sql_datetime_sub: None,
-        num_prec_radix: None,
-        interval_precision: None,
-    },
+        ))
+        .with_literal_affixes(Some("'"), Some("'"))
+        .with_create_params(Some("max length"))
+        .with_case_sensitive(true),
     // WCHAR — Unicode counterpart to the CHAR row further down this list,
     // included for symmetry per the Windows DM checklist even though
     // sqlite_type_to_sql_data_type itself never produces EXT_W_CHAR (declared
     // CHAR(n) collapses into the WVARCHAR affinity above, matching real
     // SQLite semantics where CHAR(n) is not length-limited).
-    TypeInfoRow {
-        type_name: "WCHAR",
-        data_type: SqlDataType::EXT_W_CHAR,
-        column_size: catalog_column_size(
+    TypeInfoRow::new("WCHAR", SqlDataType::EXT_W_CHAR)
+        .with_column_size(catalog_column_size(
             SqlDataType::EXT_W_CHAR,
             MaxPrecision(WCHAR_COLUMN_SIZE_ROW),
             MaxScale(0),
-        ),
-        literal_prefix: Some("'"),
-        literal_suffix: Some("'"),
-        create_params: Some("length"),
-        nullable: Nullable::SqlNullable as i16,
-        case_sensitive: true,
-        searchable: SQL_SEARCHABLE,
-        unsigned: None,
-        fixed_prec_scale: false,
-        auto_unique_value: None,
-        local_type_name: None,
-        minimum_scale: None,
-        maximum_scale: None,
-        sql_data_type: SqlDataType::EXT_W_CHAR.0,
-        sql_datetime_sub: None,
-        num_prec_radix: None,
-        interval_precision: None,
-    },
+        ))
+        .with_literal_affixes(Some("'"), Some("'"))
+        .with_create_params(Some("length"))
+        .with_case_sensitive(true),
     // BIT — sqlite_type_to_sql_data_type maps BOOLEAN/BOOL here.
-    TypeInfoRow {
-        type_name: "BIT",
-        data_type: SqlDataType::EXT_BIT,
-        column_size: catalog_column_size(SqlDataType::EXT_BIT, MaxPrecision(0), MaxScale(0)),
-        literal_prefix: None,
-        literal_suffix: None,
-        create_params: None,
-        nullable: Nullable::SqlNullable as i16,
-        case_sensitive: false,
-        searchable: SQL_SEARCHABLE,
-        unsigned: None,
-        fixed_prec_scale: false,
-        auto_unique_value: None,
-        local_type_name: None,
-        minimum_scale: None,
-        maximum_scale: None,
-        sql_data_type: SqlDataType::EXT_BIT.0,
-        sql_datetime_sub: None,
-        num_prec_radix: None,
-        interval_precision: None,
-    },
+    TypeInfoRow::new("BIT", SqlDataType::EXT_BIT).with_column_size(catalog_column_size(
+        SqlDataType::EXT_BIT,
+        MaxPrecision(0),
+        MaxScale(0),
+    )),
     // TINYINT — sqlite_type_to_sql_data_type maps TINYINT here.
-    TypeInfoRow {
-        type_name: "TINYINT",
-        data_type: SqlDataType::EXT_TINY_INT,
-        column_size: catalog_column_size(SqlDataType::EXT_TINY_INT, MaxPrecision(0), MaxScale(0)),
-        literal_prefix: None,
-        literal_suffix: None,
-        create_params: None,
-        nullable: Nullable::SqlNullable as i16,
-        case_sensitive: false,
-        searchable: SQL_SEARCHABLE,
-        unsigned: Some(false),
-        fixed_prec_scale: false,
-        auto_unique_value: Some(false),
-        local_type_name: None,
-        minimum_scale: Some(0),
-        maximum_scale: Some(0),
-        sql_data_type: SqlDataType::EXT_TINY_INT.0,
-        sql_datetime_sub: None,
-        num_prec_radix: Some(10),
-        interval_precision: None,
-    },
+    TypeInfoRow::new("TINYINT", SqlDataType::EXT_TINY_INT)
+        .with_column_size(catalog_column_size(
+            SqlDataType::EXT_TINY_INT,
+            MaxPrecision(0),
+            MaxScale(0),
+        ))
+        .with_unsigned(Some(false))
+        .with_auto_unique_value(Some(false))
+        .with_scale_range(Some(0), Some(0))
+        .with_num_prec_radix(Some(10)),
     // BIGINT — sqlite_type_to_sql_data_type maps INTEGER/INT/BIGINT/INT8 here
     // (and the "INT"-substring affinity fallback), since SQLite integers are
     // always 64-bit storage. This is the row an INTEGER column's reported
     // type (SQL_BIGINT) actually resolves to.
-    TypeInfoRow {
-        type_name: "BIGINT",
-        data_type: SqlDataType::EXT_BIG_INT,
-        column_size: catalog_column_size(SqlDataType::EXT_BIG_INT, MaxPrecision(0), MaxScale(0)),
-        literal_prefix: None,
-        literal_suffix: None,
-        create_params: None,
-        nullable: Nullable::SqlNullable as i16,
-        case_sensitive: false,
-        searchable: SQL_SEARCHABLE,
-        unsigned: Some(false),
-        fixed_prec_scale: false,
-        auto_unique_value: Some(false),
-        local_type_name: None,
-        minimum_scale: Some(0),
-        maximum_scale: Some(0),
-        sql_data_type: SqlDataType::EXT_BIG_INT.0,
-        sql_datetime_sub: None,
-        num_prec_radix: Some(10),
-        interval_precision: None,
-    },
-    TypeInfoRow {
-        type_name: "BLOB",
-        data_type: SqlDataType::EXT_VAR_BINARY,
-        column_size: catalog_column_size(
+    TypeInfoRow::new("BIGINT", SqlDataType::EXT_BIG_INT)
+        .with_column_size(catalog_column_size(
+            SqlDataType::EXT_BIG_INT,
+            MaxPrecision(0),
+            MaxScale(0),
+        ))
+        .with_unsigned(Some(false))
+        .with_auto_unique_value(Some(false))
+        .with_scale_range(Some(0), Some(0))
+        .with_num_prec_radix(Some(10)),
+    TypeInfoRow::new("BLOB", SqlDataType::EXT_VAR_BINARY)
+        .with_column_size(catalog_column_size(
             SqlDataType::EXT_VAR_BINARY,
             MaxPrecision(BLOB_DEFAULT_COLUMN_SIZE),
             MaxScale(0),
-        ),
-        literal_prefix: Some("X'"),
-        literal_suffix: Some("'"),
-        create_params: Some("max length"),
-        nullable: Nullable::SqlNullable as i16,
-        case_sensitive: false,
-        searchable: SQL_SEARCHABLE,
-        unsigned: None,
-        fixed_prec_scale: false,
-        auto_unique_value: None,
-        local_type_name: None,
-        minimum_scale: None,
-        maximum_scale: None,
-        sql_data_type: SqlDataType::EXT_VAR_BINARY.0,
-        sql_datetime_sub: None,
-        num_prec_radix: None,
-        interval_precision: None,
-    },
+        ))
+        .with_literal_affixes(Some("X'"), Some("'"))
+        .with_create_params(Some("max length")),
     // SQL_CHAR (1) — ANSI alias. See the SQL_VARCHAR comment further down
     // this list; same rationale for why this is a distinct row from the
     // WCHAR row above.
-    TypeInfoRow {
-        type_name: "CHAR",
-        data_type: SqlDataType::CHAR,
-        column_size: catalog_column_size(
+    TypeInfoRow::new("CHAR", SqlDataType::CHAR)
+        .with_column_size(catalog_column_size(
             SqlDataType::CHAR,
             MaxPrecision(CHAR_COLUMN_SIZE_ROW),
             MaxScale(0),
-        ),
-        literal_prefix: Some("'"),
-        literal_suffix: Some("'"),
-        create_params: Some("length"),
-        nullable: Nullable::SqlNullable as i16,
-        case_sensitive: true,
-        searchable: SQL_SEARCHABLE,
-        unsigned: None,
-        fixed_prec_scale: false,
-        auto_unique_value: None,
-        local_type_name: None,
-        minimum_scale: None,
-        maximum_scale: None,
-        sql_data_type: SqlDataType::CHAR.0,
-        sql_datetime_sub: None,
-        num_prec_radix: None,
-        interval_precision: None,
-    },
+        ))
+        .with_literal_affixes(Some("'"), Some("'"))
+        .with_create_params(Some("length"))
+        .with_case_sensitive(true),
     // DECIMAL — sqlite_type_to_sql_data_type maps DECIMAL/NUMERIC here, and
     // it is also the NUMERIC-affinity fallback for any declared type that
     // SQLite's own affinity rules do not otherwise classify.
-    TypeInfoRow {
-        type_name: "DECIMAL",
-        data_type: SqlDataType::DECIMAL,
-        column_size: catalog_column_size(
+    TypeInfoRow::new("DECIMAL", SqlDataType::DECIMAL)
+        .with_column_size(catalog_column_size(
             SqlDataType::DECIMAL,
             MaxPrecision(DECIMAL_DEFAULT_COLUMN_SIZE),
             MaxScale(DECIMAL_MAX_SCALE),
-        ),
-        literal_prefix: None,
-        literal_suffix: None,
-        create_params: Some("precision,scale"),
-        nullable: Nullable::SqlNullable as i16,
-        case_sensitive: false,
-        searchable: SQL_SEARCHABLE,
-        unsigned: Some(false),
-        fixed_prec_scale: false,
-        auto_unique_value: Some(false),
-        local_type_name: None,
-        minimum_scale: Some(0),
-        maximum_scale: Some(DECIMAL_MAX_SCALE),
-        sql_data_type: SqlDataType::DECIMAL.0,
-        sql_datetime_sub: None,
-        num_prec_radix: Some(10),
-        interval_precision: None,
-    },
-    TypeInfoRow {
-        type_name: "INTEGER",
-        data_type: SqlDataType::INTEGER,
-        column_size: catalog_column_size(SqlDataType::INTEGER, MaxPrecision(0), MaxScale(0)),
-        literal_prefix: None,
-        literal_suffix: None,
-        create_params: None,
-        nullable: Nullable::SqlNullable as i16,
-        case_sensitive: false,
-        searchable: SQL_SEARCHABLE,
-        unsigned: Some(false),
-        fixed_prec_scale: false,
-        auto_unique_value: Some(false),
-        local_type_name: None,
-        minimum_scale: Some(0),
-        maximum_scale: Some(0),
-        sql_data_type: SqlDataType::INTEGER.0,
-        sql_datetime_sub: None,
-        num_prec_radix: Some(10),
-        interval_precision: None,
-    },
+        ))
+        .with_create_params(Some("precision,scale"))
+        .with_unsigned(Some(false))
+        .with_auto_unique_value(Some(false))
+        .with_scale_range(Some(0), Some(DECIMAL_MAX_SCALE))
+        .with_num_prec_radix(Some(10)),
+    TypeInfoRow::new("INTEGER", SqlDataType::INTEGER)
+        .with_column_size(catalog_column_size(
+            SqlDataType::INTEGER,
+            MaxPrecision(0),
+            MaxScale(0),
+        ))
+        .with_unsigned(Some(false))
+        .with_auto_unique_value(Some(false))
+        .with_scale_range(Some(0), Some(0))
+        .with_num_prec_radix(Some(10)),
     // SMALLINT — sqlite_type_to_sql_data_type maps SMALLINT/INT2 here.
-    TypeInfoRow {
-        type_name: "SMALLINT",
-        data_type: SqlDataType::SMALLINT,
-        column_size: catalog_column_size(SqlDataType::SMALLINT, MaxPrecision(0), MaxScale(0)),
-        literal_prefix: None,
-        literal_suffix: None,
-        create_params: None,
-        nullable: Nullable::SqlNullable as i16,
-        case_sensitive: false,
-        searchable: SQL_SEARCHABLE,
-        unsigned: Some(false),
-        fixed_prec_scale: false,
-        auto_unique_value: Some(false),
-        local_type_name: None,
-        minimum_scale: Some(0),
-        maximum_scale: Some(0),
-        sql_data_type: SqlDataType::SMALLINT.0,
-        sql_datetime_sub: None,
-        num_prec_radix: Some(10),
-        interval_precision: None,
-    },
-    TypeInfoRow {
-        type_name: "REAL",
-        data_type: SqlDataType::DOUBLE,
-        column_size: catalog_column_size(SqlDataType::DOUBLE, MaxPrecision(0), MaxScale(0)),
-        literal_prefix: None,
-        literal_suffix: None,
-        create_params: None,
-        nullable: Nullable::SqlNullable as i16,
-        case_sensitive: false,
-        searchable: SQL_SEARCHABLE,
-        unsigned: Some(false),
-        fixed_prec_scale: false,
-        auto_unique_value: None,
-        local_type_name: None,
-        minimum_scale: None,
-        maximum_scale: None,
-        sql_data_type: SqlDataType::DOUBLE.0,
-        sql_datetime_sub: None,
-        num_prec_radix: Some(2),
-        interval_precision: None,
-    },
+    TypeInfoRow::new("SMALLINT", SqlDataType::SMALLINT)
+        .with_column_size(catalog_column_size(
+            SqlDataType::SMALLINT,
+            MaxPrecision(0),
+            MaxScale(0),
+        ))
+        .with_unsigned(Some(false))
+        .with_auto_unique_value(Some(false))
+        .with_scale_range(Some(0), Some(0))
+        .with_num_prec_radix(Some(10)),
+    TypeInfoRow::new("REAL", SqlDataType::DOUBLE)
+        .with_column_size(catalog_column_size(
+            SqlDataType::DOUBLE,
+            MaxPrecision(0),
+            MaxScale(0),
+        ))
+        .with_unsigned(Some(false))
+        .with_num_prec_radix(Some(2)),
     // TEXT — column_size matches VARCHAR_DEFAULT_COLUMN_SIZE (255), the
     // same default `default_precision_for_type` reports for both VARCHAR and
     // EXT_W_VARCHAR (see type_conversion.rs). This row and the VARCHAR row
@@ -403,31 +254,15 @@ static SQLITE_TYPE_INFO: &[TypeInfoRow] = &[
     // the same size. 255 is the value the rest of the driver treats as
     // authoritative for this DATA_TYPE (`default_precision_for_type`, and the
     // WVARCHAR row below), so both rows use it.
-    TypeInfoRow {
-        type_name: "TEXT",
-        data_type: SqlDataType::VARCHAR,
-        column_size: catalog_column_size(
+    TypeInfoRow::new("TEXT", SqlDataType::VARCHAR)
+        .with_column_size(catalog_column_size(
             SqlDataType::VARCHAR,
             MaxPrecision(VARCHAR_DEFAULT_COLUMN_SIZE),
             MaxScale(0),
-        ),
-        literal_prefix: Some("'"),
-        literal_suffix: Some("'"),
-        create_params: Some("max length"),
-        nullable: Nullable::SqlNullable as i16,
-        case_sensitive: true,
-        searchable: SQL_SEARCHABLE,
-        unsigned: None,
-        fixed_prec_scale: false,
-        auto_unique_value: None,
-        local_type_name: None,
-        minimum_scale: None,
-        maximum_scale: None,
-        sql_data_type: SqlDataType::VARCHAR.0,
-        sql_datetime_sub: None,
-        num_prec_radix: None,
-        interval_precision: None,
-    },
+        ))
+        .with_literal_affixes(Some("'"), Some("'"))
+        .with_create_params(Some("max length"))
+        .with_case_sensitive(true),
     // SQL_VARCHAR (12) — ANSI alias needed for Windows DM / pyodbc type
     // conversion (AGENTS.md "Windows Driver Manager compatibility
     // checklist"). sqlite_type_to_sql_data_type never actually returns this
@@ -438,89 +273,45 @@ static SQLITE_TYPE_INFO: &[TypeInfoRow] = &[
     // spec explicitly allows multiple rows sharing a DATA_TYPE; column_size
     // matches the TEXT row above for the same reason (see that row's
     // comment).
-    TypeInfoRow {
-        type_name: "VARCHAR",
-        data_type: SqlDataType::VARCHAR,
-        column_size: catalog_column_size(
+    TypeInfoRow::new("VARCHAR", SqlDataType::VARCHAR)
+        .with_column_size(catalog_column_size(
             SqlDataType::VARCHAR,
             MaxPrecision(VARCHAR_DEFAULT_COLUMN_SIZE),
             MaxScale(0),
-        ),
-        literal_prefix: Some("'"),
-        literal_suffix: Some("'"),
-        create_params: Some("max length"),
-        nullable: Nullable::SqlNullable as i16,
-        case_sensitive: true,
-        searchable: SQL_SEARCHABLE,
-        unsigned: None,
-        fixed_prec_scale: false,
-        auto_unique_value: None,
-        local_type_name: None,
-        minimum_scale: None,
-        maximum_scale: None,
-        sql_data_type: SqlDataType::VARCHAR.0,
-        sql_datetime_sub: None,
-        num_prec_radix: None,
-        interval_precision: None,
-    },
+        ))
+        .with_literal_affixes(Some("'"), Some("'"))
+        .with_create_params(Some("max length"))
+        .with_case_sensitive(true),
     // DATE — sqlite_type_to_sql_data_type maps DATE here. SQLite has no DATE
     // literal syntax; a date value is just a quoted ISO-8601 string, hence
     // the plain quote prefix/suffix (matching the TEXT row's convention)
     // rather than a typed `DATE '...'` literal.
     // DATA_TYPE=91 (SQL_TYPE_DATE), SQL_DATA_TYPE=9 (SQL_DATETIME), SQL_DATETIME_SUB=1 (SQL_CODE_DATE)
-    TypeInfoRow {
-        type_name: "DATE",
-        data_type: SqlDataType::DATE,
-        column_size: catalog_column_size(SqlDataType::DATE, MaxPrecision(0), MaxScale(0)), // 'YYYY-MM-DD'
-        literal_prefix: Some("'"),
-        literal_suffix: Some("'"),
-        create_params: None,
-        nullable: Nullable::SqlNullable as i16,
-        case_sensitive: false,
-        searchable: SQL_SEARCHABLE,
-        unsigned: None,
-        fixed_prec_scale: false,
-        auto_unique_value: None,
-        local_type_name: None,
-        minimum_scale: None,
-        maximum_scale: None,
-        sql_data_type: SqlDataType::DATETIME.0,
-        sql_datetime_sub: Some(SQL_CODE_DATE),
-        num_prec_radix: None,
-        interval_precision: None,
-    },
+    TypeInfoRow::new("DATE", SqlDataType::DATE)
+        .with_column_size(catalog_column_size(
+            SqlDataType::DATE,
+            MaxPrecision(0),
+            MaxScale(0),
+        ))
+        // 'YYYY-MM-DD'
+        .with_literal_affixes(Some("'"), Some("'"))
+        .with_verbose_type(SqlDataType::DATETIME.0, Some(SQL_CODE_DATE)),
     // TIME — sqlite_type_to_sql_data_type maps TIME here. SQLite stores time
     // values as plain "HH:MM:SS" text with no fractional-seconds field (see
     // column_value_to_rusqlite), so scale is fixed at 0.
     // DATA_TYPE=92 (SQL_TYPE_TIME), SQL_DATA_TYPE=9 (SQL_DATETIME), SQL_DATETIME_SUB=2 (SQL_CODE_TIME)
-    TypeInfoRow {
-        type_name: "TIME",
-        data_type: SqlDataType::TIME,
+    TypeInfoRow::new("TIME", SqlDataType::TIME)
         // 'HH:MM:SS': SQLite has no fractional-seconds capability to report
         // as a maximum (MAX_FRACTIONAL_SECONDS_PRECISION = 0), so this is
         // the plain (scale-0) form of the TIME formula.
-        column_size: catalog_column_size(
+        .with_column_size(catalog_column_size(
             SqlDataType::TIME,
             MaxPrecision(0),
             MaxScale(MAX_FRACTIONAL_SECONDS_PRECISION),
-        ),
-        literal_prefix: Some("'"),
-        literal_suffix: Some("'"),
-        create_params: None,
-        nullable: Nullable::SqlNullable as i16,
-        case_sensitive: false,
-        searchable: SQL_SEARCHABLE,
-        unsigned: None,
-        fixed_prec_scale: false,
-        auto_unique_value: None,
-        local_type_name: None,
-        minimum_scale: Some(0),
-        maximum_scale: Some(MAX_FRACTIONAL_SECONDS_PRECISION),
-        sql_data_type: SqlDataType::DATETIME.0,
-        sql_datetime_sub: Some(SQL_CODE_TIME),
-        num_prec_radix: None,
-        interval_precision: None,
-    },
+        ))
+        .with_literal_affixes(Some("'"), Some("'"))
+        .with_scale_range(Some(0), Some(MAX_FRACTIONAL_SECONDS_PRECISION))
+        .with_verbose_type(SqlDataType::DATETIME.0, Some(SQL_CODE_TIME)),
     // TIMESTAMP — sqlite_type_to_sql_data_type maps DATETIME/TIMESTAMP here.
     // column_size intentionally excludes a fractional-seconds allowance: it
     // is computed via catalog_column_size at MAX_FRACTIONAL_SECONDS_PRECISION
@@ -529,33 +320,17 @@ static SQLITE_TYPE_INFO: &[TypeInfoRow] = &[
     // below), so minimum/maximum scale are reported as fixed at 0 rather
     // than claiming precision the column size does not budget for.
     // DATA_TYPE=93 (SQL_TYPE_TIMESTAMP), SQL_DATA_TYPE=9 (SQL_DATETIME), SQL_DATETIME_SUB=3 (SQL_CODE_TIMESTAMP)
-    TypeInfoRow {
-        type_name: "TIMESTAMP",
-        data_type: SqlDataType::TIMESTAMP,
+    TypeInfoRow::new("TIMESTAMP", SqlDataType::TIMESTAMP)
         // 'YYYY-MM-DD HH:MM:SS': same no-fractional-capability rationale
         // as the TIME row above.
-        column_size: catalog_column_size(
+        .with_column_size(catalog_column_size(
             SqlDataType::TIMESTAMP,
             MaxPrecision(0),
             MaxScale(MAX_FRACTIONAL_SECONDS_PRECISION),
-        ),
-        literal_prefix: Some("'"),
-        literal_suffix: Some("'"),
-        create_params: None,
-        nullable: Nullable::SqlNullable as i16,
-        case_sensitive: false,
-        searchable: SQL_SEARCHABLE,
-        unsigned: None,
-        fixed_prec_scale: false,
-        auto_unique_value: None,
-        local_type_name: None,
-        minimum_scale: Some(0),
-        maximum_scale: Some(MAX_FRACTIONAL_SECONDS_PRECISION),
-        sql_data_type: SqlDataType::DATETIME.0,
-        sql_datetime_sub: Some(SQL_CODE_TIMESTAMP),
-        num_prec_radix: None,
-        interval_precision: None,
-    },
+        ))
+        .with_literal_affixes(Some("'"), Some("'"))
+        .with_scale_range(Some(0), Some(MAX_FRACTIONAL_SECONDS_PRECISION))
+        .with_verbose_type(SqlDataType::DATETIME.0, Some(SQL_CODE_TIMESTAMP)),
 ];
 
 // `CHAR`/`WCHAR`'s "unbounded" sentinel. `VARCHAR`/`DECIMAL`/`BLOB`'s default
@@ -599,7 +374,6 @@ fn sqlite_get_info(info_type: InfoType) -> Result<InfoValue, SqliteError> {
                 }
             }));
         }
-        InfoType::IdentifierCase => return Ok(InfoValue::U16(SQL_IC_MIXED)),
         // 0, not an identifier length: this driver reports no catalogs and no
         // schemas, so there is no name whose maximum length these could
         // describe. Core defaults them to its generic identifier length, which
@@ -658,31 +432,23 @@ fn sqlite_get_info(info_type: InfoType) -> Result<InfoValue, SqliteError> {
         // (`stackable_odbc_core::conformance`). `SQL_TC_DML` is a small fixed constant
         // (1), so the narrowing `as u16` cannot lose information.
         InfoType::TransactionCapable => return Ok(InfoValue::U16(SQL_TC_DML as u16)),
-        // SQL_GD_BLOCK is deliberately not claimed: it means SQLGetData can
-        // be called for a row in a block cursor after a bulk fetch, but this
-        // driver has no block cursors to speak of -- `SQLSetStmtAttrW`
-        // (`stackable-odbc-core/src/ffi/stmt_attr.rs`) rejects any
-        // SQL_ATTR_ROW_ARRAY_SIZE other than 1, substituting 1 back with
-        // 01S02, so no application can ever get a multi-row rowset out of
-        // this driver to begin with. SQL_GD_BOUND, by contrast, genuinely
-        // holds: `sql_get_data` (`stackable-odbc-core/src/ffi/fetch.rs`) never checks
-        // `stmt.bindings` before reading a column, so a column bound via
-        // `SQLBindCol` can still be fetched again through `SQLGetData`.
-        // Reporting the exact capability set (rather than a blanket 0x0F) is
-        // what the Windows DM checklist in AGENTS.md requires.
-        InfoType::GetDataExtensions => {
-            return Ok(InfoValue::U32(
-                SQL_GD_ANY_COLUMN | SQL_GD_ANY_ORDER | SQL_GD_BOUND,
-            ));
-        }
+        // SQL_GETDATA_EXTENSIONS is deliberately not answered here. It states
+        // what core's own fetch path supports -- `sql_get_data` checks neither
+        // column order nor binding state, and `sql_set_stmt_attr_w` substitutes
+        // 1 back for any SQL_ATTR_ROW_ARRAY_SIZE, so no block cursor can exist
+        // for SQL_GD_BLOCK to describe. None of that is a fact about SQLite,
+        // and this driver cannot keep it true if core's fetch path changes.
+        // Core answers it, and `get_info_snapshot` below still pins the value
+        // an application actually sees.
         _ => {}
     }
 
-    // Fall through to shared defaults
-    default_get_info::<SqliteBackend>(info_type, &SqliteBackend::catalog_result_column_widths())
-        .ok_or_else(|| SqliteError::NotImplemented {
-            feature: format!("get_info({info_type:?})"),
-        })
+    // Fall through to shared defaults. Core reads the catalog result column
+    // widths off the backend type parameter itself, so they cannot disagree
+    // with what this driver reports everywhere else.
+    default_get_info::<SqliteBackend>(info_type).ok_or_else(|| SqliteError::NotImplemented {
+        feature: format!("get_info({info_type:?})"),
+    })
 }
 
 pub(super) fn get_info(
@@ -761,8 +527,8 @@ fn connection_limit(
     }))
 }
 
-pub(super) fn get_info_pre_connect(info_type: InfoType) -> Result<InfoValue, OdbcError> {
-    sqlite_get_info(info_type).map_err(Into::into)
+pub(super) fn get_info_pre_connect(info_type: InfoType) -> Result<InfoValue, SqliteError> {
+    sqlite_get_info(info_type)
 }
 
 /// `SQL_AGGREGATE_FUNCTIONS` — SQLite has every ODBC aggregate, and accepts
@@ -1083,8 +849,18 @@ pub(super) fn get_info_raw(
     }
 }
 
+/// Every ODBC function this driver supports — which is exactly the set
+/// `forward_ffi!` generates a C entry point for.
+///
+/// Derived from core rather than hand-listed. `SQLGetFunctions` is what the
+/// Windows Driver Manager builds its dispatch table from, so a name in here
+/// that core does not export hands the DM a null pointer to call; core pins
+/// the list against its own macro arms, which no list maintained here could
+/// do. The previous hand-written list over-claimed nothing but had drifted to
+/// 53 of the 69 exported entry points, under-reporting sixteen the driver does
+/// in fact export.
 pub(super) fn get_functions() -> &'static [FunctionId] {
-    SUPPORTED_FUNCTIONS
+    CORE_EXPORTED_FUNCTIONS
 }
 
 pub(super) fn get_type_info() -> &'static [TypeInfoRow] {
@@ -2531,6 +2307,28 @@ mod tests {
         let f = get_functions();
         assert!(f.contains(&FunctionId::ParamData), "SQLParamData missing");
         assert!(f.contains(&FunctionId::PutData), "SQLPutData missing");
+    }
+
+    /// Nothing this driver ever claimed to support is absent from what core
+    /// exports.
+    ///
+    /// The check that matters is this direction. `SQLGetFunctions` is what the
+    /// Windows Driver Manager builds its dispatch table from, so claiming a
+    /// function core does not export hands it a null pointer to call — whereas
+    /// staying silent about one merely means the DM does not use it.
+    ///
+    /// `SUPPORTED_FUNCTIONS` is the hand-written list `get_functions` used to
+    /// return. It is kept as the historical claim so this assertion has
+    /// something to check; the live answer is `CORE_EXPORTED_FUNCTIONS`, which
+    /// core pins against its own `forward_ffi!` arms.
+    #[test]
+    fn supported_functions_are_all_exported_by_core() {
+        for id in SUPPORTED_FUNCTIONS {
+            assert!(
+                CORE_EXPORTED_FUNCTIONS.contains(id),
+                "{id:?} was advertised but core exports no entry point for it"
+            );
+        }
     }
 
     #[test]

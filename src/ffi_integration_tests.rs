@@ -12,11 +12,12 @@ use stackable_odbc_core::{
     ffi,
     types::{
         AttrOdbcVersion, CDataType, CompletionType, ConnectionAttribute, Desc,
-        EnvironmentAttribute, HandleType, HeaderDiagnosticIdentifier, InfoType, Numeric, ParamType,
-        SQL_AUTOCOMMIT_OFF, SQL_AUTOCOMMIT_ON, SQL_CASCADE, SQL_CD_FALSE, SQL_CURSOR_FORWARD_ONLY,
-        SQL_DIAG_MESSAGE_TEXT, SQL_DRIVER_ODBC_VER_STRING, SQL_GD_ANY_COLUMN, SQL_GD_ANY_ORDER,
-        SQL_GD_BOUND, SQL_IC_SENSITIVE, SQL_INDEX_UNIQUE, SQL_QUICK, SQL_RESTRICT, SqlDataType,
-        SqlReturn, StatementAttribute, Timestamp, expected_kind,
+        EnvironmentAttribute, HandleType, HeaderDiagnosticIdentifier, InfoType, Nullable, Numeric,
+        ParamType, SQL_AUTOCOMMIT_OFF, SQL_AUTOCOMMIT_ON, SQL_CASCADE, SQL_CD_FALSE,
+        SQL_CURSOR_FORWARD_ONLY, SQL_DIAG_MESSAGE_TEXT, SQL_DRIVER_ODBC_VER_STRING,
+        SQL_GD_ANY_COLUMN, SQL_GD_ANY_ORDER, SQL_GD_BOUND, SQL_IC_SENSITIVE, SQL_INDEX_UNIQUE,
+        SQL_QUICK, SQL_RESTRICT, SqlDataType, SqlReturn, StatementAttribute, Timestamp,
+        expected_kind,
     },
 };
 
@@ -77,6 +78,96 @@ unsafe fn exec_direct(stmt: *mut c_void, sql: &str) -> SqlReturn {
     }
 }
 
+/// Helper: run setup SQL through the driver's own `SQLExecDirect`.
+///
+/// These tests used to reach into `ConnectionHandle` for the underlying
+/// `rusqlite::Connection` and call `execute_batch` on it. Core's `handles`
+/// module is `pub(crate)` now, so that route is gone — and driving setup
+/// through the same entry points under test is the better answer anyway: a
+/// setup that silently stopped working fails here instead of leaving the test
+/// asserting against an empty table.
+///
+/// `SQLExecDirect` executes one statement, so a multi-statement setup is split
+/// on `;`. Every setup in this file is DDL and `INSERT`s with no `;` inside a
+/// string literal, which is what makes a plain split exact here.
+/// Both this and [`query_scalar_i64`] allocate their own statement handle
+/// rather than borrowing the caller's. The statement the test is asserting
+/// about usually holds live state — a cursor, a prepared statement, bound
+/// parameters — and running setup or a read-back over it would destroy exactly
+/// what the test is there to check.
+unsafe fn setup_sql(conn: *mut c_void, sql: &str) {
+    unsafe {
+        let stmt = alloc_stmt(conn);
+        for one in sql.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+            assert_eq!(
+                exec_direct(stmt, one),
+                SqlReturn::SUCCESS,
+                "setup statement failed: {one}"
+            );
+        }
+        let _ = ffi::handle::sql_free_handle::<SqliteBackend>(HandleType::Stmt as i16, stmt);
+    }
+}
+
+/// Helper: allocate a statement handle on `conn`.
+unsafe fn alloc_stmt(conn: *mut c_void) -> *mut c_void {
+    let mut stmt: *mut c_void = std::ptr::null_mut();
+    let ret = unsafe {
+        ffi::handle::sql_alloc_handle::<SqliteBackend>(HandleType::Stmt as i16, conn, &mut stmt)
+    };
+    assert_eq!(ret, SqlReturn::SUCCESS, "could not allocate a statement");
+    stmt
+}
+
+/// Helper: read a single-row, single-column `i64` back through the FFI.
+///
+/// The read-back replacement for the `db.query_row(..)` calls that used to
+/// reach into the connection handle.
+unsafe fn query_scalar_i64(conn: *mut c_void, sql: &str) -> i64 {
+    unsafe {
+        let stmt = alloc_stmt(conn);
+        assert_eq!(exec_direct(stmt, sql), SqlReturn::SUCCESS, "query: {sql}");
+        assert_eq!(
+            ffi::fetch::sql_fetch::<SqliteBackend>(stmt),
+            SqlReturn::SUCCESS,
+            "query returned no row: {sql}"
+        );
+        let mut val: i64 = 0;
+        let mut ind: isize = 0;
+        assert_eq!(
+            ffi::fetch::sql_get_data::<SqliteBackend>(
+                stmt,
+                1,
+                CDataType::SBigInt as i16,
+                &raw mut val as *mut c_void,
+                std::mem::size_of::<i64>() as isize,
+                &mut ind,
+            ),
+            SqlReturn::SUCCESS,
+            "get_data: {sql}"
+        );
+        let _ = ffi::handle::sql_free_handle::<SqliteBackend>(HandleType::Stmt as i16, stmt);
+        val
+    }
+}
+
+/// Helper: read a single row of two string columns back through the FFI.
+unsafe fn query_row_two_strings(conn: *mut c_void, sql: &str) -> (String, String) {
+    unsafe {
+        let stmt = alloc_stmt(conn);
+        assert_eq!(exec_direct(stmt, sql), SqlReturn::SUCCESS, "query: {sql}");
+        assert_eq!(
+            ffi::fetch::sql_fetch::<SqliteBackend>(stmt),
+            SqlReturn::SUCCESS,
+            "query returned no row: {sql}"
+        );
+        let first = fetch_string_col(stmt, 1);
+        let second = fetch_string_col(stmt, 2);
+        let _ = ffi::handle::sql_free_handle::<SqliteBackend>(HandleType::Stmt as i16, stmt);
+        (first, second)
+    }
+}
+
 /// Helper: free all handles.
 unsafe fn cleanup(env: *mut c_void, conn: *mut c_void, stmt: *mut c_void) {
     unsafe {
@@ -95,20 +186,12 @@ fn exec_direct_on_connected_handle_succeeds() {
 
         // Create table and insert data via the connection directly so we can
         // use exec_direct for the SELECT through the FFI layer.
-        let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-            stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-        >(conn)
-        .expect("valid conn");
-        {
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch(
-                "CREATE TABLE test (id INTEGER, name TEXT); \
+        setup_sql(
+            conn,
+            "CREATE TABLE test (id INTEGER, name TEXT); \
                  INSERT INTO test VALUES (1, 'hello'); \
                  INSERT INTO test VALUES (2, 'world');",
-            )
-            .expect("setup");
-        }
+        );
 
         let ret = exec_direct(stmt, "SELECT id, name FROM test");
         assert_eq!(ret, SqlReturn::SUCCESS);
@@ -145,18 +228,10 @@ fn fetch_after_exec_direct_returns_rows_then_no_data() {
         let (env, conn, stmt) = alloc_handles();
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
 
-        let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-            stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-        >(conn)
-        .expect("valid conn");
-        {
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch(
-                "CREATE TABLE t (id INTEGER); INSERT INTO t VALUES (1); INSERT INTO t VALUES (2);",
-            )
-            .expect("setup");
-        }
+        setup_sql(
+            conn,
+            "CREATE TABLE t (id INTEGER); INSERT INTO t VALUES (1); INSERT INTO t VALUES (2);",
+        );
 
         assert_eq!(exec_direct(stmt, "SELECT id FROM t"), SqlReturn::SUCCESS);
 
@@ -186,18 +261,10 @@ fn get_data_returns_correct_values() {
         let (env, conn, stmt) = alloc_handles();
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
 
-        let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-            stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-        >(conn)
-        .expect("valid conn");
-        {
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch(
-                "CREATE TABLE t (id INTEGER, name TEXT); INSERT INTO t VALUES (42, 'test');",
-            )
-            .expect("setup");
-        }
+        setup_sql(
+            conn,
+            "CREATE TABLE t (id INTEGER, name TEXT); INSERT INTO t VALUES (42, 'test');",
+        );
 
         assert_eq!(
             exec_direct(stmt, "SELECT id, name FROM t"),
@@ -277,35 +344,12 @@ fn get_data_datetime_column_handles_integer_and_real_storage() {
         let (env, conn, stmt) = alloc_handles();
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
 
-        let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-            stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-        >(conn)
-        .expect("valid conn");
-        {
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            // SQLite has no real column type enforcement: the column is
-            // declared DATETIME, but each row is free to store whichever of
-            // SQLite's own three documented datetime formats it likes. Row 1
-            // stores an integer (Unix epoch seconds); row 2 stores a real
-            // (Julian day number, SQLite's `julianday()` output format).
-            //
-            // DATETIME has no substring match in SQLite's column-affinity
-            // rules (no CHAR/CLOB/TEXT, INT, BLOB, or REAL/FLOA/DOUB), so it
-            // gets NUMERIC affinity, and NUMERIC affinity silently converts
-            // an inserted REAL value back to INTEGER when it has no
-            // fractional part. `2451545.0` would therefore actually be
-            // stored (and read back) as `ColumnValue::I64`, not `F64`,
-            // defeating the point of this row: `2451545.5` (2000-01-02
-            // 00:00:00 UTC) keeps a fractional part, so SQLite is forced to
-            // keep it as REAL.
-            db.execute_batch(
-                "CREATE TABLE t (id INTEGER, dt DATETIME); \
+        setup_sql(
+            conn,
+            "CREATE TABLE t (id INTEGER, dt DATETIME); \
                  INSERT INTO t VALUES (1, 1700000000); \
                  INSERT INTO t VALUES (2, 2451545.5);",
-            )
-            .expect("setup");
-        }
+        );
 
         assert_eq!(
             exec_direct(stmt, "SELECT id, dt FROM t ORDER BY id"),
@@ -378,16 +422,10 @@ fn get_data_col_zero_returns_error() {
         let (env, conn, stmt) = alloc_handles();
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
 
-        let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-            stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-        >(conn)
-        .expect("valid conn");
-        {
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch("CREATE TABLE t (id INTEGER); INSERT INTO t VALUES (1);")
-                .expect("setup");
-        }
+        setup_sql(
+            conn,
+            "CREATE TABLE t (id INTEGER); INSERT INTO t VALUES (1);",
+        );
 
         assert_eq!(exec_direct(stmt, "SELECT id FROM t"), SqlReturn::SUCCESS);
         assert_eq!(
@@ -417,16 +455,7 @@ fn num_result_cols_after_exec_direct() {
         let (env, conn, stmt) = alloc_handles();
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
 
-        let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-            stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-        >(conn)
-        .expect("valid conn");
-        {
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch("CREATE TABLE t (a INTEGER, b TEXT, c REAL)")
-                .expect("setup");
-        }
+        setup_sql(conn, "CREATE TABLE t (a INTEGER, b TEXT, c REAL)");
 
         assert_eq!(
             exec_direct(stmt, "SELECT a, b, c FROM t"),
@@ -448,16 +477,10 @@ fn close_cursor_then_fetch_returns_no_data() {
         let (env, conn, stmt) = alloc_handles();
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
 
-        let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-            stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-        >(conn)
-        .expect("valid conn");
-        {
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch("CREATE TABLE t (id INTEGER); INSERT INTO t VALUES (1);")
-                .expect("setup");
-        }
+        setup_sql(
+            conn,
+            "CREATE TABLE t (id INTEGER); INSERT INTO t VALUES (1);",
+        );
 
         assert_eq!(exec_direct(stmt, "SELECT id FROM t"), SqlReturn::SUCCESS);
 
@@ -832,18 +855,10 @@ fn row_count_after_exec_direct() {
         let (env, conn, stmt) = alloc_handles();
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
 
-        let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-            stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-        >(conn)
-        .expect("valid conn");
-        {
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch(
-                "CREATE TABLE t (id INTEGER); INSERT INTO t VALUES (1); INSERT INTO t VALUES (2);",
-            )
-            .expect("setup");
-        }
+        setup_sql(
+            conn,
+            "CREATE TABLE t (id INTEGER); INSERT INTO t VALUES (1); INSERT INTO t VALUES (2);",
+        );
 
         assert_eq!(exec_direct(stmt, "SELECT id FROM t"), SqlReturn::SUCCESS);
 
@@ -858,20 +873,14 @@ fn row_count_after_exec_direct() {
 
 /// Helper: set up a connected handle with a test table and view.
 unsafe fn setup_metadata_tables(conn: *mut c_void) {
-    let conn_handle = unsafe {
-        stackable_odbc_core::handles::as_handle_ref::<
-            stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-        >(conn)
-    }
-    .expect("valid conn");
-    let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-    let db = sqlite_conn.conn.lock().expect("lock");
-    db.execute_batch(
-        "CREATE TABLE test_table (id INTEGER NOT NULL, name TEXT, score REAL);
+    unsafe {
+        setup_sql(
+            conn,
+            "CREATE TABLE test_table (id INTEGER NOT NULL, name TEXT, score REAL);
          CREATE VIEW test_view AS SELECT id, name FROM test_table;
          INSERT INTO test_table VALUES (1, 'alice', 9.5);",
-    )
-    .expect("setup");
+        )
+    };
 }
 
 #[test]
@@ -1300,16 +1309,7 @@ fn exec_direct_insert_then_select_roundtrip() {
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
 
         // Set up the table via raw rusqlite so we don't burn statement state.
-        let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-            stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-        >(conn)
-        .expect("valid conn");
-        {
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch("CREATE TABLE t (id INTEGER, name TEXT)")
-                .expect("setup");
-        }
+        setup_sql(conn, "CREATE TABLE t (id INTEGER, name TEXT)");
 
         // INSERT through ODBC — row count must be 1.
         assert_eq!(
@@ -1362,21 +1362,13 @@ fn exec_direct_update_returns_correct_row_count() {
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
 
         // Seed data via raw rusqlite.
-        let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-            stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-        >(conn)
-        .expect("valid conn");
-        {
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch(
-                "CREATE TABLE t (id INTEGER, v INTEGER);
+        setup_sql(
+            conn,
+            "CREATE TABLE t (id INTEGER, v INTEGER);
                  INSERT INTO t VALUES (1, 10);
                  INSERT INTO t VALUES (2, 10);
                  INSERT INTO t VALUES (3, 20);",
-            )
-            .expect("setup");
-        }
+        );
 
         // UPDATE two rows through ODBC.
         assert_eq!(
@@ -1398,21 +1390,13 @@ fn exec_direct_delete_returns_correct_row_count() {
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
 
         // Seed data via raw rusqlite.
-        let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-            stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-        >(conn)
-        .expect("valid conn");
-        {
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch(
-                "CREATE TABLE t (id INTEGER);
+        setup_sql(
+            conn,
+            "CREATE TABLE t (id INTEGER);
                  INSERT INTO t VALUES (1);
                  INSERT INTO t VALUES (2);
                  INSERT INTO t VALUES (3);",
-            )
-            .expect("setup");
-        }
+        );
 
         // DELETE two rows through ODBC.
         assert_eq!(
@@ -1534,8 +1518,20 @@ fn set_cursor_type_forward_only_succeeds() {
     }
 }
 
+/// `SQL_CURSOR_STATIC` (3). Core defines only `SQL_CURSOR_FORWARD_ONLY`,
+/// which is the one value this driver supports; the other three exist here so
+/// this test can name what it is asking for rather than pass a bare `3`.
+const SQL_CURSOR_STATIC: usize = 3;
+
 #[test]
-fn set_cursor_type_static_returns_error() {
+fn set_cursor_type_static_is_substituted_with_forward_only() {
+    // This driver materialises every result set and walks it forward only, so
+    // a static cursor is not on offer. The spec has a specific answer for
+    // that, and it is not a refusal: 01S02 "the driver did not support the
+    // value specified and substituted a similar value", reported as
+    // SQL_SUCCESS_WITH_INFO. The application learns what it actually got by
+    // reading the attribute back, which is why the substituted value has to
+    // be observable through SQLGetStmtAttr.
     unsafe {
         let (env, conn, stmt) = alloc_handles();
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
@@ -1544,10 +1540,34 @@ fn set_cursor_type_static_returns_error() {
             ffi::stmt_attr::sql_set_stmt_attr_w::<SqliteBackend>(
                 stmt,
                 StatementAttribute::CursorType as i32,
-                3usize as *mut std::ffi::c_void, // SQL_CURSOR_STATIC
+                std::ptr::without_provenance_mut(SQL_CURSOR_STATIC),
                 0,
             ),
-            SqlReturn::ERROR
+            SqlReturn::SUCCESS_WITH_INFO,
+            "an unsupported cursor type is substituted, not refused"
+        );
+        assert_eq!(
+            last_sqlstate(stmt),
+            stackable_odbc_core::types::sql_state::OPTION_VALUE_CHANGED
+        );
+
+        // `SQL_ATTR_CURSOR_TYPE` is a SQLUINTEGER attribute, so the driver
+        // writes exactly four bytes here whatever the buffer's width.
+        let mut got: u32 = u32::MAX;
+        let mut len: i32 = 0;
+        assert_eq!(
+            ffi::stmt_attr::sql_get_stmt_attr_w::<SqliteBackend>(
+                stmt,
+                StatementAttribute::CursorType as i32,
+                &raw mut got as *mut std::ffi::c_void,
+                std::mem::size_of::<u32>() as i32,
+                &mut len,
+            ),
+            SqlReturn::SUCCESS
+        );
+        assert_eq!(
+            got as usize, SQL_CURSOR_FORWARD_ONLY,
+            "the substituted value must be readable back"
         );
 
         cleanup(env, conn, stmt);
@@ -1665,16 +1685,10 @@ fn end_tran_begin_commit_roundtrip() {
 
         // Set up via raw rusqlite: create table, open a transaction, insert a row.
         {
-            let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-                stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-            >(conn)
-            .expect("valid conn");
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch(
+            setup_sql(
+                conn,
                 "CREATE TABLE tran_test(id INTEGER); BEGIN; INSERT INTO tran_test VALUES(42);",
-            )
-            .expect("setup");
+            );
         }
 
         // Commit via SQLEndTran.
@@ -1720,16 +1734,10 @@ fn end_tran_begin_rollback_discards_row() {
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
 
         {
-            let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-                stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-            >(conn)
-            .expect("valid conn");
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch(
+            setup_sql(
+                conn,
                 "CREATE TABLE tran_rollback(id INTEGER); BEGIN; INSERT INTO tran_rollback VALUES(99);",
-            )
-            .expect("setup");
+            );
         }
 
         // Rollback via SQLEndTran.
@@ -1763,16 +1771,10 @@ fn fetch_scroll_next_advances_cursor() {
 
         // Set up via raw rusqlite to avoid burning statement state.
         {
-            let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-                stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-            >(conn)
-            .expect("valid conn");
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch(
+            setup_sql(
+                conn,
                 "CREATE TABLE scroll_test(v INTEGER); INSERT INTO scroll_test VALUES(1),(2);",
-            )
-            .expect("setup");
+            );
         }
 
         assert_eq!(
@@ -1829,14 +1831,7 @@ fn fetch_scroll_non_next_returns_error() {
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
 
         {
-            let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-                stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-            >(conn)
-            .expect("valid conn");
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch("CREATE TABLE scroll_err(v INTEGER);")
-                .expect("setup");
+            setup_sql(conn, "CREATE TABLE scroll_err(v INTEGER);");
         }
 
         assert_eq!(
@@ -1862,23 +1857,17 @@ fn fetch_scroll_non_next_returns_error() {
 ///   departments(dept_id PK, dept_name)
 ///   employees(emp_id PK, name, dept_id FK -> departments(dept_id))
 unsafe fn setup_pk_fk_schema(conn: *mut c_void) {
-    let conn_handle = unsafe {
-        stackable_odbc_core::handles::as_handle_ref::<
-            stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-        >(conn)
-    }
-    .expect("valid conn");
-    let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-    let db = sqlite_conn.conn.lock().expect("lock");
-    db.execute_batch(
-        "CREATE TABLE departments (dept_id INTEGER PRIMARY KEY, dept_name TEXT NOT NULL);
-         CREATE TABLE employees (
-             emp_id INTEGER PRIMARY KEY,
-             name   TEXT NOT NULL,
-             dept_id INTEGER REFERENCES departments(dept_id) ON DELETE CASCADE ON UPDATE RESTRICT
-         );",
-    )
-    .expect("setup pk/fk schema");
+    unsafe {
+        setup_sql(
+            conn,
+            "CREATE TABLE departments (dept_id INTEGER PRIMARY KEY, dept_name TEXT NOT NULL);
+             CREATE TABLE employees (
+                 emp_id INTEGER PRIMARY KEY,
+                 name   TEXT NOT NULL,
+                 dept_id INTEGER REFERENCES departments(dept_id) ON DELETE CASCADE ON UPDATE RESTRICT
+             );",
+        )
+    };
 }
 
 /// Helper: call SQLPrimaryKeysW and collect (table_name, col_name, key_seq) triples.
@@ -2032,16 +2021,7 @@ fn sql_primary_keys_w_table_with_no_pk_returns_empty() {
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
 
         // Create a table without an explicit PRIMARY KEY.
-        let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-            stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-        >(conn)
-        .expect("valid conn");
-        {
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch("CREATE TABLE no_pk (val TEXT);")
-                .expect("setup");
-        }
+        setup_sql(conn, "CREATE TABLE no_pk (val TEXT);");
 
         let table = "no_pk";
         let table_wide: Vec<u16> = table.encode_utf16().collect();
@@ -2219,16 +2199,7 @@ fn sql_foreign_keys_w_no_fk_table_returns_empty_for_no_refs() {
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
 
         // Table with no FKs at all.
-        let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-            stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-        >(conn)
-        .expect("valid conn");
-        {
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch("CREATE TABLE standalone (id INTEGER PRIMARY KEY);")
-                .expect("setup");
-        }
+        setup_sql(conn, "CREATE TABLE standalone (id INTEGER PRIMARY KEY);");
 
         let pk_table = "standalone";
         let pk_wide: Vec<u16> = pk_table.encode_utf16().collect();
@@ -2368,18 +2339,10 @@ fn sql_cancel_with_open_cursor_does_not_close_it() {
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
 
         // Open a result set.
-        let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-            stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-        >(conn)
-        .expect("valid conn");
-        {
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch(
-                "CREATE TABLE cancel_t (id INTEGER); INSERT INTO cancel_t VALUES (1);",
-            )
-            .expect("setup");
-        }
+        setup_sql(
+            conn,
+            "CREATE TABLE cancel_t (id INTEGER); INSERT INTO cancel_t VALUES (1);",
+        );
         assert_eq!(
             exec_direct(stmt, "SELECT id FROM cancel_t"),
             SqlReturn::SUCCESS
@@ -2578,19 +2541,11 @@ fn get_data_truncates_string_returns_success_with_info() {
         let (env, conn, stmt) = alloc_handles();
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
 
-        let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-            stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-        >(conn)
-        .expect("valid conn");
-        {
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch(
-                "CREATE TABLE trunc_test (id INTEGER, name TEXT); \
+        setup_sql(
+            conn,
+            "CREATE TABLE trunc_test (id INTEGER, name TEXT); \
                  INSERT INTO trunc_test VALUES (1, 'hello');",
-            )
-            .expect("setup");
-        }
+        );
 
         assert_eq!(
             exec_direct(stmt, "SELECT name FROM trunc_test"),
@@ -2635,16 +2590,10 @@ fn fetch_after_no_data_returns_no_data_again() {
         let (env, conn, stmt) = alloc_handles();
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
 
-        let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-            stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-        >(conn)
-        .expect("valid conn");
-        {
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch("CREATE TABLE one_row (v INTEGER); INSERT INTO one_row VALUES (1);")
-                .expect("setup");
-        }
+        setup_sql(
+            conn,
+            "CREATE TABLE one_row (v INTEGER); INSERT INTO one_row VALUES (1);",
+        );
 
         assert_eq!(
             exec_direct(stmt, "SELECT v FROM one_row"),
@@ -2716,20 +2665,44 @@ fn exec_direct_reuse_after_error() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn sql_col_attribute_w_returns_nullable() {
-    // SQL_DESC_NULLABLE (1008): our SQLite backend always reports nullable=1
-    // (all columns nullable). This test documents that current behaviour.
+fn sql_col_attribute_w_reports_each_columns_real_nullability() {
+    // SQL_DESC_NULLABLE (1008). All three of the spec's values are reachable,
+    // and which one a column gets is a fact about that column rather than a
+    // blanket driver answer:
+    //
+    //   id      INTEGER NOT NULL -> SQL_NO_NULLS
+    //   name    TEXT             -> SQL_NULLABLE
+    //   id + 1  (an expression)  -> SQL_NULLABLE_UNKNOWN
+    //
+    // The third is the one worth stating. `sqlite3_table_column_metadata`
+    // answers nothing for a computed column, so the driver genuinely cannot
+    // determine it — and the spec has a value for exactly that, rather than
+    // requiring a guess. This driver used to report SQL_NULLABLE for all
+    // three.
     unsafe {
         let (env, conn, stmt) = alloc_handles();
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
         setup_metadata_tables(conn);
 
         assert_eq!(
-            exec_direct(stmt, "SELECT id, name FROM test_table"),
+            exec_direct(stmt, "SELECT id, name, id + 1 FROM test_table"),
             SqlReturn::SUCCESS
         );
 
-        for col in [1u16, 2u16] {
+        let expected = [
+            (1u16, Nullable::SqlNoNulls, "id is declared NOT NULL"),
+            (
+                2u16,
+                Nullable::SqlNullable,
+                "name has no NOT NULL constraint",
+            ),
+            (
+                3u16,
+                Nullable::SqlNullableUnknown,
+                "id + 1 is computed, so SQLite reports no column metadata",
+            ),
+        ];
+        for (col, want, why) in expected {
             let mut num_attr: isize = 99;
             let ret = ffi::metadata::sql_col_attribute_w::<SqliteBackend>(
                 stmt,
@@ -2741,8 +2714,7 @@ fn sql_col_attribute_w_returns_nullable() {
                 &mut num_attr,
             );
             assert_eq!(ret, SqlReturn::SUCCESS, "col {col}");
-            // SQLite backend always reports nullable=1 (SQL_NULLABLE).
-            assert_eq!(num_attr, 1, "col {col} should be nullable");
+            assert_eq!(num_attr, want as isize, "col {col}: {why}");
         }
 
         cleanup(env, conn, stmt);
@@ -2823,16 +2795,10 @@ fn close_cursor_twice_returns_error() {
         let (env, conn, stmt) = alloc_handles();
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
 
-        let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-            stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-        >(conn)
-        .expect("valid conn");
-        {
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch("CREATE TABLE cc_test (v INTEGER); INSERT INTO cc_test VALUES (1);")
-                .expect("setup");
-        }
+        setup_sql(
+            conn,
+            "CREATE TABLE cc_test (v INTEGER); INSERT INTO cc_test VALUES (1);",
+        );
 
         assert_eq!(
             exec_direct(stmt, "SELECT v FROM cc_test"),
@@ -3141,19 +3107,13 @@ fn bind_col_and_fetch_reads_bound_column_values() {
 
         // Insert rows via rusqlite directly.
         {
-            let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-                stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-            >(conn)
-            .expect("valid conn");
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch(
+            setup_sql(
+                conn,
                 "CREATE TABLE bind_col_test (id INTEGER); \
                  INSERT INTO bind_col_test VALUES (10); \
                  INSERT INTO bind_col_test VALUES (20); \
                  INSERT INTO bind_col_test VALUES (30);",
-            )
-            .expect("setup");
+            );
         }
 
         // Set SQL_ATTR_ROW_ARRAY_SIZE = 1.
@@ -3240,17 +3200,11 @@ fn fetch_truncating_bound_column_reports_01004() {
         let (env, conn, stmt) = alloc_handles();
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
         {
-            let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-                stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-            >(conn)
-            .expect("valid conn");
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch(
+            setup_sql(
+                conn,
                 "CREATE TABLE trunc_test (s TEXT);
                  INSERT INTO trunc_test VALUES ('abcdef');",
-            )
-            .expect("setup");
+            );
         }
 
         assert_eq!(
@@ -3320,14 +3274,7 @@ fn autocommit_off_then_rollback_discards_changes() {
         let (env, conn, stmt) = alloc_handles();
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
         {
-            let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-                stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-            >(conn)
-            .expect("valid conn");
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch("CREATE TABLE tx_test (id INTEGER);")
-                .expect("setup");
+            setup_sql(conn, "CREATE TABLE tx_test (id INTEGER);");
         }
 
         assert_eq!(
@@ -3361,16 +3308,7 @@ fn autocommit_off_then_rollback_discards_changes() {
             SqlReturn::SUCCESS
         );
 
-        let count: i64 = {
-            let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-                stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-            >(conn)
-            .expect("valid conn");
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.query_row("SELECT COUNT(*) FROM tx_test", [], |r| r.get(0))
-                .expect("count")
-        };
+        let count = query_scalar_i64(conn, "SELECT COUNT(*) FROM tx_test");
         assert_eq!(count, 0, "rollback did not discard the inserted rows");
 
         cleanup(env, conn, stmt);
@@ -3395,14 +3333,7 @@ fn bind_parameter_prepare_execute_inserts_row() {
 
         // Create the target table via rusqlite.
         {
-            let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-                stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-            >(conn)
-            .expect("valid conn");
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch("CREATE TABLE bind_param_test (id INTEGER);")
-                .expect("setup");
+            setup_sql(conn, "CREATE TABLE bind_param_test (id INTEGER);");
         }
 
         // Set SQL_ATTR_PARAMSET_SIZE = 1.
@@ -3450,23 +3381,10 @@ fn bind_parameter_prepare_execute_inserts_row() {
             SqlReturn::SUCCESS
         );
 
-        // Verify via rusqlite that exactly one row with value 42 was inserted.
-        {
-            let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-                stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-            >(conn)
-            .expect("valid conn");
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            let count: i64 = db
-                .query_row(
-                    "SELECT COUNT(*) FROM bind_param_test WHERE id = 42",
-                    [],
-                    |r| r.get(0),
-                )
-                .expect("count query");
-            assert_eq!(count, 1);
-        }
+        // Verify through the driver that exactly one row with value 42 was
+        // inserted.
+        let count = query_scalar_i64(conn, "SELECT COUNT(*) FROM bind_param_test WHERE id = 42");
+        assert_eq!(count, 1);
 
         cleanup(env, conn, stmt);
     }
@@ -3479,17 +3397,11 @@ fn exec_direct_sends_bound_parameters() {
         let (env, conn, stmt) = alloc_handles();
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
         {
-            let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-                stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-            >(conn)
-            .expect("valid conn");
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch(
+            setup_sql(
+                conn,
                 "CREATE TABLE exec_direct_params (id INTEGER);
                  INSERT INTO exec_direct_params VALUES (1), (2), (3);",
-            )
-            .expect("setup");
+            );
         }
 
         let mut val: i64 = 2;
@@ -3559,14 +3471,7 @@ fn bind_timestamp_and_numeric_params_are_stored_not_nulled() {
         let (env, conn, stmt) = alloc_handles();
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
         {
-            let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-                stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-            >(conn)
-            .expect("valid conn");
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch("CREATE TABLE dt_test (ts TEXT, amount TEXT);")
-                .expect("setup");
+            setup_sql(conn, "CREATE TABLE dt_test (ts TEXT, amount TEXT);");
         }
 
         let sql = "INSERT INTO dt_test VALUES (?, ?)";
@@ -3631,18 +3536,8 @@ fn bind_timestamp_and_numeric_params_are_stored_not_nulled() {
             SqlReturn::SUCCESS
         );
 
-        let (ts_stored, amount_stored): (String, String) = {
-            let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-                stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-            >(conn)
-            .expect("valid conn");
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.query_row("SELECT ts, amount FROM dt_test", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
-            .expect("row")
-        };
+        let (ts_stored, amount_stored) =
+            query_row_two_strings(conn, "SELECT ts, amount FROM dt_test");
         assert_eq!(ts_stored, "2024-01-02 10:30:15.123000000");
         assert_eq!(amount_stored, "-123.45");
 
@@ -3667,14 +3562,7 @@ fn bulk_operations_returns_hyc00() {
 
         // Open a cursor so the handle is in a valid statement state.
         {
-            let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-                stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-            >(conn)
-            .expect("valid conn");
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch("CREATE TABLE bulkops_test (id INTEGER, val TEXT);")
-                .expect("setup");
+            setup_sql(conn, "CREATE TABLE bulkops_test (id INTEGER, val TEXT);");
         }
 
         assert_eq!(
@@ -3701,16 +3589,10 @@ fn set_pos_returns_hyc00() {
 
         // Open a cursor so the handle is in a valid statement state.
         {
-            let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-                stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-            >(conn)
-            .expect("valid conn");
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch(
+            setup_sql(
+                conn,
                 "CREATE TABLE setpos_test (id INTEGER); INSERT INTO setpos_test VALUES (1);",
-            )
-            .expect("setup");
+            );
         }
 
         assert_eq!(
@@ -3755,14 +3637,7 @@ fn data_at_execution_insert() {
 
         // Create target table.
         {
-            let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-                stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-            >(conn)
-            .expect("valid conn");
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch("CREATE TABLE dae_test (id INTEGER, name TEXT);")
-                .expect("setup");
+            setup_sql(conn, "CREATE TABLE dae_test (id INTEGER, name TEXT);");
         }
 
         // Prepare the INSERT.
@@ -3986,9 +3861,15 @@ unsafe fn get_data_wchar_sized_from_metadata(
 
 /// Read the first diagnostic record's 5-character SQLSTATE off `stmt`.
 unsafe fn last_sqlstate(stmt: *mut c_void) -> String {
+    unsafe { last_diag_rec(stmt).0 }
+}
+
+/// Read the first diagnostic record off `stmt` as (SQLSTATE, native code,
+/// message).
+unsafe fn last_diag_rec(stmt: *mut c_void) -> (String, i32, String) {
     let mut state = [0u16; 6];
     let mut native: i32 = 0;
-    let mut msg = [0u16; 256];
+    let mut msg = [0u16; 512];
     let mut msg_len: i16 = 0;
     unsafe {
         assert_eq!(
@@ -4006,7 +3887,53 @@ unsafe fn last_sqlstate(stmt: *mut c_void) -> String {
             "no diagnostic record was pushed"
         );
     }
-    String::from_utf16_lossy(&state[..5])
+    let len = usize::try_from(msg_len).unwrap_or(0).min(msg.len());
+    (
+        String::from_utf16_lossy(&state[..5]),
+        native,
+        String::from_utf16_lossy(&msg[..len]),
+    )
+}
+
+/// `SQLITE_CONSTRAINT_NOTNULL`, the extended result code SQLite reports for a
+/// NOT NULL violation. The primary code is `SQLITE_CONSTRAINT` (19); the
+/// extended one is what says *which* constraint failed, and is the value ODBC
+/// wants in `NativeErrorPtr`.
+const SQLITE_CONSTRAINT_NOTNULL: i32 = 1299;
+
+#[test]
+fn diagnostic_carries_sqlites_own_extended_result_code() {
+    // Every error this driver produced used to reach the application with
+    // NativeErrorPtr = 0, because the `rusqlite::Error` was flattened into a
+    // message string at classification time and the code went with it. An
+    // application that wants to tell a NOT NULL violation from a foreign-key
+    // one reads exactly this field: both are SQLSTATE 23000.
+    unsafe {
+        let (env, conn, stmt) = alloc_handles();
+        assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
+        setup_sql(conn, "CREATE TABLE nn (id INTEGER NOT NULL);");
+
+        assert_eq!(
+            exec_direct(stmt, "INSERT INTO nn (id) VALUES (NULL)"),
+            SqlReturn::ERROR
+        );
+
+        let (sqlstate, native, message) = last_diag_rec(stmt);
+        assert_eq!(
+            sqlstate,
+            stackable_odbc_core::types::sql_state::INTEGRITY_CONSTRAINT_VIOLATION
+        );
+        assert_eq!(
+            native, SQLITE_CONSTRAINT_NOTNULL,
+            "SQLite's extended result code must reach NativeErrorPtr verbatim"
+        );
+        assert!(
+            message.contains("NOT NULL"),
+            "diagnostic message should name the constraint, got {message:?}"
+        );
+
+        cleanup(env, conn, stmt);
+    }
 }
 
 #[test]
@@ -4015,15 +3942,9 @@ fn metadata_sized_wchar_round_trip_covers_representative_types() {
         let (env, conn, stmt) = alloc_handles();
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
 
-        let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-            stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-        >(conn)
-        .expect("valid conn");
-        {
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch(
-                "CREATE TABLE sizing (
+        setup_sql(
+            conn,
+            "CREATE TABLE sizing (
                     n_int INTEGER,
                     n_real REAL,
                     n_text TEXT,
@@ -4047,9 +3968,7 @@ fn metadata_sized_wchar_round_trip_covers_representative_types() {
                     '13:30:15.123',
                     '2024-03-05 13:30:15.123'
                 );",
-            )
-            .expect("setup");
-        }
+        );
 
         assert_eq!(
             exec_direct(
@@ -4230,20 +4149,12 @@ fn timestamp_column_stored_as_text_read_as_type_timestamp() {
         let (env, conn, stmt) = alloc_handles();
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
 
-        let conn_handle = stackable_odbc_core::handles::as_handle_ref::<
-            stackable_odbc_core::handles::ConnectionHandle<SqliteBackend>,
-        >(conn)
-        .expect("valid conn");
-        {
-            let sqlite_conn = conn_handle.connection.as_ref().expect("connected");
-            let db = sqlite_conn.conn.lock().expect("lock");
-            db.execute_batch(
-                "CREATE TABLE ts_text (id INTEGER, dt TIMESTAMP); \
+        setup_sql(
+            conn,
+            "CREATE TABLE ts_text (id INTEGER, dt TIMESTAMP); \
                  INSERT INTO ts_text VALUES (1, '2024-03-05 13:30:15'); \
                  INSERT INTO ts_text VALUES (2, 'not-a-timestamp');",
-            )
-            .expect("setup");
-        }
+        );
 
         assert_eq!(
             exec_direct(stmt, "SELECT dt FROM ts_text ORDER BY id"),

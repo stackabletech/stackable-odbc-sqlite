@@ -107,14 +107,11 @@ fn render_bare(x: &str) -> String {
 /// SQLite's `EscapeDialect`: all three SQLite identifier-quoting styles
 /// (`"`, `` ` ``, `[...]`) and bare-string date/time/timestamp literals.
 pub(crate) fn dialect() -> EscapeDialect {
-    EscapeDialect {
-        identifier_quotes: &[('"', '"'), ('`', '`'), ('[', ']')],
-        remap_scalar_fn,
-        rewrite_scalar_fn,
-        render_date: render_bare,
-        render_time: render_bare,
-        render_timestamp: render_bare,
-    }
+    EscapeDialect::ansi_default()
+        .with_identifier_quotes(&[('"', '"'), ('`', '`'), ('[', ']')])
+        .with_remap_scalar_fn(remap_scalar_fn)
+        .with_rewrite_scalar_fn(rewrite_scalar_fn)
+        .with_datetime_renderers(render_bare, render_bare, render_bare)
 }
 
 #[cfg(test)]

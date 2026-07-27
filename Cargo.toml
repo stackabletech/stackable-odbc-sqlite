@@ -17,7 +17,18 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 # "limits" is dependency-free; it exposes sqlite3_limit, which SQL_MAX_* is
 # read from rather than hardcoded.
-rusqlite = { version = "0.40", features = ["bundled", "column_decltype", "limits"] }
+#
+# "column_metadata" exposes sqlite3_table_column_metadata, which is the only
+# way to answer SQLDescribeCol's nullability and SQL_DESC_BASE_TABLE_NAME
+# truthfully: it reports a result column's originating table and its NOT NULL
+# constraint, and reports neither for a computed column -- which is exactly the
+# SQL_NULLABLE_UNKNOWN case.
+rusqlite = { version = "0.40", features = [
+  "bundled",
+  "column_decltype",
+  "column_metadata",
+  "limits",
+] }
 snafu = "0.9"
 # TODO: switch to a crates.io version dep once stackable-odbc-core is published.
 stackable-odbc-core = { path = "../stackable-odbc-core" }
@@ -26,6 +37,11 @@ tracing = "0.1"
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
 proptest = "1"
+# "test-support" gates core's `conformance` module and the connection
+# attach/detach helpers. Default-off there because it is test code that would
+# otherwise land in this driver's shipped binary; enabled only here, so
+# `cargo test` sees it and `cargo build` does not.
+stackable-odbc-core = { path = "../stackable-odbc-core", features = ["test-support"] }
 
 [lints.clippy]
 unwrap_in_result = "deny"

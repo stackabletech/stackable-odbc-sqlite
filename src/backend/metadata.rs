@@ -4,7 +4,6 @@
 //! query helpers those functions share.
 
 use stackable_odbc_core::backend::Backend;
-use stackable_odbc_core::errors::OdbcError;
 use stackable_odbc_core::types::{
     ColumnDescriptor, ColumnValue, ColumnsResultCol, ForeignKeysResultCol, IdentifierType,
     Nullable, PrimaryKeysResultCol, SQL_CASCADE, SQL_INDEX_OTHER, SQL_NO_ACTION, SQL_PC_NOT_PSEUDO,
@@ -423,17 +422,13 @@ pub(super) fn primary_keys(
     _catalog: Option<&str>,
     _schema: Option<&str>,
     table: Option<&str>,
-) -> Result<SqliteStatement, OdbcError> {
-    let db = conn.conn.lock().map_err(|e| {
-        OdbcError::general(
-            format!("Mutex poisoned: {e}"),
-            stackable_odbc_core::types::SqlState::general_error(),
-        )
+) -> Result<SqliteStatement, SqliteError> {
+    let db = conn.conn.lock().map_err(|e| SqliteError::General {
+        message: format!("Mutex poisoned: {e}"),
     })?;
 
     // Collect table names to query (either the specific one or all tables).
-    let table_names =
-        tables_to_inspect(&db, table).map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
+    let table_names = tables_to_inspect(&db, table).map_err(map_sqlite_error)?;
 
     let mut result_rows: Vec<Vec<ColumnValue>> = Vec::new();
     for table_name in &table_names {
@@ -442,24 +437,21 @@ pub(super) fn primary_keys(
         // needs no manual escaping. Same columns, same order as the PRAGMA.
         let mut pragma_stmt = db
             .prepare("SELECT * FROM pragma_table_info(?1)")
-            .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
+            .map_err(map_sqlite_error)?;
         let mut pragma_rows = pragma_stmt
             .query(rusqlite::params![table_name])
-            .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
+            .map_err(map_sqlite_error)?;
 
         // Collect pk columns: (key_seq, col_name)
         let mut pk_cols: Vec<(i64, String)> = Vec::new();
-        while let Some(row) = pragma_rows
-            .next()
-            .map_err(|e| OdbcError::from(map_sqlite_error(e)))?
-        {
+        while let Some(row) = pragma_rows.next().map_err(map_sqlite_error)? {
             let pk_seq: i64 = row
                 .get(pragma_table_info_col::PK)
-                .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
+                .map_err(map_sqlite_error)?;
             if pk_seq > 0 {
                 let col_name: String = row
                     .get(pragma_table_info_col::NAME)
-                    .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
+                    .map_err(map_sqlite_error)?;
                 pk_cols.push((pk_seq, col_name));
             }
         }
@@ -502,51 +494,33 @@ pub(super) fn foreign_keys(
     _fk_catalog: Option<&str>,
     _fk_schema: Option<&str>,
     fk_table: Option<&str>,
-) -> Result<SqliteStatement, OdbcError> {
-    let db = conn.conn.lock().map_err(|e| {
-        OdbcError::general(
-            format!("Mutex poisoned: {e}"),
-            stackable_odbc_core::types::SqlState::general_error(),
-        )
+) -> Result<SqliteStatement, SqliteError> {
+    let db = conn.conn.lock().map_err(|e| SqliteError::General {
+        message: format!("Mutex poisoned: {e}"),
     })?;
 
     // Which FK tables do we query?
-    let fk_table_names =
-        tables_to_inspect(&db, fk_table).map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
+    let fk_table_names = tables_to_inspect(&db, fk_table).map_err(map_sqlite_error)?;
 
     let mut result_rows: Vec<Vec<ColumnValue>> = Vec::new();
 
     for fk_tbl in &fk_table_names {
         let pragma_sql = format!("PRAGMA foreign_key_list('{}')", fk_tbl.replace('\'', "''"));
-        let mut pragma_stmt = db
-            .prepare(&pragma_sql)
-            .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
-        let mut pragma_rows = pragma_stmt
-            .query([])
-            .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
+        let mut pragma_stmt = db.prepare(&pragma_sql).map_err(map_sqlite_error)?;
+        let mut pragma_rows = pragma_stmt.query([]).map_err(map_sqlite_error)?;
 
-        while let Some(row) = pragma_rows
-            .next()
-            .map_err(|e| OdbcError::from(map_sqlite_error(e)))?
-        {
-            let seq: i64 = row
-                .get(pragma_fk_col::SEQ)
-                .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
-            let referenced_table: String = row
-                .get(pragma_fk_col::TABLE)
-                .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
-            let from_col: String = row
-                .get(pragma_fk_col::FROM)
-                .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
-            let to_col: Option<String> = row
-                .get(pragma_fk_col::TO)
-                .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
+        while let Some(row) = pragma_rows.next().map_err(map_sqlite_error)? {
+            let seq: i64 = row.get(pragma_fk_col::SEQ).map_err(map_sqlite_error)?;
+            let referenced_table: String =
+                row.get(pragma_fk_col::TABLE).map_err(map_sqlite_error)?;
+            let from_col: String = row.get(pragma_fk_col::FROM).map_err(map_sqlite_error)?;
+            let to_col: Option<String> = row.get(pragma_fk_col::TO).map_err(map_sqlite_error)?;
             let on_update: String = row
                 .get(pragma_fk_col::ON_UPDATE)
-                .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
+                .map_err(map_sqlite_error)?;
             let on_delete: String = row
                 .get(pragma_fk_col::ON_DELETE)
-                .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
+                .map_err(map_sqlite_error)?;
 
             // Filter by pk_table if specified.
             if let Some(pkt) = pk_table
@@ -605,7 +579,7 @@ pub(super) fn statistics(
     _schema: Option<&str>,
     table: Option<&str>,
     unique_only: bool,
-) -> Result<SqliteStatement, OdbcError> {
+) -> Result<SqliteStatement, SqliteError> {
     use stackable_odbc_core::types::{SQL_FALSE, SQL_TRUE};
 
     let widths = SqliteBackend::catalog_result_column_widths();
@@ -617,11 +591,8 @@ pub(super) fn statistics(
         return Ok(SqliteStatement::new(columns, Vec::new()));
     };
 
-    let db = conn.conn.lock().map_err(|e| {
-        OdbcError::general(
-            format!("Mutex poisoned: {e}"),
-            stackable_odbc_core::types::SqlState::general_error(),
-        )
+    let db = conn.conn.lock().map_err(|e| SqliteError::General {
+        message: format!("Mutex poisoned: {e}"),
     })?;
 
     // CARDINALITY for the table-stat row: read sqlite_stat1 only if present.
@@ -648,26 +619,23 @@ pub(super) fn statistics(
     // Enumerate indexes. Use the pragma_ TVF form so the name binds safely.
     let mut list_stmt = db
         .prepare("SELECT * FROM pragma_index_list(?1)")
-        .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
+        .map_err(map_sqlite_error)?;
     let mut list_rows = list_stmt
         .query(rusqlite::params![table])
-        .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
+        .map_err(map_sqlite_error)?;
 
     // (index_name, is_unique, is_partial)
     let mut indexes: Vec<(String, bool, bool)> = Vec::new();
-    while let Some(r) = list_rows
-        .next()
-        .map_err(|e| OdbcError::from(map_sqlite_error(e)))?
-    {
+    while let Some(r) = list_rows.next().map_err(map_sqlite_error)? {
         let name: String = r
             .get(pragma_index_list_col::NAME)
-            .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
+            .map_err(map_sqlite_error)?;
         let unique: i64 = r
             .get(pragma_index_list_col::UNIQUE)
-            .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
+            .map_err(map_sqlite_error)?;
         let partial: i64 = r
             .get(pragma_index_list_col::PARTIAL)
-            .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
+            .map_err(map_sqlite_error)?;
         let is_unique = unique != 0;
         if unique_only && !is_unique {
             continue;
@@ -680,19 +648,16 @@ pub(super) fn statistics(
     for (index_name, is_unique, is_partial) in &indexes {
         let mut xinfo_stmt = db
             .prepare("SELECT * FROM pragma_index_xinfo(?1)")
-            .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
+            .map_err(map_sqlite_error)?;
         let mut xinfo_rows = xinfo_stmt
             .query(rusqlite::params![index_name])
-            .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
+            .map_err(map_sqlite_error)?;
 
         let mut ordinal: i16 = 0;
-        while let Some(r) = xinfo_rows
-            .next()
-            .map_err(|e| OdbcError::from(map_sqlite_error(e)))?
-        {
+        while let Some(r) = xinfo_rows.next().map_err(map_sqlite_error)? {
             let key: i64 = r
                 .get(pragma_index_xinfo_col::KEY)
-                .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
+                .map_err(map_sqlite_error)?;
             if key == 0 {
                 continue; // auxiliary column (e.g. trailing rowid), not part of the key
             }
@@ -700,10 +665,10 @@ pub(super) fn statistics(
             // COLUMN_NAME is NULL for an expression index; spec wants "" then.
             let col_name: Option<String> = r
                 .get(pragma_index_xinfo_col::NAME)
-                .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
+                .map_err(map_sqlite_error)?;
             let desc: i64 = r
                 .get(pragma_index_xinfo_col::DESC)
-                .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
+                .map_err(map_sqlite_error)?;
 
             rows.push(vec![
                 ColumnValue::Null,                      // TABLE_CAT
@@ -797,7 +762,7 @@ pub(super) fn special_columns(
     table: Option<&str>,
     scope: Scope,
     _nullable: Nullable, // our identifiers are all NOT NULL -> Nullable never filters
-) -> Result<SqliteStatement, OdbcError> {
+) -> Result<SqliteStatement, SqliteError> {
     let widths = SqliteBackend::catalog_result_column_widths();
     let columns = special_columns_columns(&widths);
     let empty = || Ok(SqliteStatement::new(columns.clone(), Vec::new()));
@@ -810,20 +775,17 @@ pub(super) fn special_columns(
         return empty();
     };
 
-    let db = conn.conn.lock().map_err(|e| {
-        OdbcError::general(
-            format!("Mutex poisoned: {e}"),
-            stackable_odbc_core::types::SqlState::general_error(),
-        )
+    let db = conn.conn.lock().map_err(|e| SqliteError::General {
+        message: format!("Mutex poisoned: {e}"),
     })?;
 
     // Gather (name, decl_type, pk_seq) for every column via the pragma TVF.
     let mut info_stmt = db
         .prepare("SELECT * FROM pragma_table_info(?1)")
-        .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
+        .map_err(map_sqlite_error)?;
     let mut info_rows = info_stmt
         .query(rusqlite::params![table])
-        .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
+        .map_err(map_sqlite_error)?;
 
     struct Col {
         name: String,
@@ -831,19 +793,14 @@ pub(super) fn special_columns(
         pk: i64,
     }
     let mut cols: Vec<Col> = Vec::new();
-    while let Some(r) = info_rows
-        .next()
-        .map_err(|e| OdbcError::from(map_sqlite_error(e)))?
-    {
+    while let Some(r) = info_rows.next().map_err(map_sqlite_error)? {
         let name: String = r
             .get(pragma_table_info_col::NAME)
-            .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
+            .map_err(map_sqlite_error)?;
         let decl_type: Option<String> = r
             .get(pragma_table_info_col::TYPE)
-            .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
-        let pk: i64 = r
-            .get(pragma_table_info_col::PK)
-            .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
+            .map_err(map_sqlite_error)?;
+        let pk: i64 = r.get(pragma_table_info_col::PK).map_err(map_sqlite_error)?;
         cols.push(Col {
             name,
             decl_type: decl_type.unwrap_or_default(),
@@ -970,7 +927,7 @@ fn special_column_row_bigint(name: &str, pseudo: i16, scope: Scope) -> Vec<Colum
 /// "no such column" message is treated as "not a rowid table"; any other
 /// error (a genuine failure, not the WITHOUT ROWID case) is routed through
 /// `map_sqlite_error`.
-fn table_is_rowid(db: &rusqlite::Connection, table: &str) -> Result<bool, OdbcError> {
+fn table_is_rowid(db: &rusqlite::Connection, table: &str) -> Result<bool, SqliteError> {
     // Identifier cannot be bound; quote it, doubling embedded quotes.
     let quoted = format!("\"{}\"", table.replace('"', "\"\""));
     match db.prepare(&format!("SELECT rowid FROM {quoted} LIMIT 0")) {
@@ -981,7 +938,7 @@ fn table_is_rowid(db: &rusqlite::Connection, table: &str) -> Result<bool, OdbcEr
             Ok(false)
         }
         // Any other error shape is a genuine failure.
-        Err(e) => Err(OdbcError::from(map_sqlite_error(e))),
+        Err(e) => Err(map_sqlite_error(e)),
     }
 }
 

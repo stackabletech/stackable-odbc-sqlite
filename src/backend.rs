@@ -6,7 +6,7 @@ use stackable_odbc_core::{
     errors::OdbcError,
     types::{
         ColumnDescriptor, ColumnValue, ConnectParams, CursorBehavior, ExecuteOutcome, InfoValue,
-        SQL_CB_NULL, SQL_CN_ANY, SQL_GB_NO_RELATION, SQL_NC_LOW, SQL_NNC_NON_NULL,
+        SQL_CB_NULL, SQL_CN_ANY, SQL_GB_NO_RELATION, SQL_IC_MIXED, SQL_NC_LOW, SQL_NNC_NON_NULL,
         SQL_TXN_SERIALIZABLE, TypeInfoRow,
     },
 };
@@ -89,6 +89,16 @@ impl SqliteStatement {
 
 #[derive(Debug, Snafu)]
 pub enum SqliteError {
+    /// An [`OdbcError`] core itself produced, carried unchanged.
+    ///
+    /// `Backend::Error` is bounded by `From<OdbcError>` so that a defaulted
+    /// trait body can construct an error and still name `Self::Error`. This
+    /// variant is how such an error travels back to core with its SQLSTATE,
+    /// native error code and causal chain intact — classifying it a second
+    /// time would flatten all three.
+    #[snafu(display("{source}"))]
+    Odbc { source: OdbcError },
+
     #[snafu(display("SQLite error: {source}"))]
     Rusqlite { source: rusqlite::Error },
     #[snafu(display("Missing parameter: {name}"))]
@@ -99,22 +109,71 @@ pub enum SqliteError {
     General { message: String },
 
     // --- Classified variants produced by `map_sqlite_error` ---
+    //
+    // Each carries the `rusqlite::Error` it was classified from, so the
+    // conversion to `OdbcError` can report SQLite's own extended result code
+    // through `SQLGetDiagRec`'s `NativeErrorPtr` and preserve the causal chain
+    // rather than flattening it into the message. `None` is for the classes
+    // rusqlite raises itself, which have no SQLite result code behind them.
+    //
+    // The field is named `cause`, not `source`, because `snafu` special-cases
+    // a field called `source` and requires it to implement `std::error::Error`
+    // directly — which `Option<rusqlite::Error>` does not.
     #[snafu(display("unable to open database: {message}"))]
-    ConnectionFailed { message: String },
+    ConnectionFailed {
+        message: String,
+        cause: Option<rusqlite::Error>,
+    },
     #[snafu(display("integrity constraint violation: {message}"))]
-    ConstraintViolation { message: String },
+    ConstraintViolation {
+        message: String,
+        cause: Option<rusqlite::Error>,
+    },
     #[snafu(display("syntax error or access violation: {message}"))]
-    SyntaxError { message: String },
+    SyntaxError {
+        message: String,
+        cause: Option<rusqlite::Error>,
+    },
     #[snafu(display("table or view not found: {message}"))]
-    TableNotFound { message: String },
+    TableNotFound {
+        message: String,
+        cause: Option<rusqlite::Error>,
+    },
     #[snafu(display("column not found: {message}"))]
-    ColumnNotFound { message: String },
+    ColumnNotFound {
+        message: String,
+        cause: Option<rusqlite::Error>,
+    },
     #[snafu(display("database is busy: {message}"))]
-    DatabaseBusy { message: String },
+    DatabaseBusy {
+        message: String,
+        cause: Option<rusqlite::Error>,
+    },
     #[snafu(display("data type mismatch: {message}"))]
-    DataTypeMismatch { message: String },
+    DataTypeMismatch {
+        message: String,
+        cause: Option<rusqlite::Error>,
+    },
     #[snafu(display("numeric value out of range: {message}"))]
-    NumericOutOfRange { message: String },
+    NumericOutOfRange {
+        message: String,
+        cause: Option<rusqlite::Error>,
+    },
+}
+
+/// SQLite's extended result code for `e`, or `0` when there is none.
+///
+/// The extended code is the useful one: it distinguishes
+/// `SQLITE_CONSTRAINT_FOREIGNKEY` (787) from `SQLITE_CONSTRAINT_NOTNULL` (1299)
+/// where the primary code says only `SQLITE_CONSTRAINT` (19). ODBC defines `0`
+/// as "no data-source code", which is the right answer for the failures
+/// rusqlite raises without ever reaching SQLite.
+fn sqlite_extended_code(e: &rusqlite::Error) -> i32 {
+    match e {
+        rusqlite::Error::SqliteFailure(ffi_err, _) => ffi_err.extended_code,
+        rusqlite::Error::SqlInputError { error, .. } => error.extended_code,
+        _ => 0,
+    }
 }
 
 /// Central mapping from `rusqlite` errors to [`SqliteError`].
@@ -133,16 +192,26 @@ pub(crate) fn map_sqlite_error(e: rusqlite::Error) -> SqliteError {
         rusqlite::Error::SqliteFailure(ref ffi_err, ref msg) => {
             let message = msg.clone().unwrap_or_else(|| e.to_string());
             match ffi_err.code {
-                ErrorCode::ConstraintViolation => SqliteError::ConstraintViolation { message },
+                ErrorCode::ConstraintViolation => SqliteError::ConstraintViolation {
+                    message,
+                    cause: Some(e),
+                },
                 ErrorCode::CannotOpen | ErrorCode::NotADatabase | ErrorCode::PermissionDenied => {
-                    SqliteError::ConnectionFailed { message }
+                    SqliteError::ConnectionFailed {
+                        message,
+                        cause: Some(e),
+                    }
                 }
-                ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked => {
-                    SqliteError::DatabaseBusy { message }
-                }
-                ErrorCode::TypeMismatch => SqliteError::DataTypeMismatch { message },
+                ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked => SqliteError::DatabaseBusy {
+                    message,
+                    cause: Some(e),
+                },
+                ErrorCode::TypeMismatch => SqliteError::DataTypeMismatch {
+                    message,
+                    cause: Some(e),
+                },
                 // SQLITE_ERROR covers syntax errors and unresolved names alike.
-                ErrorCode::Unknown => classify_sqlite_error_message(message),
+                ErrorCode::Unknown => classify_sqlite_error_message(message, Some(e)),
                 _ => SqliteError::Rusqlite { source: e },
             }
         }
@@ -151,24 +220,36 @@ pub(crate) fn map_sqlite_error(e: rusqlite::Error) -> SqliteError {
         // same: SQLITE_ERROR with a message that names the failure.
         rusqlite::Error::SqlInputError {
             ref error, ref msg, ..
-        } => match error.code {
-            ErrorCode::ConstraintViolation => SqliteError::ConstraintViolation {
-                message: msg.clone(),
-            },
-            ErrorCode::Unknown => classify_sqlite_error_message(msg.clone()),
-            _ => SqliteError::Rusqlite { source: e },
-        },
-        // Errors rusqlite raises itself, without a SQLite result code.
-        rusqlite::Error::InvalidColumnName(ref name) => SqliteError::ColumnNotFound {
-            message: format!("no such column: {name}"),
-        },
+        } => {
+            let message = msg.clone();
+            match error.code {
+                ErrorCode::ConstraintViolation => SqliteError::ConstraintViolation {
+                    message,
+                    cause: Some(e),
+                },
+                ErrorCode::Unknown => classify_sqlite_error_message(message, Some(e)),
+                _ => SqliteError::Rusqlite { source: e },
+            }
+        }
+        // Errors rusqlite raises itself, without a SQLite result code — so
+        // there is no extended code to carry, but the error itself is still
+        // worth preserving as the cause.
+        rusqlite::Error::InvalidColumnName(ref name) => {
+            let message = format!("no such column: {name}");
+            SqliteError::ColumnNotFound {
+                message,
+                cause: Some(e),
+            }
+        }
         rusqlite::Error::InvalidColumnType(..) | rusqlite::Error::FromSqlConversionFailure(..) => {
             SqliteError::DataTypeMismatch {
                 message: e.to_string(),
+                cause: Some(e),
             }
         }
         rusqlite::Error::IntegralValueOutOfRange(..) => SqliteError::NumericOutOfRange {
             message: e.to_string(),
+            cause: Some(e),
         },
         other => SqliteError::Rusqlite { source: other },
     }
@@ -176,13 +257,24 @@ pub(crate) fn map_sqlite_error(e: rusqlite::Error) -> SqliteError {
 
 /// Split a `SQLITE_ERROR` message into the SQLSTATE classes the ODBC spec
 /// distinguishes. SQLite's wording for these is stable across versions.
-fn classify_sqlite_error_message(message: String) -> SqliteError {
+fn classify_sqlite_error_message(message: String, cause: Option<rusqlite::Error>) -> SqliteError {
     if message.starts_with("no such table") || message.starts_with("no such view") {
-        SqliteError::TableNotFound { message }
+        SqliteError::TableNotFound { message, cause }
     } else if message.starts_with("no such column") {
-        SqliteError::ColumnNotFound { message }
+        SqliteError::ColumnNotFound { message, cause }
     } else {
-        SqliteError::SyntaxError { message }
+        SqliteError::SyntaxError { message, cause }
+    }
+}
+
+/// Carries an [`OdbcError`] core produced without reclassifying it.
+///
+/// Required by `Backend::Error`'s `From<OdbcError>` bound. Paired with the
+/// [`SqliteError::Odbc`] arm of the reverse conversion, the round trip is
+/// lossless.
+impl From<OdbcError> for SqliteError {
+    fn from(source: OdbcError) -> Self {
+        SqliteError::Odbc { source }
     }
 }
 
@@ -190,31 +282,50 @@ impl From<SqliteError> for OdbcError {
     fn from(e: SqliteError) -> Self {
         use stackable_odbc_core::types::SqlState;
 
-        let sqlstate = match &e {
+        // Taken before the match moves `e`.
+        let message = e.to_string();
+
+        let (sqlstate, cause) = match e {
+            // Already an `OdbcError`; hand it straight back. See the variant.
+            SqliteError::Odbc { source } => return source,
             SqliteError::NotImplemented { feature } => {
-                return OdbcError::NotImplemented {
-                    feature: feature.clone(),
-                };
+                return OdbcError::NotImplemented { feature };
             }
-            SqliteError::ConnectionFailed { .. } => {
-                SqlState::client_unable_to_establish_connection()
+            SqliteError::ConnectionFailed { cause, .. } => {
+                (SqlState::client_unable_to_establish_connection(), cause)
             }
-            SqliteError::ConstraintViolation { .. } => SqlState::integrity_constraint_violation(),
-            SqliteError::SyntaxError { .. } => SqlState::syntax_error_or_access_violation(),
-            SqliteError::TableNotFound { .. } => SqlState::base_table_or_view_not_found(),
-            SqliteError::ColumnNotFound { .. } => SqlState::column_not_found(),
-            SqliteError::DatabaseBusy { .. } => SqlState::timeout_expired(),
-            SqliteError::DataTypeMismatch { .. } => {
-                SqlState::restricted_data_type_attribute_violation()
+            SqliteError::ConstraintViolation { cause, .. } => {
+                (SqlState::integrity_constraint_violation(), cause)
             }
-            SqliteError::NumericOutOfRange { .. } => SqlState::numeric_value_out_of_range(),
-            SqliteError::Rusqlite { .. }
-            | SqliteError::MissingParam { .. }
-            | SqliteError::General { .. } => SqlState::general_error(),
+            SqliteError::SyntaxError { cause, .. } => {
+                (SqlState::syntax_error_or_access_violation(), cause)
+            }
+            SqliteError::TableNotFound { cause, .. } => {
+                (SqlState::base_table_or_view_not_found(), cause)
+            }
+            SqliteError::ColumnNotFound { cause, .. } => (SqlState::column_not_found(), cause),
+            SqliteError::DatabaseBusy { cause, .. } => (SqlState::timeout_expired(), cause),
+            SqliteError::DataTypeMismatch { cause, .. } => {
+                (SqlState::restricted_data_type_attribute_violation(), cause)
+            }
+            SqliteError::NumericOutOfRange { cause, .. } => {
+                (SqlState::numeric_value_out_of_range(), cause)
+            }
+            SqliteError::Rusqlite { source } => (SqlState::general_error(), Some(source)),
+            SqliteError::MissingParam { .. } | SqliteError::General { .. } => {
+                (SqlState::general_error(), None)
+            }
         };
-        OdbcError::General {
-            message: e.to_string(),
-            sqlstate,
+
+        // `SQLGetDiagRec` reports the native code through `NativeErrorPtr` and
+        // walks the causal chain into the diagnostic message. Both were
+        // dropped on the floor before: every SQLite error reached the
+        // application as native code 0 with its inner links flattened away.
+        let native_error = cause.as_ref().map_or(0, sqlite_extended_code);
+        let err = OdbcError::general(message, sqlstate).with_native_error(native_error);
+        match cause {
+            Some(cause) => err.with_source(cause),
+            None => err,
         }
     }
 }
@@ -267,44 +378,35 @@ impl Backend for SqliteBackend {
     /// Manual-commit mode is entered by opening a transaction with `BEGIN`;
     /// `end_tran` then commits or rolls it back and, while still in
     /// manual-commit mode, opens the next one.
-    fn set_autocommit(conn: &SqliteConnection, enabled: bool) -> Result<(), OdbcError> {
-        let db = conn.conn.lock().map_err(|e| {
-            OdbcError::general(
-                format!("Mutex poisoned: {e}"),
-                stackable_odbc_core::types::SqlState::general_error(),
-            )
+    fn set_autocommit(conn: &SqliteConnection, enabled: bool) -> Result<(), SqliteError> {
+        let db = conn.conn.lock().map_err(|e| SqliteError::General {
+            message: format!("Mutex poisoned: {e}"),
         })?;
         if enabled {
             // Returning to autocommit commits any open transaction, per the
             // ODBC spec: "Any open transactions on the connection are committed
             // when SQL_ATTR_AUTOCOMMIT is set to SQL_AUTOCOMMIT_ON".
             if !db.is_autocommit() {
-                db.execute_batch("COMMIT")
-                    .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
+                db.execute_batch("COMMIT").map_err(map_sqlite_error)?;
             }
         } else if db.is_autocommit() {
-            db.execute_batch("BEGIN")
-                .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
+            db.execute_batch("BEGIN").map_err(map_sqlite_error)?;
         }
         conn.manual_commit
             .store(!enabled, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
-    fn end_tran(conn: &SqliteConnection, commit: bool) -> Result<(), OdbcError> {
-        let db = conn.conn.lock().map_err(|e| {
-            OdbcError::general(
-                format!("Mutex poisoned: {e}"),
-                stackable_odbc_core::types::SqlState::general_error(),
-            )
+    fn end_tran(conn: &SqliteConnection, commit: bool) -> Result<(), SqliteError> {
+        let db = conn.conn.lock().map_err(|e| SqliteError::General {
+            message: format!("Mutex poisoned: {e}"),
         })?;
         // If SQLite is in autocommit mode there is no open transaction to commit/roll back.
         if db.is_autocommit() {
             return Ok(());
         }
         let sql = if commit { "COMMIT" } else { "ROLLBACK" };
-        db.execute_batch(sql)
-            .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
+        db.execute_batch(sql).map_err(map_sqlite_error)?;
 
         // Still in manual-commit mode: open the next transaction, otherwise
         // subsequent statements would silently autocommit.
@@ -312,8 +414,7 @@ impl Backend for SqliteBackend {
             .manual_commit
             .load(std::sync::atomic::Ordering::Relaxed)
         {
-            db.execute_batch("BEGIN")
-                .map_err(|e| OdbcError::from(map_sqlite_error(e)))?;
+            db.execute_batch("BEGIN").map_err(map_sqlite_error)?;
         }
         Ok(())
     }
@@ -345,6 +446,27 @@ impl Backend for SqliteBackend {
     /// value.
     fn cursor_rollback_behavior() -> CursorBehavior {
         CursorBehavior::Preserve
+    }
+
+    /// `SQL_IC_MIXED`: SQLite stores an unquoted identifier with the case it
+    /// was written in, and matches it case-insensitively.
+    ///
+    /// `SQL_IC_MIXED` is the spec's value for exactly that pair — "stored in
+    /// mixed case and case-insensitive" — as opposed to `SQL_IC_UPPER` /
+    /// `SQL_IC_LOWER`, which fold the stored name, and `SQL_IC_SENSITIVE`,
+    /// which would make `SELECT * FROM T` and `SELECT * FROM t` name different
+    /// tables. They do not.
+    ///
+    /// Case-insensitive matching is ASCII-only in SQLite unless the build
+    /// carries ICU; that does not change the answer, since ODBC has no value
+    /// for "case-insensitive for some characters".
+    ///
+    /// Distinct from `SQL_QUOTED_IDENTIFIER_CASE`, which core answers, and
+    /// which is `SQL_IC_SENSITIVE` here: a quoted `"T"` does not match `"t"`.
+    ///
+    /// <https://sqlite.org/lang_keywords.html>
+    fn identifier_case() -> u16 {
+        SQL_IC_MIXED
     }
 
     /// SQLite has no ODBC catalogs: `metadata::tables` reports `TABLE_CAT` as
@@ -577,7 +699,7 @@ impl Backend for SqliteBackend {
 
     fn get_info_pre_connect(
         info_type: stackable_odbc_core::types::InfoType,
-    ) -> Result<InfoValue, OdbcError> {
+    ) -> Result<InfoValue, SqliteError> {
         info::get_info_pre_connect(info_type)
     }
 
@@ -621,7 +743,7 @@ impl Backend for SqliteBackend {
         catalog: Option<&str>,
         schema: Option<&str>,
         table: Option<&str>,
-    ) -> Result<SqliteStatement, OdbcError> {
+    ) -> Result<SqliteStatement, SqliteError> {
         metadata::primary_keys(conn, catalog, schema, table)
     }
 
@@ -633,7 +755,7 @@ impl Backend for SqliteBackend {
         fk_catalog: Option<&str>,
         fk_schema: Option<&str>,
         fk_table: Option<&str>,
-    ) -> Result<SqliteStatement, OdbcError> {
+    ) -> Result<SqliteStatement, SqliteError> {
         metadata::foreign_keys(
             conn, pk_catalog, pk_schema, pk_table, fk_catalog, fk_schema, fk_table,
         )
@@ -645,7 +767,7 @@ impl Backend for SqliteBackend {
         schema: Option<&str>,
         table: Option<&str>,
         unique_only: bool,
-    ) -> Result<SqliteStatement, OdbcError> {
+    ) -> Result<SqliteStatement, SqliteError> {
         metadata::statistics(conn, catalog, schema, table, unique_only)
     }
 
@@ -657,7 +779,7 @@ impl Backend for SqliteBackend {
         table: Option<&str>,
         scope: stackable_odbc_core::types::Scope,
         nullable: stackable_odbc_core::types::Nullable,
-    ) -> Result<SqliteStatement, OdbcError> {
+    ) -> Result<SqliteStatement, SqliteError> {
         metadata::special_columns(
             conn,
             identifier_type,
@@ -795,8 +917,10 @@ mod tests {
         let Err(err) = SqliteBackend::end_tran(&conn, true) else {
             panic!("COMMIT should have failed the deferred foreign-key constraint");
         };
+        // `end_tran` reports the backend's own error type now; the SQLSTATE an
+        // application sees is the one the conversion to `OdbcError` assigns.
         assert_eq!(
-            err.sqlstate().as_str(),
+            OdbcError::from(err).sqlstate().as_str(),
             sql_state::INTEGRITY_CONSTRAINT_VIOLATION
         );
     }

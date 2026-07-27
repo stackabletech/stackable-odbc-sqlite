@@ -6,7 +6,7 @@
 use stackable_odbc_core::backend::StatementBackend;
 use stackable_odbc_core::errors::OdbcError;
 use stackable_odbc_core::types::{
-    CDataType, ColumnDescriptor, ColumnValue, ExecuteOutcome, FetchResult,
+    CDataType, ColumnDescriptor, ColumnValue, ExecuteOutcome, FetchResult, Nullable,
 };
 
 use super::info::sqlite_bare_type_name;
@@ -15,6 +15,74 @@ use crate::type_conversion::{
     column_value_to_rusqlite, sqlite_declared_type_precision, sqlite_declared_type_scale,
     sqlite_type_to_sql_data_type, sqlite_value_to_column_value,
 };
+
+/// Builds the ODBC descriptor for result column `i` of `stmt`.
+///
+/// Nullability and the originating table come from
+/// `sqlite3_table_column_metadata`, which SQLite answers only for a column
+/// that is a plain reference to a stored table column. For a computed
+/// column — an expression, a literal, an aggregate — it reports nothing, and
+/// that is precisely `SQL_NULLABLE_UNKNOWN`: the driver cannot determine
+/// whether the column admits NULL, and the spec's third value says exactly
+/// that instead of guessing one of the other two. Guessing is not harmless in
+/// either direction: `SQL_NO_NULLS` tells an application it may skip a NULL
+/// check it needs, and `SQL_NULLABLE` makes it write one it does not.
+///
+/// The catalog and schema stay empty even though SQLite names a database for
+/// the column. This driver reports `supports_catalogs() == false` and
+/// `supports_schemas() == false`, so naming either here would contradict what
+/// it tells applications everywhere else — `metadata::tables` reports
+/// `TABLE_CAT` and `TABLE_SCHEM` as NULL for every row.
+fn describe_column(
+    stmt: &rusqlite::Statement<'_>,
+    i: usize,
+    col: &rusqlite::Column<'_>,
+) -> ColumnDescriptor {
+    let name = stmt
+        .column_name(i)
+        .map(|n| n.to_string())
+        .unwrap_or_else(|_| "?".to_string());
+    let decl = col.decl_type().unwrap_or("TEXT").to_string();
+    let sql_type = sqlite_type_to_sql_data_type(&decl);
+
+    let descriptor = ColumnDescriptor::new(name, sql_type)
+        .with_precision_scale(
+            sqlite_declared_type_precision(&decl),
+            sqlite_declared_type_scale(&decl),
+        )
+        // Spec (SQL_DESC_TYPE_NAME / SQLColumns.TYPE_NAME): both list bare
+        // examples ("CHAR", "VARCHAR", ...), not declarations, so `decl`
+        // ("VARCHAR(50)") matches no `SQLGetTypeInfo` row.
+        // `sqlite_bare_type_name` returns the bare name that does (see its doc
+        // comment in `backend/info.rs`); the declared length is not lost, only
+        // moved out of the name — it is still carried as the precision above.
+        .with_type_name(sqlite_bare_type_name(sql_type));
+
+    // `Ok(None)` is a computed column and `Err` is SQLite failing to resolve a
+    // name it just reported. Both leave the descriptor's nullability at the
+    // `SQL_NULLABLE_UNKNOWN` that `ColumnDescriptor::new` starts from, which
+    // is the honest answer in either case.
+    let Ok(Some((_db, table, _origin, _decl_type, _coll_seq, not_null, _pk, _autoinc))) =
+        stmt.column_metadata(i)
+    else {
+        return descriptor;
+    };
+
+    let descriptor = descriptor.with_nullable(if not_null {
+        Nullable::SqlNoNulls
+    } else {
+        Nullable::SqlNullable
+    });
+
+    // A table name SQLite reports but that is not UTF-8 is left unset rather
+    // than lossily transcoded: `SQL_DESC_BASE_TABLE_NAME` is what an
+    // application uses to build further SQL, and a mangled identifier there is
+    // worse than none.
+    match table.to_str() {
+        Ok(table) => descriptor.with_origin("", "", table),
+        Err(_) => descriptor,
+    }
+}
 
 pub(super) fn exec_direct(
     conn: &SqliteConnection,
@@ -40,32 +108,7 @@ pub(super) fn exec_direct(
     let columns: Vec<ColumnDescriptor> = sqlite_columns
         .iter()
         .enumerate()
-        .map(|(i, col)| {
-            let name = stmt
-                .column_name(i)
-                .map(|n| n.to_string())
-                .unwrap_or_else(|_| "?".to_string());
-            let decl = col.decl_type().unwrap_or("TEXT").to_string();
-            let sql_type = sqlite_type_to_sql_data_type(&decl);
-            ColumnDescriptor {
-                name,
-                sql_type,
-                precision: sqlite_declared_type_precision(&decl),
-                scale: sqlite_declared_type_scale(&decl),
-                // Spec (SQL_DESC_TYPE_NAME / SQLColumns.TYPE_NAME): both list
-                // bare examples ("CHAR", "VARCHAR", ...), not declarations, so
-                // `decl` ("VARCHAR(50)") matches no `SQLGetTypeInfo` row.
-                // `sqlite_bare_type_name` returns the bare name that does
-                // (see its doc comment in `backend/info.rs`); the declared
-                // length is not lost, only moved out of the name; it is still
-                // carried above via `sqlite_declared_type_precision`.
-                type_name: sqlite_bare_type_name(sql_type).to_string(),
-                // Result-set columns are reported as nullable: a prepared
-                // SELECT exposes no per-column NOT NULL metadata, so the driver
-                // does not attempt to distinguish non-nullable columns here.
-                nullable: true,
-            }
-        })
+        .map(|(i, col)| describe_column(&stmt, i, col))
         .collect();
 
     // Eagerly fetch all rows
@@ -149,23 +192,7 @@ pub(super) fn execute(
     let columns: Vec<ColumnDescriptor> = sqlite_columns
         .iter()
         .enumerate()
-        .map(|(i, col)| {
-            let name = prepared
-                .column_name(i)
-                .map(|n| n.to_string())
-                .unwrap_or_else(|_| "?".to_string());
-            let decl = col.decl_type().unwrap_or("TEXT").to_string();
-            let sql_type = sqlite_type_to_sql_data_type(&decl);
-            ColumnDescriptor {
-                name,
-                sql_type,
-                precision: sqlite_declared_type_precision(&decl),
-                scale: sqlite_declared_type_scale(&decl),
-                // See the `exec_direct` block above for why this is not `decl`.
-                type_name: sqlite_bare_type_name(sql_type).to_string(),
-                nullable: true,
-            }
-        })
+        .map(|(i, col)| describe_column(&prepared, i, col))
         .collect();
 
     let col_count = prepared.column_count();
@@ -191,7 +218,9 @@ pub(super) fn execute(
 }
 
 impl StatementBackend for SqliteStatement {
-    fn fetch(&mut self) -> Result<FetchResult, OdbcError> {
+    type Error = SqliteError;
+
+    fn fetch(&mut self) -> Result<FetchResult, SqliteError> {
         self.cursor += 1;
         if (self.cursor as usize) < self.rows.len() {
             Ok(FetchResult::Row)
@@ -204,10 +233,10 @@ impl StatementBackend for SqliteStatement {
         &mut self,
         col: u16,
         _target_type: CDataType,
-    ) -> Result<std::borrow::Cow<'_, ColumnValue>, OdbcError> {
+    ) -> Result<std::borrow::Cow<'_, ColumnValue>, SqliteError> {
         use stackable_odbc_core::types::SqlState;
         if self.cursor < 0 || self.cursor as usize >= self.rows.len() {
-            return Err(OdbcError::NoResultSet);
+            return Err(OdbcError::NoResultSet.into());
         }
         let col_idx = (col as usize).checked_sub(1).ok_or_else(|| {
             OdbcError::general("Column index must be >= 1", SqlState::general_error())
@@ -224,32 +253,58 @@ impl StatementBackend for SqliteStatement {
                     ),
                     SqlState::general_error(),
                 )
+                .into()
             })
     }
 
-    fn column_count(&self) -> u16 {
-        self.columns.len() as u16
+    /// `i16` because `SQLNumResultCols` writes through a `SQLSMALLINT *`.
+    ///
+    /// The clamp is unreachable: `SQLITE_LIMIT_COLUMN` cannot be raised above
+    /// 32767, which is exactly `i16::MAX`, so a materialised result set can
+    /// never carry more columns than this type can name.
+    fn column_count(&self) -> i16 {
+        i16::try_from(self.columns.len()).unwrap_or(i16::MAX)
     }
 
-    fn describe_col(&self, col: u16) -> Result<ColumnDescriptor, OdbcError> {
+    fn describe_col(
+        &self,
+        col: u16,
+    ) -> Result<std::borrow::Cow<'_, ColumnDescriptor>, SqliteError> {
         use stackable_odbc_core::types::SqlState;
         let idx = (col as usize).checked_sub(1).ok_or_else(|| {
             OdbcError::general("Column index must be >= 1", SqlState::general_error())
         })?;
-        self.columns.get(idx).cloned().ok_or_else(|| {
-            OdbcError::general(
-                format!("Column {} out of range", col),
-                SqlState::general_error(),
-            )
-        })
+        self.columns
+            .get(idx)
+            .map(std::borrow::Cow::Borrowed)
+            .ok_or_else(|| {
+                OdbcError::general(
+                    format!("Column {} out of range", col),
+                    SqlState::general_error(),
+                )
+                .into()
+            })
     }
 
-    fn row_count(&self) -> Option<usize> {
-        Some(self.affected_rows.unwrap_or(self.rows.len()))
+    /// `i64` because `SQLRowCount` writes through a signed `SQLLEN *`.
+    ///
+    /// A count that does not fit reports `SQL_NO_TOTAL` (-1), the spec's "the
+    /// driver cannot determine the row count" — which is what a value this
+    /// type cannot name actually means. It is unreachable in practice: rows
+    /// are materialised in memory, so `i64::MAX` of them cannot be held.
+    fn row_count(&self) -> Option<i64> {
+        const SQL_NO_TOTAL: i64 = -1;
+
+        let count = self.affected_rows.unwrap_or(self.rows.len());
+        Some(i64::try_from(count).unwrap_or(SQL_NO_TOTAL))
     }
 
-    fn close_cursor(&mut self) {
+    /// Fallible in the trait because for a networked data source closing a
+    /// cursor is a round trip. Here the rows are already materialised in
+    /// memory, so resetting the cursor index cannot fail.
+    fn close_cursor(&mut self) -> Result<(), SqliteError> {
         self.cursor = -1;
+        Ok(())
     }
 }
 
@@ -372,10 +427,14 @@ mod tests {
     fn get_data_before_fetch_is_no_result_set() {
         let conn = conn_with("CREATE TABLE t (id INTEGER); INSERT INTO t VALUES (1);");
         let mut stmt = exec_direct(&conn, "SELECT id FROM t").unwrap();
-        // No fetch() yet: the cursor is before the first row.
+        // No fetch() yet: the cursor is before the first row. The statement
+        // reports the backend's own error type now, and `SqliteError::Odbc`
+        // is what carries core's `NoResultSet` through it unchanged.
         assert!(matches!(
             stmt.get_data(1, CDataType::SLong),
-            Err(OdbcError::NoResultSet)
+            Err(SqliteError::Odbc {
+                source: OdbcError::NoResultSet
+            })
         ));
     }
 
