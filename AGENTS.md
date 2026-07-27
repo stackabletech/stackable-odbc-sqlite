@@ -342,8 +342,9 @@ with no data source open.
 
 ```bash
 ./test/setup.sh          # build, create test/test.db, write odbc.ini/odbcinst.ini
-./test/run-tests.sh      # pyodbc suite through real unixODBC
-./test/run-tests.sh --windows   # also run the Windows VM suite
+./test/run-tests.sh      # pyodbc suite through real unixODBC, then cargo test
+./test/run-tests.sh --windows          # also run the Windows VM suite
+./test/run-tests.sh --skip-cargo-test  # pyodbc only; what CI passes
 ```
 
 `test/setup.sh` and `test/run-tests.sh` regenerate `test/odbc.ini`,

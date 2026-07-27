@@ -7,6 +7,7 @@
 #   ./test/run-tests.sh            # Linux tests only
 #   ./test/run-tests.sh --windows  # Linux + Windows VM tests
 #   ./test/run-tests.sh --skip-build            # skip the cargo build (also passed to windows_test.py)
+#   ./test/run-tests.sh --skip-cargo-test       # skip `cargo test` (CI already runs it via pre-commit)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,12 +18,14 @@ DB_PATH="$SCRIPT_DIR/test.db"
 
 RUN_WINDOWS=false
 SKIP_BUILD=false
+SKIP_CARGO_TEST=false
 WINDOWS_EXTRA_ARGS=()
 
 for arg in "$@"; do
     case "$arg" in
         --windows) RUN_WINDOWS=true ;;
         --skip-build) SKIP_BUILD=true; WINDOWS_EXTRA_ARGS+=("$arg") ;;
+        --skip-cargo-test) SKIP_CARGO_TEST=true ;;
         *) WINDOWS_EXTRA_ARGS+=("$arg") ;;
     esac
 done
@@ -49,9 +52,14 @@ echo "=== Running Linux pyodbc integration tests (DSN) ==="
 uv run --with pyodbc python3 "$SCRIPT_DIR/test_integration.py" "DSN=test_sqlite"
 
 # --- Linux: Rust FFI integration tests ---
-echo "=== Running SQLite FFI integration tests ==="
-cd "$PROJECT_DIR"
-cargo test
+# Run by default so that a developer invoking this script gets the whole suite
+# in one command. CI passes --skip-cargo-test, because its pre-commit job has
+# already run exactly this via the cargo-test hook, and repeating it there
+# means rebuilding the test harness on a second runner for no added coverage.
+if [[ "$SKIP_CARGO_TEST" == false ]]; then
+    echo "=== Running SQLite FFI integration tests ==="
+    (cd "$PROJECT_DIR" && cargo test)
+fi
 
 # --- Windows VM tests (optional) ---
 if [[ "$RUN_WINDOWS" == true ]]; then
