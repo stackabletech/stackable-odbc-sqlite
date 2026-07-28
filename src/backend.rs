@@ -1,13 +1,17 @@
-use std::sync::Mutex;
+use std::{
+    borrow::Cow,
+    sync::{Arc, Mutex},
+};
 
 use snafu::Snafu;
 use stackable_odbc_core::{
     backend::Backend,
     errors::OdbcError,
     types::{
-        ColumnDescriptor, ColumnValue, ConnectParams, CursorBehavior, ExecuteOutcome, InfoValue,
-        SQL_CB_NULL, SQL_CN_ANY, SQL_GB_NO_RELATION, SQL_IC_MIXED, SQL_NC_LOW, SQL_NNC_NON_NULL,
-        SQL_TXN_SERIALIZABLE, TypeInfoRow,
+        ColumnDescriptor, ColumnRow, ColumnValue, ConnectParams, CursorBehavior, ExecuteOutcome,
+        ForeignKeyRow, InfoValue, PrimaryKeyRow, SQL_CB_NULL, SQL_CN_ANY, SQL_GB_NO_RELATION,
+        SQL_IC_MIXED, SQL_NC_LOW, SQL_NNC_NON_NULL, SQL_TXN_SERIALIZABLE, SpecialColumnRow,
+        StatisticsRow, TableRow, TypeInfoRow,
     },
 };
 
@@ -35,6 +39,17 @@ pub struct SqliteBackend;
 
 pub struct SqliteConnection {
     pub conn: Mutex<rusqlite::Connection>,
+    /// `sqlite3_interrupt`'s handle for this connection, captured in
+    /// [`SqliteBackend::connect`] and handed to every statement as its cancel
+    /// token. See [`SqliteBackend::CancelToken`].
+    ///
+    /// Held here rather than taken from `conn` on demand because
+    /// [`Backend::cancel_token`] cannot fail and cannot block: reaching through
+    /// the `Mutex` would mean either waiting on whatever thread is executing or
+    /// inventing an answer for a poisoned lock. Capturing it once at connect
+    /// time is also what core's `cancel_token` doc asks for — assemble the
+    /// token with the connection in hand, never lazily inside `cancel`.
+    pub(crate) interrupt: Arc<rusqlite::InterruptHandle>,
     /// True while the application has turned autocommit off. `end_tran` reads
     /// this to decide whether to open the next transaction after committing.
     pub(crate) manual_commit: std::sync::atomic::AtomicBool,
@@ -159,7 +174,23 @@ pub enum SqliteError {
         message: String,
         cause: Option<rusqlite::Error>,
     },
+    /// `SQLITE_INTERRUPT`: the statement was stopped by `sqlite3_interrupt`,
+    /// which for this driver means `SQLCancel`. See
+    /// [`SqliteBackend::cancel`].
+    #[snafu(display("operation canceled: {message}"))]
+    OperationCanceled {
+        message: String,
+        cause: Option<rusqlite::Error>,
+    },
 }
+
+/// Operation canceled — `HY008`.
+///
+/// The SQLSTATE the spec lists for every function that can be stopped by
+/// `SQLCancel` (`SQLExecDirect`, `SQLExecute`, `SQLFetch`, the catalog
+/// functions). `stackable-odbc-core` has no named constructor for it, so it is
+/// declared here rather than written as a bare literal at the use site.
+pub(crate) const SQL_STATE_OPERATION_CANCELED: &str = "HY008";
 
 /// SQLite's extended result code for `e`, or `0` when there is none.
 ///
@@ -207,6 +238,15 @@ pub(crate) fn map_sqlite_error(e: rusqlite::Error) -> SqliteError {
                     cause: Some(e),
                 },
                 ErrorCode::TypeMismatch => SqliteError::DataTypeMismatch {
+                    message,
+                    cause: Some(e),
+                },
+                // SQLITE_INTERRUPT. `sqlite3_interrupt` is only ever called by
+                // this driver's `SQLCancel` implementation, so this is a
+                // cancelled statement rather than a failure of the data
+                // source, and `HY008` is what the spec's diagnostics tables
+                // list for exactly that.
+                ErrorCode::OperationInterrupted => SqliteError::OperationCanceled {
                     message,
                     cause: Some(e),
                 },
@@ -311,6 +351,9 @@ impl From<SqliteError> for OdbcError {
             SqliteError::NumericOutOfRange { cause, .. } => {
                 (SqlState::numeric_value_out_of_range(), cause)
             }
+            SqliteError::OperationCanceled { cause, .. } => {
+                (SqlState::new(SQL_STATE_OPERATION_CANCELED), cause)
+            }
             SqliteError::Rusqlite { source } => (SqlState::general_error(), Some(source)),
             SqliteError::MissingParam { .. } | SqliteError::General { .. } => {
                 (SqlState::general_error(), None)
@@ -331,9 +374,55 @@ impl From<SqliteError> for OdbcError {
 }
 
 impl Backend for SqliteBackend {
+    /// `sqlite3_interrupt`'s handle, the *aliasing* token shape
+    /// [`Backend::CancelToken`] names SQLite as the example of: it refers to
+    /// the same connection the statement is executing on, which is sound only
+    /// because SQLite documents `sqlite3_interrupt` as safe to call from a
+    /// thread other than the one running the query.
+    ///
+    /// The `Arc` is the requirement core states for an aliasing token — it has
+    /// to survive a concurrent `SQLDisconnect`, because core clones the token
+    /// out before doing anything else. `rusqlite`'s `InterruptHandle` already
+    /// satisfies the underlying rule ("it is not safe to call this routine with
+    /// a database connection that is closed or might close before
+    /// `sqlite3_interrupt()` returns"): it holds an
+    /// `Arc<Mutex<*mut sqlite3>>` shared with the connection, and
+    /// `InnerConnection::close` nulls that pointer *while holding the same
+    /// mutex*, so a racing `interrupt()` either runs against a live handle or
+    /// sees null and does nothing. Wrapping it in this crate's own `Arc` is
+    /// what makes the token cheap to clone per statement.
+    type CancelToken = Arc<rusqlite::InterruptHandle>;
     type Connection = SqliteConnection;
     type Error = SqliteError;
     type Statement = SqliteStatement;
+
+    /// Hand out the connection's interrupt handle. Infallible and lock-free:
+    /// the handle was captured in [`SqliteBackend::connect`], so this only
+    /// bumps a refcount — see [`SqliteConnection::interrupt`].
+    fn cancel_token(conn: &SqliteConnection) -> Arc<rusqlite::InterruptHandle> {
+        Arc::clone(&conn.interrupt)
+    }
+
+    /// Interrupt whatever is running on the token's connection.
+    ///
+    /// `sqlite3_interrupt` makes the in-flight `sqlite3_step` return
+    /// `SQLITE_INTERRUPT`, which surfaces from
+    /// [`stackable_odbc_core::backend::Backend::exec_direct`] and friends as
+    /// `HY008` ("operation canceled") via `map_sqlite_error` — the SQLSTATE the
+    /// spec defines for a statement stopped by `SQLCancel`.
+    ///
+    /// Safe on both of `SQLCancel`'s paths. It never blocks on this
+    /// connection's own `Mutex`, so the idle path — where core holds the
+    /// connection's group lock across this call — cannot deadlock; the only
+    /// lock taken is `rusqlite`'s short-lived interrupt lock, which no ODBC
+    /// entry point holds. It is also a no-op rather than an error when nothing
+    /// is running, which is exactly what the spec asks of `SQLCancel` in that
+    /// case.
+    fn cancel(token: &Arc<rusqlite::InterruptHandle>) -> Result<(), SqliteError> {
+        tracing::debug!("SQLCancel: interrupting the SQLite connection");
+        token.interrupt();
+        Ok(())
+    }
 
     fn connect(params: &ConnectParams) -> Result<SqliteConnection, SqliteError> {
         let p = types::connect_params::SqliteConnectParams::try_from(params)?;
@@ -358,8 +447,14 @@ impl Backend for SqliteBackend {
         conn.execute_batch("PRAGMA foreign_keys = ON")
             .map_err(map_sqlite_error)?;
 
+        // Captured before the connection moves into the `Mutex`: after that,
+        // reaching it would mean taking a lock, and `cancel_token` can neither
+        // block nor fail. See `SqliteConnection::interrupt`.
+        let interrupt = Arc::new(conn.get_interrupt_handle());
+
         Ok(SqliteConnection {
             conn: Mutex::new(conn),
+            interrupt,
             manual_commit: std::sync::atomic::AtomicBool::new(false),
         })
     }
@@ -368,8 +463,8 @@ impl Backend for SqliteBackend {
         Ok(()) // rusqlite closes on drop
     }
 
-    fn browse_connect_attrs() -> &'static [&'static str] {
-        &["database"]
+    fn browse_connect_attrs() -> Cow<'static, [Cow<'static, str>]> {
+        Cow::Borrowed(&[Cow::Borrowed("database")])
     }
 
     /// SQLite supports transactions and this driver reports `SQL_TC_DML` for
@@ -465,7 +560,7 @@ impl Backend for SqliteBackend {
     /// which is `SQL_IC_SENSITIVE` here: a quoted `"T"` does not match `"t"`.
     ///
     /// <https://sqlite.org/lang_keywords.html>
-    fn identifier_case() -> u16 {
+    fn identifier_case(_conn: &SqliteConnection) -> u16 {
         SQL_IC_MIXED
     }
 
@@ -480,7 +575,7 @@ impl Backend for SqliteBackend {
     /// the other two inherit defaults that named a catalog, telling an
     /// application catalogs do not exist and giving their name in the same
     /// breath.
-    fn supports_catalogs() -> bool {
+    fn supports_catalogs(_conn: &SqliteConnection) -> bool {
         false
     }
 
@@ -489,20 +584,20 @@ impl Backend for SqliteBackend {
     ///
     /// Drives `SQL_SCHEMA_TERM` and `SQL_SCHEMA_USAGE`; see
     /// [`SqliteBackend::supports_catalogs`].
-    fn supports_schemas() -> bool {
+    fn supports_schemas(_conn: &SqliteConnection) -> bool {
         false
     }
 
     /// The `ALTER TABLE` clauses SQLite accepts, of those the ODBC bitmap can
     /// express. See `info::SQLITE_ALTER_TABLE` for what is claimed, what is
     /// supported-but-unrepresentable, and how each bit was verified.
-    fn alter_table_support() -> u32 {
+    fn alter_table_support(_conn: &SqliteConnection) -> u32 {
         info::SQLITE_ALTER_TABLE
     }
 
     /// Every outer-join form SQLite implements. See
     /// `info::SQLITE_OUTER_JOIN_CAPABILITIES`.
-    fn outer_join_capabilities() -> u32 {
+    fn outer_join_capabilities(_conn: &SqliteConnection) -> u32 {
         info::SQLITE_OUTER_JOIN_CAPABILITIES
     }
 
@@ -513,7 +608,7 @@ impl Backend for SqliteBackend {
     /// connection from this, so the two cannot disagree.
     ///
     /// Spec: <https://www.sqlite.org/isolation.html>
-    fn default_txn_isolation() -> u32 {
+    fn default_txn_isolation(_conn: &SqliteConnection) -> u32 {
         SQL_TXN_SERIALIZABLE
     }
 
@@ -529,7 +624,7 @@ impl Backend for SqliteBackend {
     /// [`Backend::set_txn_isolation`] is correct as-is: the one supported
     /// level is always already in effect, and anything else is rejected with
     /// `HY024` before it reaches the backend.
-    fn txn_isolation_options() -> u32 {
+    fn txn_isolation_options(_conn: &SqliteConnection) -> u32 {
         SQL_TXN_SERIALIZABLE
     }
 
@@ -539,30 +634,30 @@ impl Backend for SqliteBackend {
     /// `GROUP BY` columns and expressions absent from the select list.
     ///
     /// Verified in `group_by_is_unrelated_to_the_select_list`.
-    fn group_by() -> u16 {
+    fn group_by(_conn: &SqliteConnection) -> u16 {
         SQL_GB_NO_RELATION
     }
 
     /// `SQL_NC_LOW`: SQLite sorts NULLs at the low end — first ascending, last
     /// descending.
-    fn null_collation() -> u16 {
+    fn null_collation(_conn: &SqliteConnection) -> u16 {
         SQL_NC_LOW
     }
 
     /// `SQL_CN_ANY`: SQLite accepts a table alias with or without `AS`, and
     /// places no restriction on the name.
-    fn correlation_name() -> u16 {
+    fn correlation_name(_conn: &SqliteConnection) -> u16 {
         SQL_CN_ANY
     }
 
     /// `SQL_NNC_NON_NULL`: SQLite implements `NOT NULL` column constraints.
-    fn non_nullable_columns() -> u16 {
+    fn non_nullable_columns(_conn: &SqliteConnection) -> u16 {
         SQL_NNC_NON_NULL
     }
 
     /// SQLite takes arbitrary expressions in `ORDER BY`, including over columns
     /// absent from the select list.
-    fn expressions_in_order_by() -> bool {
+    fn expressions_in_order_by(_conn: &SqliteConnection) -> bool {
         true
     }
 
@@ -581,55 +676,55 @@ impl Backend for SqliteBackend {
     /// `0` is the honest answer: it claims no level rather than asserting one
     /// the driver demonstrably fails. Raising it later means auditing SQL-92
     /// entry level properly, not restoring the value core used to invent.
-    fn sql_conformance() -> u32 {
+    fn sql_conformance(_conn: &SqliteConnection) -> u32 {
         0
     }
 
     /// `0`: `TIMESTAMPADD` is not supported. `SQLITE_TIMEDATE_FUNCTIONS`
     /// deliberately omits `SQL_FN_TD_TIMESTAMPADD`, so claiming interval units
     /// here would describe a function this driver does not offer.
-    fn timedate_add_intervals() -> u32 {
+    fn timedate_add_intervals(_conn: &SqliteConnection) -> u32 {
         0
     }
 
     /// `0`: `TIMESTAMPDIFF` is not supported, for the same reason as
     /// [`SqliteBackend::timedate_add_intervals`].
-    fn timedate_diff_intervals() -> u32 {
+    fn timedate_diff_intervals(_conn: &SqliteConnection) -> u32 {
         0
     }
 
     /// See `info::SQLITE_SUBQUERIES`. Notably excludes `SQL_SQ_QUANTIFIED`,
     /// which core's default claimed while this driver's
     /// `SQL_SQL92_PREDICATES` denied it.
-    fn subqueries() -> u32 {
+    fn subqueries(_conn: &SqliteConnection) -> u32 {
         info::SQLITE_SUBQUERIES
     }
 
     /// SQLite accepts `SELECT a AS x`, and `AS` is optional.
-    fn column_alias() -> bool {
+    fn column_alias(_conn: &SqliteConnection) -> bool {
         true
     }
 
     /// `SQL_CB_NULL`: concatenating a NULL yields NULL — `'a' || NULL` is
     /// NULL, not `'a'`.
-    fn concat_null_behavior() -> u16 {
+    fn concat_null_behavior(_conn: &SqliteConnection) -> u16 {
         SQL_CB_NULL
     }
 
     /// See `info::SQLITE_UNION` — both `UNION` and `UNION ALL`.
-    fn union_support() -> u32 {
+    fn union_support(_conn: &SqliteConnection) -> u32 {
         info::SQLITE_UNION
     }
 
     /// See `info::SQLITE_CONVERT_FUNCTIONS` — `CAST` only.
-    fn convert_functions() -> u32 {
+    fn convert_functions(_conn: &SqliteConnection) -> u32 {
         info::SQLITE_CONVERT_FUNCTIONS
     }
 
     /// `false`: SQLite orders by expressions and by columns absent from the
     /// select list, so `ORDER BY` is not restricted to selected columns. Same
     /// permissiveness as [`SqliteBackend::group_by`].
-    fn order_by_columns_in_select() -> bool {
+    fn order_by_columns_in_select(_conn: &SqliteConnection) -> bool {
         false
     }
 
@@ -640,7 +735,7 @@ impl Backend for SqliteBackend {
     /// This is the one value in this group that is a claim about the connected
     /// principal rather than about SQL. It is safe here precisely because
     /// SQLite has no principal.
-    fn accessible_tables() -> bool {
+    fn accessible_tables(_conn: &SqliteConnection) -> bool {
         true
     }
 
@@ -650,7 +745,7 @@ impl Backend for SqliteBackend {
     /// read-only media, or one whose file permissions deny writes, still
     /// reports `false` here and fails the write itself — which is what the
     /// spec's "data source is set to READ ONLY mode" means.
-    fn data_source_read_only() -> bool {
+    fn data_source_read_only(_conn: &SqliteConnection) -> bool {
         false
     }
 
@@ -660,30 +755,39 @@ impl Backend for SqliteBackend {
     /// This is the raw list; core subtracts `ODBC_RESERVED_KEYWORDS` and joins
     /// it into `SQL_KEYWORDS`, so the "excluding ODBC's own" rule is applied
     /// once for every driver instead of per backend.
-    fn keywords() -> &'static [&'static str] {
-        info::sqlite_keywords()
+    fn keywords(_conn: &SqliteConnection) -> Cow<'static, [Cow<'static, str>]> {
+        Cow::Borrowed(info::sqlite_keywords())
     }
 
     /// Backslash: SQLite's `LIKE ... ESCAPE` takes any character, and this
     /// driver reports `SQL_LIKE_ESCAPE_CLAUSE = "Y"`. Backslash is the
     /// conventional choice and the one `SQLTables`-style pattern arguments are
     /// documented against.
-    fn search_pattern_escape() -> &'static str {
-        "\\"
+    fn search_pattern_escape(_conn: &SqliteConnection) -> Cow<'static, str> {
+        Cow::Borrowed("\\")
     }
 
     // --- Delegations ---
 
-    fn exec_direct(conn: &SqliteConnection, sql: &str) -> Result<SqliteStatement, SqliteError> {
+    fn exec_direct(
+        conn: &SqliteConnection,
+        _cancel: &Arc<rusqlite::InterruptHandle>,
+        sql: &str,
+    ) -> Result<SqliteStatement, SqliteError> {
         execute::exec_direct(conn, sql)
     }
 
-    fn prepare(conn: &SqliteConnection, sql: &str) -> Result<SqliteStatement, SqliteError> {
+    fn prepare(
+        conn: &SqliteConnection,
+        _cancel: &Arc<rusqlite::InterruptHandle>,
+        sql: &str,
+    ) -> Result<SqliteStatement, SqliteError> {
         execute::prepare(conn, sql)
     }
 
     fn execute(
         conn: &SqliteConnection,
+        _cancel: &Arc<rusqlite::InterruptHandle>,
         stmt: &mut SqliteStatement,
         params: &[ColumnValue],
     ) -> Result<ExecuteOutcome, SqliteError> {
@@ -710,52 +814,62 @@ impl Backend for SqliteBackend {
         info::get_info_raw(conn, info_type)
     }
 
-    fn get_functions() -> &'static [stackable_odbc_core::function_id::FunctionId] {
-        info::get_functions()
+    fn get_functions() -> Cow<'static, [stackable_odbc_core::function_id::FunctionId]> {
+        Cow::Borrowed(info::get_functions())
     }
 
-    fn get_type_info() -> &'static [TypeInfoRow] {
-        info::get_type_info()
+    fn get_type_info(_conn: &SqliteConnection) -> Cow<'static, [TypeInfoRow]> {
+        Cow::Borrowed(info::get_type_info())
     }
 
     fn tables(
         conn: &SqliteConnection,
+        _cancel: &Arc<rusqlite::InterruptHandle>,
         catalog: Option<&str>,
         schema: Option<&str>,
         table: Option<&str>,
         table_type: Option<&str>,
-    ) -> Result<SqliteStatement, SqliteError> {
+    ) -> Result<Vec<TableRow>, SqliteError> {
         metadata::tables(conn, catalog, schema, table, table_type)
+    }
+
+    /// `TABLE` and `VIEW` — the two values `metadata::tables` can put in
+    /// `TABLE_TYPE`. See `metadata::table_types`.
+    fn table_types(_conn: &SqliteConnection) -> Vec<Cow<'static, str>> {
+        metadata::table_types()
     }
 
     fn columns(
         conn: &SqliteConnection,
+        _cancel: &Arc<rusqlite::InterruptHandle>,
         catalog: Option<&str>,
         schema: Option<&str>,
         table: Option<&str>,
         column: Option<&str>,
-    ) -> Result<SqliteStatement, SqliteError> {
+    ) -> Result<Vec<ColumnRow>, SqliteError> {
         metadata::columns(conn, catalog, schema, table, column)
     }
 
     fn primary_keys(
         conn: &SqliteConnection,
+        _cancel: &Arc<rusqlite::InterruptHandle>,
         catalog: Option<&str>,
         schema: Option<&str>,
         table: Option<&str>,
-    ) -> Result<SqliteStatement, SqliteError> {
+    ) -> Result<Vec<PrimaryKeyRow>, SqliteError> {
         metadata::primary_keys(conn, catalog, schema, table)
     }
 
     fn foreign_keys(
         conn: &SqliteConnection,
+        _cancel: &Arc<rusqlite::InterruptHandle>,
         pk_catalog: Option<&str>,
         pk_schema: Option<&str>,
         pk_table: Option<&str>,
         fk_catalog: Option<&str>,
         fk_schema: Option<&str>,
         fk_table: Option<&str>,
-    ) -> Result<SqliteStatement, SqliteError> {
+    ) -> Result<Vec<ForeignKeyRow>, SqliteError> {
         metadata::foreign_keys(
             conn, pk_catalog, pk_schema, pk_table, fk_catalog, fk_schema, fk_table,
         )
@@ -763,23 +877,25 @@ impl Backend for SqliteBackend {
 
     fn statistics(
         conn: &SqliteConnection,
+        _cancel: &Arc<rusqlite::InterruptHandle>,
         catalog: Option<&str>,
         schema: Option<&str>,
         table: Option<&str>,
         unique_only: bool,
-    ) -> Result<SqliteStatement, SqliteError> {
+    ) -> Result<Vec<StatisticsRow>, SqliteError> {
         metadata::statistics(conn, catalog, schema, table, unique_only)
     }
 
     fn special_columns(
         conn: &SqliteConnection,
+        _cancel: &Arc<rusqlite::InterruptHandle>,
         identifier_type: stackable_odbc_core::types::IdentifierType,
         catalog: Option<&str>,
         schema: Option<&str>,
         table: Option<&str>,
         scope: stackable_odbc_core::types::Scope,
         nullable: stackable_odbc_core::types::Nullable,
-    ) -> Result<SqliteStatement, SqliteError> {
+    ) -> Result<Vec<SpecialColumnRow>, SqliteError> {
         metadata::special_columns(
             conn,
             identifier_type,
@@ -794,7 +910,7 @@ impl Backend for SqliteBackend {
     /// SQLite's `{fn}`/`{d}`/`{t}`/`{ts}` escape-translation dialect. See
     /// `crate::escape_dialect` for the remap table and its justification
     /// against the `SQL_*_FUNCTIONS` bitmaps in `backend/info.rs`.
-    fn escape_dialect() -> stackable_odbc_core::escape::EscapeDialect {
+    fn escape_dialect(_conn: &SqliteConnection) -> stackable_odbc_core::escape::EscapeDialect {
         crate::escape_dialect::dialect()
     }
 }
@@ -834,20 +950,43 @@ mod tests {
         }
 
         // Prepare a parameterized SELECT once.
-        let mut stmt = SqliteBackend::prepare(&conn, "SELECT id FROM t WHERE id = ?1").unwrap();
+        let mut stmt = SqliteBackend::prepare(
+            &conn,
+            &SqliteBackend::cancel_token(&conn),
+            "SELECT id FROM t WHERE id = ?1",
+        )
+        .unwrap();
 
         // First execute: matching param -> exactly one row.
-        SqliteBackend::execute(&conn, &mut stmt, &[ColumnValue::I64(2)]).unwrap();
+        SqliteBackend::execute(
+            &conn,
+            &SqliteBackend::cancel_token(&conn),
+            &mut stmt,
+            &[ColumnValue::I64(2)],
+        )
+        .unwrap();
         assert!(matches!(stmt.fetch().unwrap(), FetchResult::Row));
         assert!(matches!(stmt.fetch().unwrap(), FetchResult::NoData));
 
         // Re-execute the SAME handle with a non-matching param -> no rows. This
         // fails if the cached compiled statement leaked the previous binding.
-        SqliteBackend::execute(&conn, &mut stmt, &[ColumnValue::I64(999)]).unwrap();
+        SqliteBackend::execute(
+            &conn,
+            &SqliteBackend::cancel_token(&conn),
+            &mut stmt,
+            &[ColumnValue::I64(999)],
+        )
+        .unwrap();
         assert!(matches!(stmt.fetch().unwrap(), FetchResult::NoData));
 
         // And once more with a matching param -> one row again.
-        SqliteBackend::execute(&conn, &mut stmt, &[ColumnValue::I64(1)]).unwrap();
+        SqliteBackend::execute(
+            &conn,
+            &SqliteBackend::cancel_token(&conn),
+            &mut stmt,
+            &[ColumnValue::I64(1)],
+        )
+        .unwrap();
         assert!(matches!(stmt.fetch().unwrap(), FetchResult::Row));
         assert!(matches!(stmt.fetch().unwrap(), FetchResult::NoData));
     }
@@ -863,7 +1002,8 @@ mod tests {
             let db = conn.conn.lock().unwrap();
             db.execute_batch(setup).unwrap();
         }
-        let Err(err) = SqliteBackend::exec_direct(&conn, sql) else {
+        let Err(err) = SqliteBackend::exec_direct(&conn, &SqliteBackend::cancel_token(&conn), sql)
+        else {
             panic!("statement should have failed: {sql}");
         };
         OdbcError::from(err).sqlstate().as_str().to_string()
@@ -913,7 +1053,12 @@ mod tests {
         }
         // Manual-commit mode; the FK violation is deferred until COMMIT.
         SqliteBackend::set_autocommit(&conn, false).unwrap();
-        SqliteBackend::exec_direct(&conn, "INSERT INTO child VALUES (999)").unwrap();
+        SqliteBackend::exec_direct(
+            &conn,
+            &SqliteBackend::cancel_token(&conn),
+            "INSERT INTO child VALUES (999)",
+        )
+        .unwrap();
         let Err(err) = SqliteBackend::end_tran(&conn, true) else {
             panic!("COMMIT should have failed the deferred foreign-key constraint");
         };
@@ -978,7 +1123,12 @@ mod tests {
             )
             .unwrap();
         }
-        let mut stmt = SqliteBackend::exec_direct(&conn, "SELECT id, name FROM t").unwrap();
+        let mut stmt = SqliteBackend::exec_direct(
+            &conn,
+            &SqliteBackend::cancel_token(&conn),
+            "SELECT id, name FROM t",
+        )
+        .unwrap();
         assert_eq!(stmt.column_count(), 2);
         assert_eq!(stmt.fetch().unwrap(), FetchResult::Row);
         assert_eq!(
@@ -1000,7 +1150,12 @@ mod tests {
             let db = conn.conn.lock().unwrap();
             db.execute_batch("CREATE TABLE t (id INTEGER)").unwrap();
         }
-        let mut stmt = SqliteBackend::exec_direct(&conn, "SELECT * FROM t").unwrap();
+        let mut stmt = SqliteBackend::exec_direct(
+            &conn,
+            &SqliteBackend::cancel_token(&conn),
+            "SELECT * FROM t",
+        )
+        .unwrap();
         assert_eq!(stmt.fetch().unwrap(), FetchResult::NoData);
     }
 
@@ -1013,7 +1168,12 @@ mod tests {
             db.execute_batch("CREATE TABLE t (v TEXT); INSERT INTO t VALUES (NULL);")
                 .unwrap();
         }
-        let mut stmt = SqliteBackend::exec_direct(&conn, "SELECT v FROM t").unwrap();
+        let mut stmt = SqliteBackend::exec_direct(
+            &conn,
+            &SqliteBackend::cancel_token(&conn),
+            "SELECT v FROM t",
+        )
+        .unwrap();
         assert_eq!(stmt.fetch().unwrap(), FetchResult::Row);
         assert_eq!(
             stmt.get_data(1, CDataType::Default).unwrap().into_owned(),
@@ -1030,11 +1190,16 @@ mod tests {
             db.execute_batch("CREATE TABLE t (id INTEGER, name TEXT)")
                 .unwrap();
         }
-        let stmt = SqliteBackend::exec_direct(&conn, "SELECT id, name FROM t").unwrap();
+        let stmt = SqliteBackend::exec_direct(
+            &conn,
+            &SqliteBackend::cancel_token(&conn),
+            "SELECT id, name FROM t",
+        )
+        .unwrap();
         let col1 = stmt.describe_col(1).unwrap();
-        assert_eq!(col1.name, "id");
+        assert_eq!(col1.name(), "id");
         let col2 = stmt.describe_col(2).unwrap();
-        assert_eq!(col2.name, "name");
+        assert_eq!(col2.name(), "name");
     }
 
     #[test]
@@ -1048,7 +1213,12 @@ mod tests {
             )
             .unwrap();
         }
-        let stmt = SqliteBackend::exec_direct(&conn, "SELECT * FROM t").unwrap();
+        let stmt = SqliteBackend::exec_direct(
+            &conn,
+            &SqliteBackend::cancel_token(&conn),
+            "SELECT * FROM t",
+        )
+        .unwrap();
         assert_eq!(stmt.row_count(), Some(2));
     }
 
@@ -1091,7 +1261,12 @@ mod tests {
             )
             .unwrap();
         }
-        let stmt = SqliteBackend::exec_direct(&conn, "UPDATE t SET v = 99 WHERE v = 10").unwrap();
+        let stmt = SqliteBackend::exec_direct(
+            &conn,
+            &SqliteBackend::cancel_token(&conn),
+            "UPDATE t SET v = 99 WHERE v = 10",
+        )
+        .unwrap();
         assert_eq!(stmt.column_count(), 0);
         assert_eq!(stmt.row_count(), Some(2)); // rows 1 and 3 were updated
     }
@@ -1110,12 +1285,22 @@ mod tests {
             )
             .unwrap();
         }
-        let stmt = SqliteBackend::exec_direct(&conn, "DELETE FROM t WHERE id > 1").unwrap();
+        let stmt = SqliteBackend::exec_direct(
+            &conn,
+            &SqliteBackend::cancel_token(&conn),
+            "DELETE FROM t WHERE id > 1",
+        )
+        .unwrap();
         assert_eq!(stmt.column_count(), 0);
         assert_eq!(stmt.row_count(), Some(2));
 
         // Confirm only row 1 remains
-        let mut sel = SqliteBackend::exec_direct(&conn, "SELECT COUNT(*) FROM t").unwrap();
+        let mut sel = SqliteBackend::exec_direct(
+            &conn,
+            &SqliteBackend::cancel_token(&conn),
+            "SELECT COUNT(*) FROM t",
+        )
+        .unwrap();
         assert_eq!(sel.fetch().unwrap(), FetchResult::Row);
         assert_eq!(
             sel.get_data(1, CDataType::Default).unwrap().into_owned(),
@@ -1131,7 +1316,12 @@ mod tests {
             let db = conn.conn.lock().unwrap();
             db.execute_batch("CREATE TABLE t (id INTEGER)").unwrap();
         }
-        let mut stmt = SqliteBackend::exec_direct(&conn, "INSERT INTO t VALUES (1)").unwrap();
+        let mut stmt = SqliteBackend::exec_direct(
+            &conn,
+            &SqliteBackend::cancel_token(&conn),
+            "INSERT INTO t VALUES (1)",
+        )
+        .unwrap();
         // DML results have no rows; fetch must return NoData immediately
         assert_eq!(stmt.fetch().unwrap(), FetchResult::NoData);
     }
@@ -1149,7 +1339,12 @@ mod tests {
             db.execute_batch("CREATE TABLE t (id INTEGER, name TEXT)")
                 .unwrap();
         }
-        let stmt = SqliteBackend::prepare(&conn, "SELECT id FROM t WHERE id = ?").unwrap();
+        let stmt = SqliteBackend::prepare(
+            &conn,
+            &SqliteBackend::cancel_token(&conn),
+            "SELECT id FROM t WHERE id = ?",
+        )
+        .unwrap();
         assert_eq!(
             stmt.prepared_sql.as_deref(),
             Some("SELECT id FROM t WHERE id = ?")
@@ -1161,7 +1356,11 @@ mod tests {
     fn prepare_invalid_sql_returns_error() {
         let params = ConnectParams::parse("Database=:memory:").unwrap();
         let conn = SqliteBackend::connect(&params).unwrap();
-        let result = SqliteBackend::prepare(&conn, "NOT VALID SQL %%%");
+        let result = SqliteBackend::prepare(
+            &conn,
+            &SqliteBackend::cancel_token(&conn),
+            "NOT VALID SQL %%%",
+        );
         assert!(result.is_err());
     }
 
@@ -1178,8 +1377,19 @@ mod tests {
             )
             .unwrap();
         }
-        let mut stmt = SqliteBackend::prepare(&conn, "SELECT name FROM t WHERE id = ?").unwrap();
-        SqliteBackend::execute(&conn, &mut stmt, &[ColumnValue::I64(1)]).unwrap();
+        let mut stmt = SqliteBackend::prepare(
+            &conn,
+            &SqliteBackend::cancel_token(&conn),
+            "SELECT name FROM t WHERE id = ?",
+        )
+        .unwrap();
+        SqliteBackend::execute(
+            &conn,
+            &SqliteBackend::cancel_token(&conn),
+            &mut stmt,
+            &[ColumnValue::I64(1)],
+        )
+        .unwrap();
         assert_eq!(stmt.column_count(), 1);
         assert_eq!(stmt.fetch().unwrap(), FetchResult::Row);
         assert_eq!(
@@ -1202,10 +1412,21 @@ mod tests {
             )
             .unwrap();
         }
-        let mut stmt = SqliteBackend::prepare(&conn, "SELECT name FROM t WHERE id = ?").unwrap();
+        let mut stmt = SqliteBackend::prepare(
+            &conn,
+            &SqliteBackend::cancel_token(&conn),
+            "SELECT name FROM t WHERE id = ?",
+        )
+        .unwrap();
 
         // First execution
-        SqliteBackend::execute(&conn, &mut stmt, &[ColumnValue::I64(1)]).unwrap();
+        SqliteBackend::execute(
+            &conn,
+            &SqliteBackend::cancel_token(&conn),
+            &mut stmt,
+            &[ColumnValue::I64(1)],
+        )
+        .unwrap();
         assert_eq!(stmt.fetch().unwrap(), FetchResult::Row);
         assert_eq!(
             stmt.get_data(1, CDataType::Default).unwrap().into_owned(),
@@ -1213,7 +1434,13 @@ mod tests {
         );
 
         // Re-execute with different param
-        SqliteBackend::execute(&conn, &mut stmt, &[ColumnValue::I64(2)]).unwrap();
+        SqliteBackend::execute(
+            &conn,
+            &SqliteBackend::cancel_token(&conn),
+            &mut stmt,
+            &[ColumnValue::I64(2)],
+        )
+        .unwrap();
         assert_eq!(stmt.fetch().unwrap(), FetchResult::Row);
         assert_eq!(
             stmt.get_data(1, CDataType::Default).unwrap().into_owned(),
@@ -1230,9 +1457,15 @@ mod tests {
             db.execute_batch("CREATE TABLE t (id INTEGER, name TEXT)")
                 .unwrap();
         }
-        let mut stmt = SqliteBackend::prepare(&conn, "INSERT INTO t VALUES (?, ?)").unwrap();
+        let mut stmt = SqliteBackend::prepare(
+            &conn,
+            &SqliteBackend::cancel_token(&conn),
+            "INSERT INTO t VALUES (?, ?)",
+        )
+        .unwrap();
         SqliteBackend::execute(
             &conn,
+            &SqliteBackend::cancel_token(&conn),
             &mut stmt,
             &[ColumnValue::I64(42), ColumnValue::String("test".into())],
         )
@@ -1240,7 +1473,12 @@ mod tests {
         assert_eq!(stmt.row_count(), Some(1));
 
         // Verify with exec_direct
-        let mut q = SqliteBackend::exec_direct(&conn, "SELECT id, name FROM t").unwrap();
+        let mut q = SqliteBackend::exec_direct(
+            &conn,
+            &SqliteBackend::cancel_token(&conn),
+            "SELECT id, name FROM t",
+        )
+        .unwrap();
         assert_eq!(q.fetch().unwrap(), FetchResult::Row);
         assert_eq!(
             q.get_data(1, CDataType::Default).unwrap().into_owned(),
@@ -1264,8 +1502,19 @@ mod tests {
             )
             .unwrap();
         }
-        let mut stmt = SqliteBackend::prepare(&conn, "SELECT name FROM t WHERE id = ?").unwrap();
-        SqliteBackend::execute(&conn, &mut stmt, &[ColumnValue::I64(1)]).unwrap();
+        let mut stmt = SqliteBackend::prepare(
+            &conn,
+            &SqliteBackend::cancel_token(&conn),
+            "SELECT name FROM t WHERE id = ?",
+        )
+        .unwrap();
+        SqliteBackend::execute(
+            &conn,
+            &SqliteBackend::cancel_token(&conn),
+            &mut stmt,
+            &[ColumnValue::I64(1)],
+        )
+        .unwrap();
         assert_eq!(stmt.fetch().unwrap(), FetchResult::Row);
         assert_eq!(
             stmt.get_data(1, CDataType::Default).unwrap().into_owned(),

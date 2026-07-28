@@ -243,9 +243,9 @@ mod tests {
     #[test]
     fn identifier_quotes_include_brackets_and_backticks() {
         let d = dialect();
-        assert!(d.identifier_quotes.contains(&('[', ']')));
-        assert!(d.identifier_quotes.contains(&('`', '`')));
-        assert!(d.identifier_quotes.contains(&('"', '"')));
+        assert!(d.identifier_quotes().contains(&('[', ']')));
+        assert!(d.identifier_quotes().contains(&('`', '`')));
+        assert!(d.identifier_quotes().contains(&('"', '"')));
     }
 
     #[test]

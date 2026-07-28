@@ -122,216 +122,224 @@ static SUPPORTED_FUNCTIONS: &[FunctionId] = &[
 // then ... TYPE_NAME" requirement. This invariant is asserted directly by
 // `type_info_rows_sorted_by_data_type_then_type_name` below; keep new rows
 // in the correct sorted position rather than appending them.
-static SQLITE_TYPE_INFO: &[TypeInfoRow] = &[
-    // WVARCHAR — sqlite_type_to_sql_data_type maps VARCHAR/CHAR/CHARACTER/
-    // NCHAR/NVARCHAR/VARYING CHARACTER/NATIVE CHARACTER/TEXT/CLOB here, and
-    // it is the CHAR/CLOB/TEXT-affinity fallback too. This is the row that
-    // actually satisfies the invariant for every text-affinity declared
-    // type; the SQL_VARCHAR/SQL_CHAR rows further down this list
-    // exist only for Windows DM/pyodbc ANSI compatibility.
-    TypeInfoRow::new("WVARCHAR", SqlDataType::EXT_W_VARCHAR)
-        .with_column_size(catalog_column_size(
-            SqlDataType::EXT_W_VARCHAR,
-            MaxPrecision(VARCHAR_DEFAULT_COLUMN_SIZE),
-            MaxScale(0),
-        ))
-        .with_literal_affixes(Some("'"), Some("'"))
-        .with_create_params(Some("max length"))
-        .with_case_sensitive(true),
-    // WCHAR — Unicode counterpart to the CHAR row further down this list,
-    // included for symmetry per the Windows DM checklist even though
-    // sqlite_type_to_sql_data_type itself never produces EXT_W_CHAR (declared
-    // CHAR(n) collapses into the WVARCHAR affinity above, matching real
-    // SQLite semantics where CHAR(n) is not length-limited).
-    TypeInfoRow::new("WCHAR", SqlDataType::EXT_W_CHAR)
-        .with_column_size(catalog_column_size(
-            SqlDataType::EXT_W_CHAR,
-            MaxPrecision(WCHAR_COLUMN_SIZE_ROW),
-            MaxScale(0),
-        ))
-        .with_literal_affixes(Some("'"), Some("'"))
-        .with_create_params(Some("length"))
-        .with_case_sensitive(true),
-    // BIT — sqlite_type_to_sql_data_type maps BOOLEAN/BOOL here.
-    TypeInfoRow::new("BIT", SqlDataType::EXT_BIT).with_column_size(catalog_column_size(
-        SqlDataType::EXT_BIT,
-        MaxPrecision(0),
-        MaxScale(0),
-    )),
-    // TINYINT — sqlite_type_to_sql_data_type maps TINYINT here.
-    TypeInfoRow::new("TINYINT", SqlDataType::EXT_TINY_INT)
-        .with_column_size(catalog_column_size(
-            SqlDataType::EXT_TINY_INT,
+//
+// A `LazyLock` rather than a plain `static`: `TypeInfoRow`'s string fields are
+// `Cow<'static, str>` so a backend can compute them, and converting a `&'static
+// str` literal through `Into` is not a const operation — `TypeInfoRow::new` and
+// the three string builders are therefore not `const fn`. The table is fixed at
+// compile time, so it is built once and borrowed for the life of the process.
+static SQLITE_TYPE_INFO: std::sync::LazyLock<Vec<TypeInfoRow>> = std::sync::LazyLock::new(|| {
+    vec![
+        // WVARCHAR — sqlite_type_to_sql_data_type maps VARCHAR/CHAR/CHARACTER/
+        // NCHAR/NVARCHAR/VARYING CHARACTER/NATIVE CHARACTER/TEXT/CLOB here, and
+        // it is the CHAR/CLOB/TEXT-affinity fallback too. This is the row that
+        // actually satisfies the invariant for every text-affinity declared
+        // type; the SQL_VARCHAR/SQL_CHAR rows further down this list
+        // exist only for Windows DM/pyodbc ANSI compatibility.
+        TypeInfoRow::new("WVARCHAR", SqlDataType::EXT_W_VARCHAR)
+            .with_column_size(catalog_column_size(
+                SqlDataType::EXT_W_VARCHAR,
+                MaxPrecision(VARCHAR_DEFAULT_COLUMN_SIZE),
+                MaxScale(0),
+            ))
+            .with_literal_affixes(Some("'"), Some("'"))
+            .with_create_params(Some("max length"))
+            .with_case_sensitive(true),
+        // WCHAR — Unicode counterpart to the CHAR row further down this list,
+        // included for symmetry per the Windows DM checklist even though
+        // sqlite_type_to_sql_data_type itself never produces EXT_W_CHAR (declared
+        // CHAR(n) collapses into the WVARCHAR affinity above, matching real
+        // SQLite semantics where CHAR(n) is not length-limited).
+        TypeInfoRow::new("WCHAR", SqlDataType::EXT_W_CHAR)
+            .with_column_size(catalog_column_size(
+                SqlDataType::EXT_W_CHAR,
+                MaxPrecision(WCHAR_COLUMN_SIZE_ROW),
+                MaxScale(0),
+            ))
+            .with_literal_affixes(Some("'"), Some("'"))
+            .with_create_params(Some("length"))
+            .with_case_sensitive(true),
+        // BIT — sqlite_type_to_sql_data_type maps BOOLEAN/BOOL here.
+        TypeInfoRow::new("BIT", SqlDataType::EXT_BIT).with_column_size(catalog_column_size(
+            SqlDataType::EXT_BIT,
             MaxPrecision(0),
             MaxScale(0),
-        ))
-        .with_unsigned(Some(false))
-        .with_auto_unique_value(Some(false))
-        .with_scale_range(Some(0), Some(0))
-        .with_num_prec_radix(Some(10)),
-    // BIGINT — sqlite_type_to_sql_data_type maps INTEGER/INT/BIGINT/INT8 here
-    // (and the "INT"-substring affinity fallback), since SQLite integers are
-    // always 64-bit storage. This is the row an INTEGER column's reported
-    // type (SQL_BIGINT) actually resolves to.
-    TypeInfoRow::new("BIGINT", SqlDataType::EXT_BIG_INT)
-        .with_column_size(catalog_column_size(
-            SqlDataType::EXT_BIG_INT,
-            MaxPrecision(0),
-            MaxScale(0),
-        ))
-        .with_unsigned(Some(false))
-        .with_auto_unique_value(Some(false))
-        .with_scale_range(Some(0), Some(0))
-        .with_num_prec_radix(Some(10)),
-    TypeInfoRow::new("BLOB", SqlDataType::EXT_VAR_BINARY)
-        .with_column_size(catalog_column_size(
-            SqlDataType::EXT_VAR_BINARY,
-            MaxPrecision(BLOB_DEFAULT_COLUMN_SIZE),
-            MaxScale(0),
-        ))
-        .with_literal_affixes(Some("X'"), Some("'"))
-        .with_create_params(Some("max length")),
-    // SQL_CHAR (1) — ANSI alias. See the SQL_VARCHAR comment further down
-    // this list; same rationale for why this is a distinct row from the
-    // WCHAR row above.
-    TypeInfoRow::new("CHAR", SqlDataType::CHAR)
-        .with_column_size(catalog_column_size(
-            SqlDataType::CHAR,
-            MaxPrecision(CHAR_COLUMN_SIZE_ROW),
-            MaxScale(0),
-        ))
-        .with_literal_affixes(Some("'"), Some("'"))
-        .with_create_params(Some("length"))
-        .with_case_sensitive(true),
-    // DECIMAL — sqlite_type_to_sql_data_type maps DECIMAL/NUMERIC here, and
-    // it is also the NUMERIC-affinity fallback for any declared type that
-    // SQLite's own affinity rules do not otherwise classify.
-    TypeInfoRow::new("DECIMAL", SqlDataType::DECIMAL)
-        .with_column_size(catalog_column_size(
-            SqlDataType::DECIMAL,
-            MaxPrecision(DECIMAL_DEFAULT_COLUMN_SIZE),
-            MaxScale(DECIMAL_MAX_SCALE),
-        ))
-        .with_create_params(Some("precision,scale"))
-        .with_unsigned(Some(false))
-        .with_auto_unique_value(Some(false))
-        .with_scale_range(Some(0), Some(DECIMAL_MAX_SCALE))
-        .with_num_prec_radix(Some(10)),
-    TypeInfoRow::new("INTEGER", SqlDataType::INTEGER)
-        .with_column_size(catalog_column_size(
-            SqlDataType::INTEGER,
-            MaxPrecision(0),
-            MaxScale(0),
-        ))
-        .with_unsigned(Some(false))
-        .with_auto_unique_value(Some(false))
-        .with_scale_range(Some(0), Some(0))
-        .with_num_prec_radix(Some(10)),
-    // SMALLINT — sqlite_type_to_sql_data_type maps SMALLINT/INT2 here.
-    TypeInfoRow::new("SMALLINT", SqlDataType::SMALLINT)
-        .with_column_size(catalog_column_size(
-            SqlDataType::SMALLINT,
-            MaxPrecision(0),
-            MaxScale(0),
-        ))
-        .with_unsigned(Some(false))
-        .with_auto_unique_value(Some(false))
-        .with_scale_range(Some(0), Some(0))
-        .with_num_prec_radix(Some(10)),
-    TypeInfoRow::new("REAL", SqlDataType::DOUBLE)
-        .with_column_size(catalog_column_size(
-            SqlDataType::DOUBLE,
-            MaxPrecision(0),
-            MaxScale(0),
-        ))
-        .with_unsigned(Some(false))
-        .with_num_prec_radix(Some(2)),
-    // TEXT — column_size matches VARCHAR_DEFAULT_COLUMN_SIZE (255), the
-    // same default `default_precision_for_type` reports for both VARCHAR and
-    // EXT_W_VARCHAR (see type_conversion.rs). This row and the VARCHAR row
-    // immediately below both describe SQLite's single, unbounded TEXT
-    // storage class under the shared ANSI DATA_TYPE=12, so they must report
-    // the same size. 255 is the value the rest of the driver treats as
-    // authoritative for this DATA_TYPE (`default_precision_for_type`, and the
-    // WVARCHAR row below), so both rows use it.
-    TypeInfoRow::new("TEXT", SqlDataType::VARCHAR)
-        .with_column_size(catalog_column_size(
-            SqlDataType::VARCHAR,
-            MaxPrecision(VARCHAR_DEFAULT_COLUMN_SIZE),
-            MaxScale(0),
-        ))
-        .with_literal_affixes(Some("'"), Some("'"))
-        .with_create_params(Some("max length"))
-        .with_case_sensitive(true),
-    // SQL_VARCHAR (12) — ANSI alias needed for Windows DM / pyodbc type
-    // conversion (AGENTS.md "Windows Driver Manager compatibility
-    // checklist"). sqlite_type_to_sql_data_type never actually returns this
-    // ANSI code (only EXT_W_VARCHAR, see the WVARCHAR row above); this row
-    // exists purely so SQLGetTypeInfo(SQL_VARCHAR) finds a match. TYPE_NAME
-    // differs from the TEXT row immediately above (same DATA_TYPE) because
-    // SQLite itself treats VARCHAR as a recognised alias of TEXT, and the
-    // spec explicitly allows multiple rows sharing a DATA_TYPE; column_size
-    // matches the TEXT row above for the same reason (see that row's
-    // comment).
-    TypeInfoRow::new("VARCHAR", SqlDataType::VARCHAR)
-        .with_column_size(catalog_column_size(
-            SqlDataType::VARCHAR,
-            MaxPrecision(VARCHAR_DEFAULT_COLUMN_SIZE),
-            MaxScale(0),
-        ))
-        .with_literal_affixes(Some("'"), Some("'"))
-        .with_create_params(Some("max length"))
-        .with_case_sensitive(true),
-    // DATE — sqlite_type_to_sql_data_type maps DATE here. SQLite has no DATE
-    // literal syntax; a date value is just a quoted ISO-8601 string, hence
-    // the plain quote prefix/suffix (matching the TEXT row's convention)
-    // rather than a typed `DATE '...'` literal.
-    // DATA_TYPE=91 (SQL_TYPE_DATE), SQL_DATA_TYPE=9 (SQL_DATETIME), SQL_DATETIME_SUB=1 (SQL_CODE_DATE)
-    TypeInfoRow::new("DATE", SqlDataType::DATE)
-        .with_column_size(catalog_column_size(
-            SqlDataType::DATE,
-            MaxPrecision(0),
-            MaxScale(0),
-        ))
-        // 'YYYY-MM-DD'
-        .with_literal_affixes(Some("'"), Some("'"))
-        .with_verbose_type(SqlDataType::DATETIME.0, Some(SQL_CODE_DATE)),
-    // TIME — sqlite_type_to_sql_data_type maps TIME here. SQLite stores time
-    // values as plain "HH:MM:SS" text with no fractional-seconds field (see
-    // column_value_to_rusqlite), so scale is fixed at 0.
-    // DATA_TYPE=92 (SQL_TYPE_TIME), SQL_DATA_TYPE=9 (SQL_DATETIME), SQL_DATETIME_SUB=2 (SQL_CODE_TIME)
-    TypeInfoRow::new("TIME", SqlDataType::TIME)
-        // 'HH:MM:SS': SQLite has no fractional-seconds capability to report
-        // as a maximum (MAX_FRACTIONAL_SECONDS_PRECISION = 0), so this is
-        // the plain (scale-0) form of the TIME formula.
-        .with_column_size(catalog_column_size(
-            SqlDataType::TIME,
-            MaxPrecision(0),
-            MaxScale(MAX_FRACTIONAL_SECONDS_PRECISION),
-        ))
-        .with_literal_affixes(Some("'"), Some("'"))
-        .with_scale_range(Some(0), Some(MAX_FRACTIONAL_SECONDS_PRECISION))
-        .with_verbose_type(SqlDataType::DATETIME.0, Some(SQL_CODE_TIME)),
-    // TIMESTAMP — sqlite_type_to_sql_data_type maps DATETIME/TIMESTAMP here.
-    // column_size intentionally excludes a fractional-seconds allowance: it
-    // is computed via catalog_column_size at MAX_FRACTIONAL_SECONDS_PRECISION
-    // (0), the same constant sqlite_declared_type_precision uses as the
-    // fallback for an undeclared TIMESTAMP column (see the consistency test
-    // below), so minimum/maximum scale are reported as fixed at 0 rather
-    // than claiming precision the column size does not budget for.
-    // DATA_TYPE=93 (SQL_TYPE_TIMESTAMP), SQL_DATA_TYPE=9 (SQL_DATETIME), SQL_DATETIME_SUB=3 (SQL_CODE_TIMESTAMP)
-    TypeInfoRow::new("TIMESTAMP", SqlDataType::TIMESTAMP)
-        // 'YYYY-MM-DD HH:MM:SS': same no-fractional-capability rationale
-        // as the TIME row above.
-        .with_column_size(catalog_column_size(
-            SqlDataType::TIMESTAMP,
-            MaxPrecision(0),
-            MaxScale(MAX_FRACTIONAL_SECONDS_PRECISION),
-        ))
-        .with_literal_affixes(Some("'"), Some("'"))
-        .with_scale_range(Some(0), Some(MAX_FRACTIONAL_SECONDS_PRECISION))
-        .with_verbose_type(SqlDataType::DATETIME.0, Some(SQL_CODE_TIMESTAMP)),
-];
+        )),
+        // TINYINT — sqlite_type_to_sql_data_type maps TINYINT here.
+        TypeInfoRow::new("TINYINT", SqlDataType::EXT_TINY_INT)
+            .with_column_size(catalog_column_size(
+                SqlDataType::EXT_TINY_INT,
+                MaxPrecision(0),
+                MaxScale(0),
+            ))
+            .with_unsigned(Some(false))
+            .with_auto_unique_value(Some(false))
+            .with_scale_range(Some(0), Some(0))
+            .with_num_prec_radix(Some(10)),
+        // BIGINT — sqlite_type_to_sql_data_type maps INTEGER/INT/BIGINT/INT8 here
+        // (and the "INT"-substring affinity fallback), since SQLite integers are
+        // always 64-bit storage. This is the row an INTEGER column's reported
+        // type (SQL_BIGINT) actually resolves to.
+        TypeInfoRow::new("BIGINT", SqlDataType::EXT_BIG_INT)
+            .with_column_size(catalog_column_size(
+                SqlDataType::EXT_BIG_INT,
+                MaxPrecision(0),
+                MaxScale(0),
+            ))
+            .with_unsigned(Some(false))
+            .with_auto_unique_value(Some(false))
+            .with_scale_range(Some(0), Some(0))
+            .with_num_prec_radix(Some(10)),
+        TypeInfoRow::new("BLOB", SqlDataType::EXT_VAR_BINARY)
+            .with_column_size(catalog_column_size(
+                SqlDataType::EXT_VAR_BINARY,
+                MaxPrecision(BLOB_DEFAULT_COLUMN_SIZE),
+                MaxScale(0),
+            ))
+            .with_literal_affixes(Some("X'"), Some("'"))
+            .with_create_params(Some("max length")),
+        // SQL_CHAR (1) — ANSI alias. See the SQL_VARCHAR comment further down
+        // this list; same rationale for why this is a distinct row from the
+        // WCHAR row above.
+        TypeInfoRow::new("CHAR", SqlDataType::CHAR)
+            .with_column_size(catalog_column_size(
+                SqlDataType::CHAR,
+                MaxPrecision(CHAR_COLUMN_SIZE_ROW),
+                MaxScale(0),
+            ))
+            .with_literal_affixes(Some("'"), Some("'"))
+            .with_create_params(Some("length"))
+            .with_case_sensitive(true),
+        // DECIMAL — sqlite_type_to_sql_data_type maps DECIMAL/NUMERIC here, and
+        // it is also the NUMERIC-affinity fallback for any declared type that
+        // SQLite's own affinity rules do not otherwise classify.
+        TypeInfoRow::new("DECIMAL", SqlDataType::DECIMAL)
+            .with_column_size(catalog_column_size(
+                SqlDataType::DECIMAL,
+                MaxPrecision(DECIMAL_DEFAULT_COLUMN_SIZE),
+                MaxScale(DECIMAL_MAX_SCALE),
+            ))
+            .with_create_params(Some("precision,scale"))
+            .with_unsigned(Some(false))
+            .with_auto_unique_value(Some(false))
+            .with_scale_range(Some(0), Some(DECIMAL_MAX_SCALE))
+            .with_num_prec_radix(Some(10)),
+        TypeInfoRow::new("INTEGER", SqlDataType::INTEGER)
+            .with_column_size(catalog_column_size(
+                SqlDataType::INTEGER,
+                MaxPrecision(0),
+                MaxScale(0),
+            ))
+            .with_unsigned(Some(false))
+            .with_auto_unique_value(Some(false))
+            .with_scale_range(Some(0), Some(0))
+            .with_num_prec_radix(Some(10)),
+        // SMALLINT — sqlite_type_to_sql_data_type maps SMALLINT/INT2 here.
+        TypeInfoRow::new("SMALLINT", SqlDataType::SMALLINT)
+            .with_column_size(catalog_column_size(
+                SqlDataType::SMALLINT,
+                MaxPrecision(0),
+                MaxScale(0),
+            ))
+            .with_unsigned(Some(false))
+            .with_auto_unique_value(Some(false))
+            .with_scale_range(Some(0), Some(0))
+            .with_num_prec_radix(Some(10)),
+        TypeInfoRow::new("REAL", SqlDataType::DOUBLE)
+            .with_column_size(catalog_column_size(
+                SqlDataType::DOUBLE,
+                MaxPrecision(0),
+                MaxScale(0),
+            ))
+            .with_unsigned(Some(false))
+            .with_num_prec_radix(Some(2)),
+        // TEXT — column_size matches VARCHAR_DEFAULT_COLUMN_SIZE (255), the
+        // same default `default_precision_for_type` reports for both VARCHAR and
+        // EXT_W_VARCHAR (see type_conversion.rs). This row and the VARCHAR row
+        // immediately below both describe SQLite's single, unbounded TEXT
+        // storage class under the shared ANSI DATA_TYPE=12, so they must report
+        // the same size. 255 is the value the rest of the driver treats as
+        // authoritative for this DATA_TYPE (`default_precision_for_type`, and the
+        // WVARCHAR row below), so both rows use it.
+        TypeInfoRow::new("TEXT", SqlDataType::VARCHAR)
+            .with_column_size(catalog_column_size(
+                SqlDataType::VARCHAR,
+                MaxPrecision(VARCHAR_DEFAULT_COLUMN_SIZE),
+                MaxScale(0),
+            ))
+            .with_literal_affixes(Some("'"), Some("'"))
+            .with_create_params(Some("max length"))
+            .with_case_sensitive(true),
+        // SQL_VARCHAR (12) — ANSI alias needed for Windows DM / pyodbc type
+        // conversion (AGENTS.md "Windows Driver Manager compatibility
+        // checklist"). sqlite_type_to_sql_data_type never actually returns this
+        // ANSI code (only EXT_W_VARCHAR, see the WVARCHAR row above); this row
+        // exists purely so SQLGetTypeInfo(SQL_VARCHAR) finds a match. TYPE_NAME
+        // differs from the TEXT row immediately above (same DATA_TYPE) because
+        // SQLite itself treats VARCHAR as a recognised alias of TEXT, and the
+        // spec explicitly allows multiple rows sharing a DATA_TYPE; column_size
+        // matches the TEXT row above for the same reason (see that row's
+        // comment).
+        TypeInfoRow::new("VARCHAR", SqlDataType::VARCHAR)
+            .with_column_size(catalog_column_size(
+                SqlDataType::VARCHAR,
+                MaxPrecision(VARCHAR_DEFAULT_COLUMN_SIZE),
+                MaxScale(0),
+            ))
+            .with_literal_affixes(Some("'"), Some("'"))
+            .with_create_params(Some("max length"))
+            .with_case_sensitive(true),
+        // DATE — sqlite_type_to_sql_data_type maps DATE here. SQLite has no DATE
+        // literal syntax; a date value is just a quoted ISO-8601 string, hence
+        // the plain quote prefix/suffix (matching the TEXT row's convention)
+        // rather than a typed `DATE '...'` literal.
+        // DATA_TYPE=91 (SQL_TYPE_DATE), SQL_DATA_TYPE=9 (SQL_DATETIME), SQL_DATETIME_SUB=1 (SQL_CODE_DATE)
+        TypeInfoRow::new("DATE", SqlDataType::DATE)
+            .with_column_size(catalog_column_size(
+                SqlDataType::DATE,
+                MaxPrecision(0),
+                MaxScale(0),
+            ))
+            // 'YYYY-MM-DD'
+            .with_literal_affixes(Some("'"), Some("'"))
+            .with_verbose_type(SqlDataType::DATETIME.0, Some(SQL_CODE_DATE)),
+        // TIME — sqlite_type_to_sql_data_type maps TIME here. SQLite stores time
+        // values as plain "HH:MM:SS" text with no fractional-seconds field (see
+        // column_value_to_rusqlite), so scale is fixed at 0.
+        // DATA_TYPE=92 (SQL_TYPE_TIME), SQL_DATA_TYPE=9 (SQL_DATETIME), SQL_DATETIME_SUB=2 (SQL_CODE_TIME)
+        TypeInfoRow::new("TIME", SqlDataType::TIME)
+            // 'HH:MM:SS': SQLite has no fractional-seconds capability to report
+            // as a maximum (MAX_FRACTIONAL_SECONDS_PRECISION = 0), so this is
+            // the plain (scale-0) form of the TIME formula.
+            .with_column_size(catalog_column_size(
+                SqlDataType::TIME,
+                MaxPrecision(0),
+                MaxScale(MAX_FRACTIONAL_SECONDS_PRECISION),
+            ))
+            .with_literal_affixes(Some("'"), Some("'"))
+            .with_scale_range(Some(0), Some(MAX_FRACTIONAL_SECONDS_PRECISION))
+            .with_verbose_type(SqlDataType::DATETIME.0, Some(SQL_CODE_TIME)),
+        // TIMESTAMP — sqlite_type_to_sql_data_type maps DATETIME/TIMESTAMP here.
+        // column_size intentionally excludes a fractional-seconds allowance: it
+        // is computed via catalog_column_size at MAX_FRACTIONAL_SECONDS_PRECISION
+        // (0), the same constant sqlite_declared_type_precision uses as the
+        // fallback for an undeclared TIMESTAMP column (see the consistency test
+        // below), so minimum/maximum scale are reported as fixed at 0 rather
+        // than claiming precision the column size does not budget for.
+        // DATA_TYPE=93 (SQL_TYPE_TIMESTAMP), SQL_DATA_TYPE=9 (SQL_DATETIME), SQL_DATETIME_SUB=3 (SQL_CODE_TIMESTAMP)
+        TypeInfoRow::new("TIMESTAMP", SqlDataType::TIMESTAMP)
+            // 'YYYY-MM-DD HH:MM:SS': same no-fractional-capability rationale
+            // as the TIME row above.
+            .with_column_size(catalog_column_size(
+                SqlDataType::TIMESTAMP,
+                MaxPrecision(0),
+                MaxScale(MAX_FRACTIONAL_SECONDS_PRECISION),
+            ))
+            .with_literal_affixes(Some("'"), Some("'"))
+            .with_scale_range(Some(0), Some(MAX_FRACTIONAL_SECONDS_PRECISION))
+            .with_verbose_type(SqlDataType::DATETIME.0, Some(SQL_CODE_TIMESTAMP)),
+    ]
+});
 
 // `CHAR`/`WCHAR`'s "unbounded" sentinel. `VARCHAR`/`DECIMAL`/`BLOB`'s default
 // column sizes and `TIME`/`TIMESTAMP`'s maximum fractional-seconds precision
@@ -345,10 +353,18 @@ const WCHAR_COLUMN_SIZE_ROW: i32 = u16::MAX as i32;
 /// so precision and scale share the same conventional ceiling.
 const DECIMAL_MAX_SCALE: i16 = 38;
 
-/// All values here are connection-independent (driver-level constants).
+/// The arms of this match are connection-independent (driver-level constants).
 /// Extracted so that both the connected and pre-connect paths can use it
 /// without duplicating the match.
-fn sqlite_get_info(info_type: InfoType) -> Result<InfoValue, SqliteError> {
+///
+/// `conn` is `None` on the pre-connect path, and is carried only to be handed
+/// on: core's capability hooks and `default_get_info` take
+/// `Option<&Self::Connection>` since `SQLGetInfo` is a per-connection call.
+/// Pre-connect they answer only what is knowable without a data source.
+fn sqlite_get_info(
+    conn: Option<&SqliteConnection>,
+    info_type: InfoType,
+) -> Result<InfoValue, SqliteError> {
     // Driver-specific overrides
     match info_type {
         InfoType::DriverName => return Ok(InfoValue::String("stackable-odbc-sqlite".into())),
@@ -380,10 +396,18 @@ fn sqlite_get_info(info_type: InfoType) -> Result<InfoValue, SqliteError> {
         // states a bound on something it has just said does not exist. The
         // spec defines 0 as "no maximum length or the length is unknown",
         // which is the closest available reading of "not applicable".
-        InfoType::MaxCatalogNameLen if !SqliteBackend::supports_catalogs() => {
+        //
+        // `supports_catalogs`/`supports_schemas` are per-connection hooks, so
+        // these arms only apply once a connection exists. Pre-connect the
+        // question falls through to core, which answers its generic identifier
+        // length -- the same shape it reports for every other `SQL_MAX_*_LEN`
+        // before a data source is open.
+        InfoType::MaxCatalogNameLen
+            if conn.is_some_and(|c| !SqliteBackend::supports_catalogs(c)) =>
+        {
             return Ok(InfoValue::U16(0));
         }
-        InfoType::MaxSchemaNameLen if !SqliteBackend::supports_schemas() => {
+        InfoType::MaxSchemaNameLen if conn.is_some_and(|c| !SqliteBackend::supports_schemas(c)) => {
             return Ok(InfoValue::U16(0));
         }
         // "Y": SQLite implements the whole Integrity Enhancement Facility --
@@ -446,7 +470,7 @@ fn sqlite_get_info(info_type: InfoType) -> Result<InfoValue, SqliteError> {
     // Fall through to shared defaults. Core reads the catalog result column
     // widths off the backend type parameter itself, so they cannot disagree
     // with what this driver reports everywhere else.
-    default_get_info::<SqliteBackend>(info_type).ok_or_else(|| SqliteError::NotImplemented {
+    default_get_info::<SqliteBackend>(conn, info_type).ok_or_else(|| SqliteError::NotImplemented {
         feature: format!("get_info({info_type:?})"),
     })
 }
@@ -458,7 +482,7 @@ pub(super) fn get_info(
     if let Some(value) = connection_limit(conn, info_type)? {
         return Ok(value);
     }
-    sqlite_get_info(info_type)
+    sqlite_get_info(Some(conn), info_type)
 }
 
 /// The `SQL_MAX_*` values SQLite can be asked for directly, via
@@ -528,7 +552,7 @@ fn connection_limit(
 }
 
 pub(super) fn get_info_pre_connect(info_type: InfoType) -> Result<InfoValue, SqliteError> {
-    sqlite_get_info(info_type)
+    sqlite_get_info(None, info_type)
 }
 
 /// `SQL_AGGREGATE_FUNCTIONS` — SQLite has every ODBC aggregate, and accepts
@@ -766,12 +790,14 @@ pub(crate) const SQLITE_TIMEDATE_FUNCTIONS: u32 = SQL_FN_TD_NOW
 /// call — it cannot cache a value that is generic over the backend — and
 /// walking SQLite's keyword table each time would be wasteful. The table is
 /// fixed at link time, so one walk is enough.
-pub(crate) fn sqlite_keywords() -> &'static [&'static str] {
-    static KEYWORDS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+pub(crate) fn sqlite_keywords() -> &'static [std::borrow::Cow<'static, str>] {
+    static KEYWORDS: std::sync::OnceLock<Vec<std::borrow::Cow<'static, str>>> =
+        std::sync::OnceLock::new();
     KEYWORDS
         .get_or_init(|| {
             let count = unsafe { rusqlite::ffi::sqlite3_keyword_count() };
-            let mut names: Vec<&'static str> = Vec::with_capacity(count.max(0) as usize);
+            let mut names: Vec<std::borrow::Cow<'static, str>> =
+                Vec::with_capacity(count.max(0) as usize);
 
             for i in 0..count {
                 let mut ptr: *const std::ffi::c_char = std::ptr::null();
@@ -789,7 +815,7 @@ pub(crate) fn sqlite_keywords() -> &'static [&'static str] {
                 // keyword that SQLite never mutates or frees.
                 let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
                 if let Ok(name) = std::str::from_utf8(bytes) {
-                    names.push(name);
+                    names.push(std::borrow::Cow::Borrowed(name));
                 }
             }
 
@@ -799,7 +825,7 @@ pub(crate) fn sqlite_keywords() -> &'static [&'static str] {
 }
 
 pub(super) fn get_info_raw(
-    _conn: &SqliteConnection,
+    conn: &SqliteConnection,
     info_type: u16,
 ) -> Option<Result<InfoValue, SqliteError>> {
     // Capability info types. Each one is a genuine `odbc_sys::InfoType`
@@ -845,7 +871,7 @@ pub(super) fn get_info_raw(
         // since 3.39.0; this build is 3.53.2).
         SQL_LIKE_ESCAPE_CLAUSE => Some(Ok(InfoValue::String("Y".into()))),
         SQL_OUTER_JOINS => Some(Ok(InfoValue::String("Y".into()))),
-        _ => common_get_info_raw::<SqliteBackend>(info_type).map(Ok),
+        _ => common_get_info_raw::<SqliteBackend>(Some(conn), info_type).map(Ok),
     }
 }
 
@@ -864,7 +890,7 @@ pub(super) fn get_functions() -> &'static [FunctionId] {
 }
 
 pub(super) fn get_type_info() -> &'static [TypeInfoRow] {
-    SQLITE_TYPE_INFO
+    &SQLITE_TYPE_INFO
 }
 
 /// Bare, uppercase data-source-dependent type name for a column of
@@ -922,8 +948,8 @@ pub(super) fn sqlite_bare_type_name(sql_type: SqlDataType) -> &'static str {
     }
     SQLITE_TYPE_INFO
         .iter()
-        .find(|row| row.data_type == sql_type)
-        .map(|row| row.type_name)
+        .find(|row| row.data_type() == sql_type)
+        .map(|row| row.type_name())
         .unwrap_or_else(|| {
             tracing::warn!(
                 ?sql_type,
@@ -940,7 +966,7 @@ mod tests {
     /// Fixed-size types: the "Column Size" appendix formula for these takes
     /// no backend-specific parameter, so the row's value must equal the
     /// formula applied to *the row's own* `data_type`. Deriving the expected
-    /// value from `row.data_type` rather than repeating the table's own
+    /// value from `row.data_type()` rather than repeating the table's own
     /// arguments is what makes this catch a row built with the wrong
     /// `SqlDataType`, the one way two drivers could disagree on a value the
     /// spec defines as backend-independent.
@@ -968,18 +994,22 @@ mod tests {
             SqlDataType::DATE,
         ];
 
-        for row in SQLITE_TYPE_INFO {
-            if !BACKEND_INDEPENDENT.contains(&row.data_type) {
+        for row in SQLITE_TYPE_INFO.iter() {
+            if !BACKEND_INDEPENDENT.contains(&row.data_type()) {
                 continue;
             }
-            let expected = catalog_column_size(row.data_type, IGNORED_PRECISION, IGNORED_SCALE);
+            let expected = catalog_column_size(row.data_type(), IGNORED_PRECISION, IGNORED_SCALE);
             assert_eq!(
-                row.column_size, expected,
+                row.column_size(),
+                expected,
                 "{} (DATA_TYPE {:?}): COLUMN_SIZE is {} but the \
                  backend-independent appendix formula for that DATA_TYPE \
                  gives {} — the row is built from a different SqlDataType \
                  than it reports",
-                row.type_name, row.data_type, row.column_size, expected
+                row.type_name(),
+                row.data_type(),
+                row.column_size(),
+                expected
             );
         }
     }
@@ -1011,6 +1041,20 @@ mod tests {
         Str(&'static str),
         U16(u16),
         U32(u32),
+    }
+
+    /// An open connection for the tests that reach a per-connection capability
+    /// hook.
+    ///
+    /// The hooks take a connection because `SQLGetInfo` is a per-connection
+    /// call and a data source's capabilities can differ by server. Every one
+    /// this driver declares is a property of the linked SQLite library rather
+    /// than of the file opened, so any connection answers the same — but the
+    /// answers must still be read through one, which is what an application
+    /// has.
+    fn test_connection() -> SqliteConnection {
+        let params = ConnectParams::parse("Database=:memory:").expect("parse");
+        SqliteBackend::connect(&params).expect("connect")
     }
 
     #[rustfmt::skip]
@@ -1127,8 +1171,9 @@ mod tests {
 
     #[test]
     fn get_info_snapshot() {
+        let conn = test_connection();
         for (info_type, expected) in EXPECTED {
-            let actual = sqlite_get_info(*info_type)
+            let actual = sqlite_get_info(Some(&conn), *info_type)
                 .unwrap_or_else(|e| panic!("get_info returned error for {info_type:?}: {e:?}"));
             match (expected, &actual) {
                 (Expected::Str(s), InfoValue::String(v)) => {
@@ -1147,7 +1192,7 @@ mod tests {
 
     #[test]
     fn dbms_ver_is_well_formed() {
-        let InfoValue::String(s) = sqlite_get_info(InfoType::DbmsVer).unwrap() else {
+        let InfoValue::String(s) = sqlite_get_info(None, InfoType::DbmsVer).unwrap() else {
             panic!("expected String for DbmsVer");
         };
         let prefix = s.split(' ').next().unwrap_or("");
@@ -1172,7 +1217,7 @@ mod tests {
     /// Assert the spec's shape instead.
     #[test]
     fn driver_ver_is_well_formed() {
-        let InfoValue::String(v) = sqlite_get_info(InfoType::DriverVer).unwrap() else {
+        let InfoValue::String(v) = sqlite_get_info(None, InfoType::DriverVer).unwrap() else {
             panic!("expected String for DriverVer");
         };
         let parts: Vec<&str> = v.split('.').collect();
@@ -1352,10 +1397,11 @@ mod tests {
     /// pinned to 0, so it stays right if either ever flips.
     #[test]
     fn catalog_and_schema_name_lengths_follow_their_support_hooks() {
-        let max_catalog = sqlite_get_info(InfoType::MaxCatalogNameLen).expect("info");
-        let max_schema = sqlite_get_info(InfoType::MaxSchemaNameLen).expect("info");
+        let conn = test_connection();
+        let max_catalog = sqlite_get_info(Some(&conn), InfoType::MaxCatalogNameLen).expect("info");
+        let max_schema = sqlite_get_info(Some(&conn), InfoType::MaxSchemaNameLen).expect("info");
 
-        if SqliteBackend::supports_catalogs() {
+        if SqliteBackend::supports_catalogs(&conn) {
             assert_ne!(max_catalog, InfoValue::U16(0));
         } else {
             assert_eq!(
@@ -1364,7 +1410,7 @@ mod tests {
                 "SQL_MAX_CATALOG_NAME_LEN bounds a name that cannot exist"
             );
         }
-        if SqliteBackend::supports_schemas() {
+        if SqliteBackend::supports_schemas(&conn) {
             assert_ne!(max_schema, InfoValue::U16(0));
         } else {
             assert_eq!(
@@ -1443,7 +1489,8 @@ mod tests {
     /// would turn that into a failure.
     #[test]
     fn keywords_hook_feeds_sql_keywords_with_odbc_words_removed() {
-        let raw = SqliteBackend::keywords();
+        let hook_conn = test_connection();
+        let raw = SqliteBackend::keywords(&hook_conn);
         assert!(!raw.is_empty(), "SQLite reserves words of its own");
 
         // Raw means unfiltered: ODBC's words are still in here, because
@@ -1512,9 +1559,10 @@ mod tests {
         conn.prepare("SELECT count(*) FROM gb GROUP BY b")
             .expect("SQLite accepts a GROUP BY column absent from the select list");
 
-        assert_eq!(SqliteBackend::group_by(), SQL_GB_NO_RELATION);
+        let hook_conn = test_connection();
+        assert_eq!(SqliteBackend::group_by(&hook_conn), SQL_GB_NO_RELATION);
         assert_eq!(
-            SqliteBackend::sql_conformance(),
+            SqliteBackend::sql_conformance(&hook_conn),
             0,
             "SQL_GB_NO_RELATION rules out the SQL-92 entry level"
         );
@@ -1532,7 +1580,8 @@ mod tests {
     /// [`SqliteBackend::supports_schemas`] ever flips.
     #[test]
     fn catalog_and_schema_info_types_agree_with_each_other() {
-        let get = |t: InfoType| sqlite_get_info(t).expect("info type answered");
+        let conn = test_connection();
+        let get = |t: InfoType| sqlite_get_info(Some(&conn), t).expect("info type answered");
 
         let catalogs_supported = matches!(
             get(InfoType::CatalogName),
@@ -1540,7 +1589,7 @@ mod tests {
         );
         assert_eq!(
             catalogs_supported,
-            SqliteBackend::supports_catalogs(),
+            SqliteBackend::supports_catalogs(&conn),
             "SQL_CATALOG_NAME must follow Backend::supports_catalogs"
         );
 
@@ -1574,7 +1623,7 @@ mod tests {
             );
         }
 
-        if SqliteBackend::supports_schemas() {
+        if SqliteBackend::supports_schemas(&conn) {
             assert_ne!(get(InfoType::SchemaTerm), InfoValue::String(String::new()));
         } else {
             assert_eq!(
@@ -1606,11 +1655,12 @@ mod tests {
     /// delivers.
     #[test]
     fn transaction_isolation_offers_only_the_level_sqlite_implements() {
-        let supported = match sqlite_get_info(InfoType::TransactionIsolationProtocol) {
+        let conn = test_connection();
+        let supported = match sqlite_get_info(Some(&conn), InfoType::TransactionIsolationProtocol) {
             Ok(InfoValue::U32(v)) => v,
             other => panic!("unexpected shape: {other:?}"),
         };
-        let default = match sqlite_get_info(InfoType::DefaultTxnIsolation) {
+        let default = match sqlite_get_info(Some(&conn), InfoType::DefaultTxnIsolation) {
             Ok(InfoValue::U32(v)) => v,
             other => panic!("unexpected shape: {other:?}"),
         };
@@ -1885,7 +1935,9 @@ mod tests {
                  sqlite_type_to_sql_data_type actually returns for it"
             );
             assert!(
-                SQLITE_TYPE_INFO.iter().any(|row| row.data_type == reported),
+                SQLITE_TYPE_INFO
+                    .iter()
+                    .any(|row| row.data_type() == reported),
                 "declared type {decl:?} is reported as {reported:?}, \
                  which has no SQLGetTypeInfo row"
             );
@@ -1906,7 +1958,9 @@ mod tests {
         ] {
             let reported = crate::type_conversion::sqlite_type_to_sql_data_type(decl);
             assert!(
-                SQLITE_TYPE_INFO.iter().any(|row| row.data_type == reported),
+                SQLITE_TYPE_INFO
+                    .iter()
+                    .any(|row| row.data_type() == reported),
                 "declared type {decl:?} is reported as {reported:?}, \
                  which has no SQLGetTypeInfo row"
             );
@@ -1940,7 +1994,7 @@ mod tests {
             assert!(
                 SQLITE_TYPE_INFO
                     .iter()
-                    .any(|row| row.type_name == name && row.data_type == sql_type),
+                    .any(|row| row.type_name() == name && row.data_type() == sql_type),
                 "sqlite_bare_type_name({sql_type:?}) (for declared type {decl:?}) returned \
                  {name:?}, which is not a matching SQLGetTypeInfo row"
             );
@@ -1971,17 +2025,19 @@ mod tests {
         // below), so neither name is ever produced by the function.
         const DM_COMPAT_ONLY: &[&str] = &["TEXT", "VARCHAR"];
 
-        for row in SQLITE_TYPE_INFO {
-            if DM_COMPAT_ONLY.contains(&row.type_name) {
+        for row in SQLITE_TYPE_INFO.iter() {
+            if DM_COMPAT_ONLY.contains(&row.type_name()) {
                 continue;
             }
-            let produced = sqlite_bare_type_name(row.data_type);
+            let produced = sqlite_bare_type_name(row.data_type());
             assert_eq!(
-                produced, row.type_name,
+                produced,
+                row.type_name(),
                 "SQLITE_TYPE_INFO row {:?} (DATA_TYPE={:?}) is not reachable via \
                  sqlite_bare_type_name (got {produced:?} instead) — no real column can \
                  ever be reported under this TYPE_NAME",
-                row.type_name, row.data_type
+                row.type_name(),
+                row.data_type()
             );
         }
     }
@@ -1989,11 +2045,11 @@ mod tests {
     #[test]
     fn type_info_rows_have_unique_data_types_per_name() {
         let mut seen = std::collections::HashSet::new();
-        for row in SQLITE_TYPE_INFO {
+        for row in SQLITE_TYPE_INFO.iter() {
             assert!(
-                seen.insert(row.type_name),
+                seen.insert(row.type_name()),
                 "duplicate type_name in SQLITE_TYPE_INFO: {}",
-                row.type_name
+                row.type_name()
             );
         }
     }
@@ -2040,13 +2096,14 @@ mod tests {
                     .unwrap_or(i32::MAX);
             let row = SQLITE_TYPE_INFO
                 .iter()
-                .find(|row| row.data_type == sql_type)
+                .find(|row| row.data_type() == sql_type)
                 .unwrap_or_else(|| panic!("no SQLGetTypeInfo row for {sql_type:?} ({decl:?})"));
             assert_eq!(
-                row.column_size, expected,
+                row.column_size(),
+                expected,
                 "column_size for {decl:?} ({sql_type:?}) row {:?} does not match \
                  default_precision_for_type",
-                row.type_name
+                row.type_name()
             );
         }
     }
@@ -2086,22 +2143,22 @@ mod tests {
         for pair in SQLITE_TYPE_INFO.windows(2) {
             let (prev, next) = (&pair[0], &pair[1]);
             assert!(
-                prev.data_type.0 <= next.data_type.0,
+                prev.data_type().0 <= next.data_type().0,
                 "SQLITE_TYPE_INFO not sorted by DATA_TYPE: {:?} (DATA_TYPE={}) \
                  appears before {:?} (DATA_TYPE={})",
-                prev.type_name,
-                prev.data_type.0,
-                next.type_name,
-                next.data_type.0
+                prev.type_name(),
+                prev.data_type().0,
+                next.type_name(),
+                next.data_type().0
             );
-            if prev.data_type == next.data_type {
+            if prev.data_type() == next.data_type() {
                 assert!(
-                    prev.type_name <= next.type_name,
+                    prev.type_name() <= next.type_name(),
                     "rows sharing DATA_TYPE={} not sorted by TYPE_NAME: {:?} appears \
                      before {:?}",
-                    prev.data_type.0,
-                    prev.type_name,
-                    next.type_name
+                    prev.data_type().0,
+                    prev.type_name(),
+                    next.type_name()
                 );
             }
         }

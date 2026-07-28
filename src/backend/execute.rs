@@ -119,7 +119,7 @@ pub(super) fn exec_direct(
         let mut row_values = Vec::with_capacity(col_count);
         for (i, col) in columns.iter().enumerate() {
             let value: rusqlite::types::Value = row.get(i).map_err(map_sqlite_error)?;
-            row_values.push(sqlite_value_to_column_value(value, col.sql_type));
+            row_values.push(sqlite_value_to_column_value(value, col.sql_type()));
         }
         rows.push(row_values);
     }
@@ -204,7 +204,7 @@ pub(super) fn execute(
         let mut row_values = Vec::with_capacity(col_count);
         for (i, col) in columns.iter().enumerate() {
             let value: rusqlite::types::Value = row.get(i).map_err(map_sqlite_error)?;
-            row_values.push(sqlite_value_to_column_value(value, col.sql_type));
+            row_values.push(sqlite_value_to_column_value(value, col.sql_type()));
         }
         rows.push(row_values);
     }
@@ -323,8 +323,10 @@ mod tests {
     fn conn_with(schema: &str) -> SqliteConnection {
         let c = rusqlite::Connection::open_in_memory().unwrap();
         c.execute_batch(schema).unwrap();
+        let interrupt = std::sync::Arc::new(c.get_interrupt_handle());
         SqliteConnection {
             conn: Mutex::new(c),
+            interrupt,
             manual_commit: AtomicBool::new(false),
         }
     }
@@ -338,8 +340,8 @@ mod tests {
         let mut stmt = exec_direct(&conn, "SELECT id, name FROM t ORDER BY id").unwrap();
 
         assert_eq!(stmt.column_count(), 2);
-        assert_eq!(stmt.describe_col(1).unwrap().name, "id");
-        assert_eq!(stmt.describe_col(2).unwrap().name, "name");
+        assert_eq!(stmt.describe_col(1).unwrap().name(), "id");
+        assert_eq!(stmt.describe_col(2).unwrap().name(), "name");
         assert_eq!(stmt.row_count(), Some(2));
 
         assert!(matches!(stmt.fetch().unwrap(), FetchResult::Row));

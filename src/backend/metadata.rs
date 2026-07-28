@@ -3,12 +3,11 @@
 //! from SQLite's `PRAGMA` introspection and `sqlite_master`, plus the private
 //! query helpers those functions share.
 
-use stackable_odbc_core::backend::Backend;
 use stackable_odbc_core::types::{
-    ColumnDescriptor, ColumnValue, ColumnsResultCol, ForeignKeysResultCol, IdentifierType,
-    Nullable, PrimaryKeysResultCol, SQL_CASCADE, SQL_INDEX_OTHER, SQL_NO_ACTION, SQL_PC_NOT_PSEUDO,
-    SQL_PC_PSEUDO, SQL_RESTRICT, SQL_SET_DEFAULT, SQL_SET_NULL, SQL_TABLE_STAT, Scope, SqlDataType,
-    TablesResultCol, special_columns_columns, statistics_columns,
+    ColumnRow, ForeignKeyRow, IdentifierType, Nullable, PrimaryKeyRow, SQL_CASCADE,
+    SQL_INDEX_OTHER, SQL_NO_ACTION, SQL_PC_NOT_PSEUDO, SQL_PC_PSEUDO, SQL_RESTRICT,
+    SQL_SET_DEFAULT, SQL_SET_NULL, SQL_TABLE_STAT, Scope, SpecialColumnRow, SqlDataType,
+    StatisticsRow, TableRow,
 };
 
 /// Column indices for `PRAGMA table_info(table)`.
@@ -51,7 +50,7 @@ mod pragma_fk_col {
 
 use super::SqliteError;
 use super::info::sqlite_bare_type_name;
-use super::{SqliteBackend, SqliteConnection, SqliteStatement, map_sqlite_error};
+use super::{SqliteConnection, map_sqlite_error};
 use crate::type_conversion::{
     default_precision_for_type, sqlite_declared_type_precision, sqlite_declared_type_scale,
     sqlite_type_to_sql_data_type,
@@ -70,15 +69,6 @@ fn fk_action_to_odbc(action: &str) -> i16 {
         "SET DEFAULT" => SQL_SET_DEFAULT,
         _ => SQL_NO_ACTION, // "NO ACTION" and anything else
     }
-}
-
-/// Column descriptors for the `SQLTables` result set.
-///
-/// Shared with every other driver via [`TablesResultCol::all_descriptors`].
-/// Widths come from `catalog_result_column_widths()` so they stay consistent
-/// with this driver's `SQL_MAX_TABLE_NAME_LEN` of 128.
-fn tables_columns() -> Vec<ColumnDescriptor> {
-    TablesResultCol::all_descriptors(&SqliteBackend::catalog_result_column_widths())
 }
 
 /// Query `sqlite_master` for table **and view** names, filtered by an optional
@@ -120,7 +110,7 @@ fn build_column_row(
     not_null: bool,
     ordinal: i64,
     dflt_value: Option<&str>,
-) -> Vec<ColumnValue> {
+) -> ColumnRow {
     let sql_type = sqlite_type_to_sql_data_type(col_type);
     let precision = sqlite_declared_type_precision(col_type);
     let scale = sqlite_declared_type_scale(col_type);
@@ -167,15 +157,10 @@ fn build_column_row(
         i32::try_from(precision)
             .ok()
             .and_then(|p| p.checked_mul(BYTES_PER_CHAR))
-            .map(ColumnValue::I32)
-            .unwrap_or(ColumnValue::Null)
     } else if is_binary {
-        i32::try_from(precision)
-            .ok()
-            .map(ColumnValue::I32)
-            .unwrap_or(ColumnValue::Null)
+        i32::try_from(precision).ok()
     } else {
-        ColumnValue::Null
+        None
     };
 
     let ordinal_position = i32::try_from(ordinal + 1).unwrap_or_else(|_| {
@@ -183,12 +168,12 @@ fn build_column_row(
         i32::MAX
     });
 
-    vec![
-        ColumnValue::Null,                           // TABLE_CAT
-        ColumnValue::Null,                           // TABLE_SCHEM
-        ColumnValue::String(table_name.to_string()), // TABLE_NAME
-        ColumnValue::String(col_name.to_string()),   // COLUMN_NAME
-        ColumnValue::I16(sql_type.0),                // DATA_TYPE
+    ColumnRow {
+        catalog: None,
+        schema: None,
+        table_name: table_name.to_string(),
+        column_name: col_name.to_string(),
+        data_type: sql_type.0,
         // Spec (SQLColumns.TYPE_NAME / SQL_DESC_TYPE_NAME): both list bare
         // examples ("CHAR", "VARCHAR", ...), not declarations, so `col_type`
         // ("VARCHAR(50)") matches no `SQLGetTypeInfo` row.
@@ -196,27 +181,20 @@ fn build_column_row(
         // execute.rs) returns the bare name that does; the declared length
         // is still carried above via COLUMN_SIZE (`precision`), just not the
         // name.
-        ColumnValue::String(sqlite_bare_type_name(sql_type).to_string()), // TYPE_NAME
-        ColumnValue::I32(column_size),                                    // COLUMN_SIZE
-        ColumnValue::I32(0),                                              // BUFFER_LENGTH
-        ColumnValue::I16(scale),                                          // DECIMAL_DIGITS
-        if is_numeric {
-            ColumnValue::I16(10)
-        } else {
-            ColumnValue::Null
-        }, // NUM_PREC_RADIX
-        ColumnValue::I16(nullable.into()),                                // NULLABLE
-        ColumnValue::Null,                                                // REMARKS
-        match dflt_value {
-            Some(v) => ColumnValue::String(v.to_string()),
-            None => ColumnValue::Null,
-        }, // COLUMN_DEF
-        ColumnValue::I16(sql_type.0),                                     // SQL_DATA_TYPE
-        ColumnValue::Null,                                                // SQL_DATETIME_SUB
-        char_octet_length,                                                // CHAR_OCTET_LENGTH
-        ColumnValue::I32(ordinal_position),                               // ORDINAL_POSITION
-        ColumnValue::String(nullable.as_is_nullable_str().to_string()),   // IS_NULLABLE
-    ]
+        type_name: sqlite_bare_type_name(sql_type).to_string(),
+        column_size: Some(column_size),
+        buffer_length: Some(0),
+        decimal_digits: Some(scale),
+        num_prec_radix: if is_numeric { Some(10) } else { None },
+        nullable: nullable.into(),
+        remarks: None,
+        column_def: dflt_value.map(str::to_string),
+        sql_data_type: sql_type.0,
+        sql_datetime_sub: None,
+        char_octet_length,
+        ordinal_position,
+        is_nullable: Some(nullable.as_is_nullable_str().to_string()),
+    }
 }
 
 /// Return the base tables to inspect: the exact named table if one is given,
@@ -243,65 +221,58 @@ fn tables_to_inspect(
     Ok(names)
 }
 
+/// The table types SQLite exposes, for `SQLTables`' `SQL_ALL_TABLE_TYPES`
+/// enumeration.
+///
+/// `sqlite_master.type` also carries `index` and `trigger`, but neither is a
+/// table type: `SQLTables`' result set is defined over tables and views, and
+/// this list must name exactly the values [`tables`] can put in `TABLE_TYPE`.
+///
+/// Upper case per the spec, which has applications specify table types in
+/// upper case and the driver map them to whatever the data source needs --
+/// SQLite spells its own lower case, and [`tables`] does that mapping.
+pub(super) fn table_types() -> Vec<std::borrow::Cow<'static, str>> {
+    vec![
+        std::borrow::Cow::Borrowed(TABLE_TYPE_TABLE),
+        std::borrow::Cow::Borrowed(TABLE_TYPE_VIEW),
+    ]
+}
+
+/// The two `TABLE_TYPE` values this driver reports, named so [`table_types`]
+/// and [`tables`] cannot drift apart.
+const TABLE_TYPE_TABLE: &str = "TABLE";
+const TABLE_TYPE_VIEW: &str = "VIEW";
+
+/// Rows for `SQLTables`.
+///
+/// The `SQL_ALL_CATALOGS` / `SQL_ALL_SCHEMAS` / `SQL_ALL_TABLE_TYPES`
+/// enumerations no longer reach here: core detects them from the raw arguments
+/// and answers them from `supports_catalogs`, `supports_schemas` and
+/// [`table_types`]. Rows are returned unsorted; core orders them by
+/// TABLE_TYPE, TABLE_CAT, TABLE_SCHEM, TABLE_NAME.
 pub(super) fn tables(
     conn: &SqliteConnection,
-    catalog: Option<&str>,
-    schema: Option<&str>,
+    _catalog: Option<&str>,
+    _schema: Option<&str>,
     table: Option<&str>,
     table_type: Option<&str>,
-) -> Result<SqliteStatement, SqliteError> {
-    // ODBC spec: empty string is a valid (but useless for SQLite) filter; treat as no-filter.
-    let catalog = catalog.filter(|s| !s.is_empty());
-    let schema = schema.filter(|s| !s.is_empty());
-    // The SQLTables TableType="%" discovery case requires an EMPTY TableName;
-    // evaluate that before the "%"-stripping normalization below, so a literal
-    // TableName="%" (meaning "all tables") does not masquerade as discovery.
-    let table_name_is_empty = table.is_none_or(|s| s.is_empty());
-    // Treat "%" (match-all wildcard) as no-filter too, to avoid LIKE '%' overhead.
+) -> Result<Vec<TableRow>, SqliteError> {
+    // ODBC spec: empty string is a valid (but useless for SQLite) filter; treat
+    // as no-filter. Treat "%" (match-all wildcard) as no-filter too, to avoid
+    // LIKE '%' overhead -- an ordinary query is all that can arrive now.
     let table = table.filter(|s| !s.is_empty() && *s != "%");
-
-    // ODBC spec §SQLTables: TableType="%" with empty catalog/schema/table returns
-    // the list of valid table types for the data source. SQLite exposes tables
-    // and views.
-    if table_type == Some("%") && catalog.is_none() && schema.is_none() && table_name_is_empty {
-        let type_rows = ["TABLE", "VIEW"]
-            .into_iter()
-            .map(|t| {
-                vec![
-                    ColumnValue::Null,                  // TABLE_CAT
-                    ColumnValue::Null,                  // TABLE_SCHEM
-                    ColumnValue::Null,                  // TABLE_NAME
-                    ColumnValue::String(t.to_string()), // TABLE_TYPE
-                    ColumnValue::Null,                  // REMARKS
-                ]
-            })
-            .collect();
-        return Ok(SqliteStatement::new(tables_columns(), type_rows));
-    }
-
     let table_type = table_type.filter(|s| !s.is_empty() && *s != "%");
-
-    // ODBC spec §8.3: special single-argument discovery calls.
-    // catalog="%" with empty schema/table → return list of valid catalogs.
-    // SQLite has no catalogs (TABLE_CAT is always NULL), so return empty result.
-    if catalog == Some("%") && schema.is_none() && table.is_none() {
-        return Ok(SqliteStatement::new(tables_columns(), vec![]));
-    }
-    // schema="%" with empty catalog/table → return list of valid schemas.
-    // SQLite has no schemas, so return empty result.
-    if schema == Some("%") && catalog.is_none() && table.is_none() {
-        return Ok(SqliteStatement::new(tables_columns(), vec![]));
-    }
 
     let db = conn.conn.lock().map_err(|e| SqliteError::General {
         message: format!("Mutex poisoned: {e}"),
     })?;
 
-    // TableName is a search pattern (ODBC §8.3); use LIKE so "%" works as wildcard.
+    // TableName is a search pattern (ODBC §8.3); use LIKE so "%" works as
+    // wildcard. No ORDER BY: core sorts the result set.
     let sql = if table.is_some() {
-        "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') AND name LIKE ?1 ESCAPE '\\' ORDER BY type, name"
+        "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') AND name LIKE ?1 ESCAPE '\\'"
     } else {
-        "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') ORDER BY type, name"
+        "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view')"
     };
 
     let mut stmt = db.prepare(sql).map_err(map_sqlite_error)?;
@@ -314,7 +285,11 @@ pub(super) fn tables(
     while let Some(row) = raw_rows.next().map_err(map_sqlite_error)? {
         let name: String = row.get(0).map_err(map_sqlite_error)?;
         let type_str: String = row.get(1).map_err(map_sqlite_error)?;
-        let odbc_type = if type_str == "view" { "VIEW" } else { "TABLE" };
+        let odbc_type = if type_str == "view" {
+            TABLE_TYPE_VIEW
+        } else {
+            TABLE_TYPE_TABLE
+        };
 
         // Filter by table_type if specified (comma-separated list, not a pattern).
         if let Some(tt) = table_type {
@@ -324,16 +299,16 @@ pub(super) fn tables(
             }
         }
 
-        rows.push(vec![
-            ColumnValue::Null,                          // TABLE_CAT
-            ColumnValue::Null,                          // TABLE_SCHEM
-            ColumnValue::String(name),                  // TABLE_NAME
-            ColumnValue::String(odbc_type.to_string()), // TABLE_TYPE
-            ColumnValue::Null,                          // REMARKS
-        ]);
+        rows.push(TableRow {
+            catalog: None,
+            schema: None,
+            name: Some(name),
+            table_type: Some(odbc_type.to_string()),
+            remarks: None,
+        });
     }
 
-    Ok(SqliteStatement::new(tables_columns(), rows))
+    Ok(rows)
 }
 
 pub(super) fn columns(
@@ -342,7 +317,7 @@ pub(super) fn columns(
     _schema: Option<&str>,
     table: Option<&str>,
     column: Option<&str>,
-) -> Result<SqliteStatement, SqliteError> {
+) -> Result<Vec<ColumnRow>, SqliteError> {
     // Same normalization as tables(): empty string and "%" both mean "no filter".
     let table = table.filter(|s| !s.is_empty() && *s != "%");
     let column = column.filter(|s| !s.is_empty() && *s != "%");
@@ -406,9 +381,7 @@ pub(super) fn columns(
         }
     }
 
-    let columns = ColumnsResultCol::all_descriptors(&SqliteBackend::catalog_result_column_widths());
-
-    Ok(SqliteStatement::new(columns, rows))
+    Ok(rows)
 }
 
 /// Return primary key columns for the given table.
@@ -416,13 +389,16 @@ pub(super) fn columns(
 /// Uses `PRAGMA table_info(table)` and filters rows where `pk > 0`.
 /// The `pk` column is the 1-based key sequence number.
 ///
+/// Rows are returned unsorted; core orders them by TABLE_CAT, TABLE_SCHEM,
+/// TABLE_NAME, KEY_SEQ.
+///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlprimarykeys-function>
 pub(super) fn primary_keys(
     conn: &SqliteConnection,
     _catalog: Option<&str>,
     _schema: Option<&str>,
     table: Option<&str>,
-) -> Result<SqliteStatement, SqliteError> {
+) -> Result<Vec<PrimaryKeyRow>, SqliteError> {
     let db = conn.conn.lock().map_err(|e| SqliteError::General {
         message: format!("Mutex poisoned: {e}"),
     })?;
@@ -430,7 +406,7 @@ pub(super) fn primary_keys(
     // Collect table names to query (either the specific one or all tables).
     let table_names = tables_to_inspect(&db, table).map_err(map_sqlite_error)?;
 
-    let mut result_rows: Vec<Vec<ColumnValue>> = Vec::new();
+    let mut result_rows: Vec<PrimaryKeyRow> = Vec::new();
     for table_name in &table_names {
         // The pragma_table_info table-valued function binds its argument (the
         // `PRAGMA table_info(...)` statement form does not); use it so the name
@@ -456,28 +432,25 @@ pub(super) fn primary_keys(
             }
         }
 
-        // Sort by KEY_SEQ (the pk column from PRAGMA is already 1-based).
-        pk_cols.sort_by_key(|(seq, _)| *seq);
-
+        // Not sorted by KEY_SEQ here: core sorts the result set on that key,
+        // and a second ordering in the backend is one more place for it to be
+        // wrong.
         for (key_seq, col_name) in pk_cols {
-            result_rows.push(vec![
-                ColumnValue::Null,                       // TABLE_CAT
-                ColumnValue::Null,                       // TABLE_SCHEM
-                ColumnValue::String(table_name.clone()), // TABLE_NAME
-                ColumnValue::String(col_name),           // COLUMN_NAME
-                ColumnValue::I16(i16::try_from(key_seq).unwrap_or_else(|_| {
+            result_rows.push(PrimaryKeyRow {
+                catalog: None,
+                schema: None,
+                table_name: table_name.clone(),
+                column_name: col_name,
+                key_seq: i16::try_from(key_seq).unwrap_or_else(|_| {
                     tracing::warn!(key_seq, "key sequence exceeds i16");
                     i16::MAX
-                })), // KEY_SEQ
-                ColumnValue::Null,                       // PK_NAME (not available in SQLite)
-            ]);
+                }),
+                pk_name: None, // not available in SQLite
+            });
         }
     }
 
-    let columns =
-        PrimaryKeysResultCol::all_descriptors(&SqliteBackend::catalog_result_column_widths());
-
-    Ok(SqliteStatement::new(columns, result_rows))
+    Ok(result_rows)
 }
 
 /// Return foreign key relationships involving the given tables.
@@ -494,7 +467,7 @@ pub(super) fn foreign_keys(
     _fk_catalog: Option<&str>,
     _fk_schema: Option<&str>,
     fk_table: Option<&str>,
-) -> Result<SqliteStatement, SqliteError> {
+) -> Result<Vec<ForeignKeyRow>, SqliteError> {
     let db = conn.conn.lock().map_err(|e| SqliteError::General {
         message: format!("Mutex poisoned: {e}"),
     })?;
@@ -502,7 +475,7 @@ pub(super) fn foreign_keys(
     // Which FK tables do we query?
     let fk_table_names = tables_to_inspect(&db, fk_table).map_err(map_sqlite_error)?;
 
-    let mut result_rows: Vec<Vec<ColumnValue>> = Vec::new();
+    let mut result_rows: Vec<ForeignKeyRow> = Vec::new();
 
     for fk_tbl in &fk_table_names {
         let pragma_sql = format!("PRAGMA foreign_key_list('{}')", fk_tbl.replace('\'', "''"));
@@ -529,48 +502,87 @@ pub(super) fn foreign_keys(
                 continue;
             }
 
-            let pk_col = match to_col {
-                Some(c) => ColumnValue::String(c),
-                // SQLite allows FK without explicit column; treat as NULL.
-                None => ColumnValue::Null,
+            // PKCOLUMN_NAME is one of the four columns the spec marks "not
+            // NULL", which `ForeignKeyRow` enforces. `PRAGMA foreign_key_list`
+            // leaves `to` NULL for an implicit reference (`REFERENCES parent`
+            // with no column list), which SQLite defines as referencing the
+            // parent's PRIMARY KEY -- so the name is recoverable, and is
+            // resolved rather than reported as a NULL the column cannot hold.
+            let pk_column_name = match to_col {
+                Some(c) => c,
+                None => parent_pk_column(&db, &referenced_table, seq)?.unwrap_or_else(|| {
+                    // Reachable only for a schema SQLite itself rejects at DML
+                    // time ("foreign key mismatch"), so there is no correct
+                    // name to report.
+                    tracing::warn!(
+                        parent = %referenced_table,
+                        seq,
+                        "foreign key references a parent with no primary key column at \
+                         this position; reporting PKCOLUMN_NAME as an empty string"
+                    );
+                    String::new()
+                }),
             };
 
-            result_rows.push(vec![
-                ColumnValue::Null,                     // PKTABLE_CAT
-                ColumnValue::Null,                     // PKTABLE_SCHEM
-                ColumnValue::String(referenced_table), // PKTABLE_NAME
-                pk_col,                                // PKCOLUMN_NAME
-                ColumnValue::Null,                     // FKTABLE_CAT
-                ColumnValue::Null,                     // FKTABLE_SCHEM
-                ColumnValue::String(fk_tbl.clone()),   // FKTABLE_NAME
-                ColumnValue::String(from_col),         // FKCOLUMN_NAME
-                ColumnValue::I16(i16::try_from(seq + 1).unwrap_or_else(|_| {
+            result_rows.push(ForeignKeyRow {
+                pk_catalog: None,
+                pk_schema: None,
+                pk_table_name: referenced_table,
+                pk_column_name,
+                fk_catalog: None,
+                fk_schema: None,
+                fk_table_name: fk_tbl.clone(),
+                fk_column_name: from_col,
+                key_seq: i16::try_from(seq + 1).unwrap_or_else(|_| {
                     tracing::warn!(seq, "key sequence exceeds i16");
                     i16::MAX
-                })), // KEY_SEQ (1-based)
-                ColumnValue::I16(fk_action_to_odbc(&on_update)), // UPDATE_RULE
-                ColumnValue::I16(fk_action_to_odbc(&on_delete)), // DELETE_RULE
-                ColumnValue::Null,                     // FK_NAME (not in SQLite PRAGMA)
-                ColumnValue::Null,                     // PK_NAME (not in SQLite PRAGMA)
-                ColumnValue::Null,                     // DEFERRABILITY
-            ]);
+                }), // 1-based
+                update_rule: Some(fk_action_to_odbc(&on_update)),
+                delete_rule: Some(fk_action_to_odbc(&on_delete)),
+                fk_name: None, // not in SQLite's PRAGMA
+                pk_name: None, // not in SQLite's PRAGMA
+                deferrability: None,
+            });
         }
     }
 
-    let columns =
-        ForeignKeysResultCol::all_descriptors(&SqliteBackend::catalog_result_column_widths());
+    Ok(result_rows)
+}
 
-    Ok(SqliteStatement::new(columns, result_rows))
+/// The parent table's primary key column at position `seq` (0-based), for a
+/// foreign key declared without an explicit column list.
+///
+/// `PRAGMA table_info`'s `pk` column is the 1-based position within the
+/// primary key, so the column wanted is the one with `pk == seq + 1`.
+fn parent_pk_column(
+    db: &rusqlite::Connection,
+    parent: &str,
+    seq: i64,
+) -> Result<Option<String>, SqliteError> {
+    let mut stmt = db
+        .prepare("SELECT name FROM pragma_table_info(?1) WHERE pk = ?2")
+        .map_err(map_sqlite_error)?;
+    let mut rows = stmt
+        .query(rusqlite::params![parent, seq + 1])
+        .map_err(map_sqlite_error)?;
+    match rows.next().map_err(map_sqlite_error)? {
+        Some(row) => Ok(Some(row.get(0).map_err(map_sqlite_error)?)),
+        None => Ok(None),
+    }
 }
 
 /// Return index statistics for a single table (SQLStatistics).
 ///
-/// Emits a leading `SQL_TABLE_STAT` row (CARDINALITY from `sqlite_stat1` when
+/// Emits a `SQL_TABLE_STAT` row (CARDINALITY from `sqlite_stat1` when
 /// `ANALYZE` has populated it, else NULL; PAGES always NULL, honoring
 /// SQL_QUICK), then one row per key column of each index from
-/// `PRAGMA index_list` / `PRAGMA index_xinfo`. Rows are ordered per spec by
-/// NON_UNIQUE, TYPE, INDEX_QUALIFIER (always NULL here), INDEX_NAME,
-/// ORDINAL_POSITION, with the NULL NON_UNIQUE table-stat row first.
+/// `PRAGMA index_list` / `PRAGMA index_xinfo`.
+///
+/// Rows are returned unsorted. Core orders them per spec by NON_UNIQUE, TYPE,
+/// INDEX_QUALIFIER, INDEX_NAME, ORDINAL_POSITION, and the table-stat row still
+/// comes first because its NON_UNIQUE is NULL and this driver reports
+/// `SQL_NC_LOW` for `SQL_NULL_COLLATION` -- core's sorter takes NULL placement
+/// from that hook rather than choosing for itself.
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlstatistics-function>
 pub(super) fn statistics(
@@ -579,16 +591,13 @@ pub(super) fn statistics(
     _schema: Option<&str>,
     table: Option<&str>,
     unique_only: bool,
-) -> Result<SqliteStatement, SqliteError> {
+) -> Result<Vec<StatisticsRow>, SqliteError> {
     use stackable_odbc_core::types::{SQL_FALSE, SQL_TRUE};
 
-    let widths = SqliteBackend::catalog_result_column_widths();
-    let columns = statistics_columns(&widths);
-
     // SQLStatistics.TableName cannot be a search pattern; an absent name has no
-    // table to describe, so return an empty (but correctly-shaped) result set.
+    // table to describe, so there are no rows to report.
     let Some(table) = table.filter(|s| !s.is_empty()) else {
-        return Ok(SqliteStatement::new(columns, Vec::new()));
+        return Ok(Vec::new());
     };
 
     let db = conn.conn.lock().map_err(|e| SqliteError::General {
@@ -598,23 +607,23 @@ pub(super) fn statistics(
     // CARDINALITY for the table-stat row: read sqlite_stat1 only if present.
     let cardinality = table_cardinality_from_stat1(&db, table);
 
-    // Table-stat row (leading). TABLE_NAME (3) and TYPE (7) are the NOT NULL
-    // columns; everything index-specific is NULL.
-    let mut rows: Vec<Vec<ColumnValue>> = vec![vec![
-        ColumnValue::Null,                      // TABLE_CAT
-        ColumnValue::Null,                      // TABLE_SCHEM
-        ColumnValue::String(table.to_string()), // TABLE_NAME
-        ColumnValue::Null,                      // NON_UNIQUE
-        ColumnValue::Null,                      // INDEX_QUALIFIER
-        ColumnValue::Null,                      // INDEX_NAME
-        ColumnValue::I16(SQL_TABLE_STAT),       // TYPE
-        ColumnValue::Null,                      // ORDINAL_POSITION
-        ColumnValue::Null,                      // COLUMN_NAME
-        ColumnValue::Null,                      // ASC_OR_DESC
-        cardinality,                            // CARDINALITY
-        ColumnValue::Null,                      // PAGES
-        ColumnValue::Null,                      // FILTER_CONDITION
-    ]];
+    // The table-stat row. TABLE_NAME and TYPE are the NOT NULL columns;
+    // everything index-specific is NULL.
+    let mut rows: Vec<StatisticsRow> = vec![StatisticsRow {
+        catalog: None,
+        schema: None,
+        table_name: table.to_string(),
+        non_unique: None,
+        index_qualifier: None,
+        index_name: None,
+        index_type: SQL_TABLE_STAT,
+        ordinal_position: None,
+        column_name: None,
+        asc_or_desc: None,
+        cardinality,
+        pages: None,
+        filter_condition: None,
+    }];
 
     // Enumerate indexes. Use the pragma_ TVF form so the name binds safely.
     let mut list_stmt = db
@@ -670,76 +679,48 @@ pub(super) fn statistics(
                 .get(pragma_index_xinfo_col::DESC)
                 .map_err(map_sqlite_error)?;
 
-            rows.push(vec![
-                ColumnValue::Null,                      // TABLE_CAT
-                ColumnValue::Null,                      // TABLE_SCHEM
-                ColumnValue::String(table.to_string()), // TABLE_NAME
-                ColumnValue::I16(if *is_unique {
+            rows.push(StatisticsRow {
+                catalog: None,
+                schema: None,
+                table_name: table.to_string(),
+                non_unique: Some(if *is_unique {
                     SQL_FALSE as i16
                 } else {
                     SQL_TRUE as i16
-                }), // NON_UNIQUE
-                ColumnValue::Null,                      // INDEX_QUALIFIER
-                ColumnValue::String(index_name.clone()), // INDEX_NAME
-                ColumnValue::I16(SQL_INDEX_OTHER),      // TYPE
-                ColumnValue::I16(ordinal),              // ORDINAL_POSITION
-                ColumnValue::String(col_name.unwrap_or_default()), // COLUMN_NAME ("" for expression)
-                ColumnValue::String(if desc != 0 { "D" } else { "A" }.into()), // ASC_OR_DESC
-                ColumnValue::Null,                                 // CARDINALITY
-                ColumnValue::Null,                                 // PAGES
-                if *is_partial {
-                    ColumnValue::String(String::new())
+                }),
+                index_qualifier: None,
+                index_name: Some(index_name.clone()),
+                index_type: SQL_INDEX_OTHER,
+                ordinal_position: Some(ordinal),
+                // "" for an expression index, which has no column name.
+                column_name: Some(col_name.unwrap_or_default()),
+                asc_or_desc: Some(if desc != 0 { "D" } else { "A" }.into()),
+                cardinality: None,
+                pages: None,
+                filter_condition: if *is_partial {
+                    Some(String::new())
                 } else {
-                    ColumnValue::Null
-                }, // FILTER_CONDITION
-            ]);
+                    None
+                },
+            });
         }
     }
 
-    // Order: table-stat row first (NON_UNIQUE NULL), then by NON_UNIQUE, TYPE,
-    // INDEX_NAME, ORDINAL_POSITION. Sort key extracts those columns.
-    rows.sort_by_key(|r| statistics_sort_key(r));
-
-    Ok(SqliteStatement::new(columns, rows))
-}
-
-/// Sort key implementing the SQLStatistics ordering. NULL NON_UNIQUE sorts
-/// first (the table-stat row); NON_UNIQUE ascending (unique before non-unique);
-/// then TYPE, INDEX_NAME, ORDINAL_POSITION.
-fn statistics_sort_key(row: &[ColumnValue]) -> (i16, i16, String, i16) {
-    let non_unique = match &row[3] {
-        ColumnValue::I16(v) => *v,
-        _ => -1, // NULL -> before 0 (unique) and 1 (non-unique)
-    };
-    let ty = match &row[6] {
-        ColumnValue::I16(v) => *v,
-        _ => 0,
-    };
-    let index_name = match &row[5] {
-        ColumnValue::String(s) => s.clone(),
-        _ => String::new(),
-    };
-    let ordinal = match &row[7] {
-        ColumnValue::I16(v) => *v,
-        _ => 0,
-    };
-    (non_unique, ty, index_name, ordinal)
+    Ok(rows)
 }
 
 /// Read the table row count from `sqlite_stat1` if `ANALYZE` has populated it.
 /// The `stat` column's first whitespace-delimited token is the table row count.
-/// Returns `ColumnValue::Null` when the stat table or row is absent.
-fn table_cardinality_from_stat1(db: &rusqlite::Connection, table: &str) -> ColumnValue {
+/// Returns `None` when the stat table or row is absent.
+fn table_cardinality_from_stat1(db: &rusqlite::Connection, table: &str) -> Option<i32> {
     let query = "SELECT stat FROM sqlite_stat1 WHERE tbl = ?1 AND idx IS NULL LIMIT 1";
     let stat: Result<String, _> = db.query_row(query, rusqlite::params![table], |r| r.get(0));
     match stat {
         Ok(s) => s
             .split_whitespace()
             .next()
-            .and_then(|tok| tok.parse::<i32>().ok())
-            .map(ColumnValue::I32)
-            .unwrap_or(ColumnValue::Null),
-        Err(_) => ColumnValue::Null, // no sqlite_stat1 (no ANALYZE) or no row
+            .and_then(|tok| tok.parse::<i32>().ok()),
+        Err(_) => None, // no sqlite_stat1 (no ANALYZE) or no row
     }
 }
 
@@ -762,10 +743,8 @@ pub(super) fn special_columns(
     table: Option<&str>,
     scope: Scope,
     _nullable: Nullable, // our identifiers are all NOT NULL -> Nullable never filters
-) -> Result<SqliteStatement, SqliteError> {
-    let widths = SqliteBackend::catalog_result_column_widths();
-    let columns = special_columns_columns(&widths);
-    let empty = || Ok(SqliteStatement::new(columns.clone(), Vec::new()));
+) -> Result<Vec<SpecialColumnRow>, SqliteError> {
+    let empty = || Ok(Vec::new());
 
     // ROWVER: SQLite has no auto-updated columns.
     if matches!(identifier_type, IdentifierType::RowVer) {
@@ -831,7 +810,7 @@ pub(super) fn special_columns(
     // Decide identifier + guaranteed scope.
     // guaranteed scope: TRANSACTION for the volatile rowid pseudo-column,
     // SESSION for a declared key column.
-    let (rows, guaranteed): (Vec<Vec<ColumnValue>>, Scope) = if let Some(col) = integer_pk {
+    let (rows, guaranteed): (Vec<SpecialColumnRow>, Scope) = if let Some(col) = integer_pk {
         // A declared INTEGER PRIMARY KEY is an alias for the 8-byte 64-bit
         // rowid, not a plain INTEGER column, so describe it with the same
         // BIGINT/COLUMN_SIZE 19/BUFFER_LENGTH 8 shape as the rowid
@@ -875,46 +854,43 @@ pub(super) fn special_columns(
         return empty();
     }
 
-    Ok(SqliteStatement::new(columns, rows))
+    Ok(rows)
 }
 
 /// Build one SQLSpecialColumns row for a declared column, deriving its SQL type
 /// from the same mapping SQLColumns uses.
-fn special_column_row(name: &str, decl_type: &str, pseudo: i16, scope: Scope) -> Vec<ColumnValue> {
+fn special_column_row(name: &str, decl_type: &str, pseudo: i16, scope: Scope) -> SpecialColumnRow {
     let sql_type = sqlite_type_to_sql_data_type(decl_type);
     let column_size = i32::try_from(sqlite_declared_type_precision(decl_type)).unwrap_or(i32::MAX);
     let scale = sqlite_declared_type_scale(decl_type);
-    vec![
-        ColumnValue::I16(scope.into()),        // SCOPE
-        ColumnValue::String(name.to_string()), // COLUMN_NAME
-        ColumnValue::I16(sql_type.0),          // DATA_TYPE
-        ColumnValue::String(sqlite_bare_type_name(sql_type).to_string()), // TYPE_NAME
-        ColumnValue::I32(column_size),         // COLUMN_SIZE
-        ColumnValue::I32(column_size),         // BUFFER_LENGTH (approx: transfer octet length)
-        if scale > 0 {
-            ColumnValue::I16(scale)
-        } else {
-            ColumnValue::Null
-        }, // DECIMAL_DIGITS
-        ColumnValue::I16(pseudo),              // PSEUDO_COLUMN
-    ]
+    SpecialColumnRow {
+        scope: Some(scope.into()),
+        column_name: name.to_string(),
+        data_type: sql_type.0,
+        type_name: sqlite_bare_type_name(sql_type).to_string(),
+        column_size: Some(column_size),
+        // BUFFER_LENGTH (approx: transfer octet length)
+        buffer_length: Some(column_size),
+        decimal_digits: if scale > 0 { Some(scale) } else { None },
+        pseudo_column: Some(pseudo),
+    }
 }
 
 /// Build one SQLSpecialColumns row for the 64-bit rowid pseudo-column / an
 /// INTEGER PRIMARY KEY reported as BIGINT.
-fn special_column_row_bigint(name: &str, pseudo: i16, scope: Scope) -> Vec<ColumnValue> {
+fn special_column_row_bigint(name: &str, pseudo: i16, scope: Scope) -> SpecialColumnRow {
     let sql_type = SqlDataType::EXT_BIG_INT;
     let column_size = i32::try_from(default_precision_for_type(sql_type)).unwrap_or(i32::MAX);
-    vec![
-        ColumnValue::I16(scope.into()),
-        ColumnValue::String(name.to_string()),
-        ColumnValue::I16(sql_type.0),
-        ColumnValue::String(sqlite_bare_type_name(sql_type).to_string()),
-        ColumnValue::I32(column_size),
-        ColumnValue::I32(8), // BUFFER_LENGTH: 8 bytes for a 64-bit integer
-        ColumnValue::Null,   // DECIMAL_DIGITS: not applicable to integers
-        ColumnValue::I16(pseudo),
-    ]
+    SpecialColumnRow {
+        scope: Some(scope.into()),
+        column_name: name.to_string(),
+        data_type: sql_type.0,
+        type_name: sqlite_bare_type_name(sql_type).to_string(),
+        column_size: Some(column_size),
+        buffer_length: Some(8), // 8 bytes for a 64-bit integer
+        decimal_digits: None,   // not applicable to integers
+        pseudo_column: Some(pseudo),
+    }
 }
 
 /// True if `table` is an ordinary rowid table. Probes `SELECT rowid`: a
@@ -941,16 +917,31 @@ fn table_is_rowid(db: &rusqlite::Connection, table: &str) -> Result<bool, Sqlite
         Err(e) => Err(map_sqlite_error(e)),
     }
 }
-
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
 
     use super::*;
     use crate::backend::SqliteConnection;
-    use stackable_odbc_core::backend::StatementBackend;
-    use stackable_odbc_core::types::{CDataType, FetchResult, SQL_FALSE};
+    use stackable_odbc_core::types::SQL_FALSE;
 
+    /// Wrap a raw `rusqlite::Connection` the way [`SqliteBackend::connect`]
+    /// does, including the interrupt handle every statement's cancel token is
+    /// cloned from.
+    fn wrap(conn: rusqlite::Connection) -> SqliteConnection {
+        let interrupt = std::sync::Arc::new(conn.get_interrupt_handle());
+        SqliteConnection {
+            conn: Mutex::new(conn),
+            interrupt,
+            manual_commit: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// These tests assert what the backend now owns: which rows exist and what
+    /// each column holds. Column *order* and row *order* moved to core, which
+    /// converts these structs to the spec's layout and sorts them — so an
+    /// ordering assertion belongs at the FFI level, where core's sort has
+    /// actually run, not here. See `ffi_integration_tests.rs`.
     fn setup_test_db() -> SqliteConnection {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -965,125 +956,130 @@ mod tests {
              );",
         )
         .unwrap();
-        SqliteConnection {
-            conn: Mutex::new(conn),
-            manual_commit: std::sync::atomic::AtomicBool::new(false),
-        }
+        wrap(conn)
     }
 
     #[test]
     fn tables_returns_all_tables_and_views() {
         let conn = setup_test_db();
-        let mut stmt = tables(&conn, None, None, None, None).unwrap();
-        assert_eq!(stmt.column_count(), 5);
+        let rows = tables(&conn, None, None, None, None).unwrap();
 
-        let mut names = Vec::new();
-        let mut types = Vec::new();
-        while stmt.fetch().unwrap() == FetchResult::Row {
-            if let ColumnValue::String(n) =
-                stmt.get_data(3, CDataType::Default).unwrap().into_owned()
-            {
-                names.push(n);
-            }
-            if let ColumnValue::String(t) =
-                stmt.get_data(4, CDataType::Default).unwrap().into_owned()
-            {
-                types.push(t);
-            }
+        let names: Vec<&str> = rows.iter().filter_map(|r| r.name.as_deref()).collect();
+        for expected in ["empty_table", "types_test", "types_view", "parent", "child"] {
+            assert!(names.contains(&expected), "missing {expected} in {names:?}");
         }
-        assert!(names.contains(&"empty_table".to_string()));
-        assert!(names.contains(&"types_test".to_string()));
-        assert!(names.contains(&"types_view".to_string()));
-        assert!(names.contains(&"parent".to_string()));
-        assert!(names.contains(&"child".to_string()));
-        assert_eq!(types.iter().filter(|t| *t == "TABLE").count(), 4);
-        assert_eq!(types.iter().filter(|t| *t == "VIEW").count(), 1);
+
+        let types: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| r.table_type.as_deref())
+            .collect();
+        assert_eq!(types.iter().filter(|t| **t == TABLE_TYPE_TABLE).count(), 4);
+        assert_eq!(types.iter().filter(|t| **t == TABLE_TYPE_VIEW).count(), 1);
+
+        // SQLite has neither, and every row says so.
+        assert!(
+            rows.iter()
+                .all(|r| r.catalog.is_none() && r.schema.is_none())
+        );
+    }
+
+    /// Every value [`table_types`] declares must be one [`tables`] can actually
+    /// put in `TABLE_TYPE`, and vice versa. Core serves `SQL_ALL_TABLE_TYPES`
+    /// from the first and the result set from the second, so a mismatch is a
+    /// data source that lists a type no query returns.
+    #[test]
+    fn declared_table_types_are_exactly_the_ones_tables_reports() {
+        let conn = setup_test_db();
+        let declared: Vec<String> = table_types().iter().map(|t| t.to_string()).collect();
+
+        let mut reported: Vec<String> = tables(&conn, None, None, None, None)
+            .unwrap()
+            .into_iter()
+            .filter_map(|r| r.table_type)
+            .collect();
+        reported.sort();
+        reported.dedup();
+
+        let mut declared_sorted = declared.clone();
+        declared_sorted.sort();
+        assert_eq!(
+            declared_sorted, reported,
+            "table_types() and the TABLE_TYPE values tables() emits disagree"
+        );
     }
 
     #[test]
     fn tables_filter_by_table_type() {
         let conn = setup_test_db();
-        let mut stmt = tables(&conn, None, None, None, Some("TABLE")).unwrap();
-        let mut names = Vec::new();
-        while stmt.fetch().unwrap() == FetchResult::Row {
-            if let ColumnValue::String(n) =
-                stmt.get_data(3, CDataType::Default).unwrap().into_owned()
-            {
-                names.push(n);
-            }
-        }
-        assert!(names.contains(&"empty_table".to_string()));
-        assert!(names.contains(&"types_test".to_string()));
-        assert!(!names.contains(&"types_view".to_string()));
+        let rows = tables(&conn, None, None, None, Some(TABLE_TYPE_TABLE)).unwrap();
+        let names: Vec<&str> = rows.iter().filter_map(|r| r.name.as_deref()).collect();
+        assert!(names.contains(&"empty_table"));
+        assert!(names.contains(&"types_test"));
+        assert!(!names.contains(&"types_view"));
     }
 
     #[test]
     fn tables_filter_by_name() {
         let conn = setup_test_db();
-        let mut stmt = tables(&conn, None, None, Some("types_test"), None).unwrap();
-        let mut count = 0;
-        while stmt.fetch().unwrap() == FetchResult::Row {
-            count += 1;
-            assert_eq!(
-                stmt.get_data(3, CDataType::Default).unwrap().into_owned(),
-                ColumnValue::String("types_test".to_string())
-            );
-        }
-        assert_eq!(count, 1);
+        let rows = tables(&conn, None, None, Some("types_test"), None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name.as_deref(), Some("types_test"));
     }
 
     #[test]
-    fn tables_table_type_percent_lists_table_types() {
+    fn tables_table_name_honors_escape_character() {
         let conn = setup_test_db();
-        // SQL_ALL_TABLE_TYPES discovery: TableType="%", others empty.
-        let mut stmt = tables(&conn, Some(""), Some(""), Some(""), Some("%")).unwrap();
-        let mut types = Vec::new();
-        while stmt.fetch().unwrap() == FetchResult::Row {
-            // TABLE_NAME (col 3) must be NULL for the discovery result set.
-            assert_eq!(
-                stmt.get_data(3, CDataType::Default).unwrap().into_owned(),
-                ColumnValue::Null
-            );
-            if let ColumnValue::String(s) =
-                stmt.get_data(4, CDataType::Default).unwrap().into_owned()
-            {
-                types.push(s);
-            }
-        }
-        types.sort();
-        assert_eq!(types, vec!["TABLE".to_string(), "VIEW".to_string()]);
+        // `empty\_table` with ESCAPE '\' means a literal underscore: matches
+        // exactly "empty_table". Without ESCAPE the `_` is a wildcard and the
+        // stray backslash matches nothing.
+        let rows = tables(&conn, None, None, Some("empty\\_table"), None).unwrap();
+        let names: Vec<&str> = rows.iter().filter_map(|r| r.name.as_deref()).collect();
+        assert_eq!(names, vec!["empty_table"]);
+    }
+
+    #[test]
+    fn tables_table_type_percent_with_table_wildcard_lists_tables() {
+        let conn = setup_test_db();
+        // TableType="%" with TableName="%" is not an enumeration — core only
+        // treats "%" as `SQL_ALL_TABLE_TYPES` when the other three arguments
+        // are empty strings, so this reaches the backend as an ordinary query
+        // and must list actual tables and views.
+        let rows = tables(&conn, Some(""), Some(""), Some("%"), Some("%")).unwrap();
+        let names: Vec<&str> = rows.iter().filter_map(|r| r.name.as_deref()).collect();
+        assert!(
+            names.contains(&"types_test"),
+            "expected real table listing, got {names:?}"
+        );
     }
 
     #[test]
     fn columns_returns_correct_columns() {
         let conn = setup_test_db();
-        let mut stmt = columns(&conn, None, None, Some("types_test"), None).unwrap();
-
-        let mut col_names = Vec::new();
-        while stmt.fetch().unwrap() == FetchResult::Row {
-            if let ColumnValue::String(n) =
-                stmt.get_data(4, CDataType::Default).unwrap().into_owned()
-            {
-                col_names.push(n);
-            }
-        }
-        assert_eq!(col_names, vec!["id", "val", "label"]);
+        let rows = columns(&conn, None, None, Some("types_test"), None).unwrap();
+        let names: Vec<&str> = rows.iter().map(|r| r.column_name.as_str()).collect();
+        assert_eq!(names, vec!["id", "val", "label"]);
+        // ORDINAL_POSITION is 1-based and is what core sorts on.
+        let ordinals: Vec<i32> = rows.iter().map(|r| r.ordinal_position).collect();
+        assert_eq!(ordinals, vec![1, 2, 3]);
     }
 
     #[test]
     fn columns_filter_by_column_name() {
         let conn = setup_test_db();
-        let mut stmt = columns(&conn, None, None, Some("types_test"), Some("val")).unwrap();
+        let rows = columns(&conn, None, None, Some("types_test"), Some("val")).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].column_name, "val");
+    }
 
-        let mut count = 0;
-        while stmt.fetch().unwrap() == FetchResult::Row {
-            count += 1;
-            assert_eq!(
-                stmt.get_data(4, CDataType::Default).unwrap().into_owned(),
-                ColumnValue::String("val".to_string())
-            );
-        }
-        assert_eq!(count, 1);
+    #[test]
+    fn columns_column_name_is_a_like_pattern() {
+        let conn = setup_test_db();
+        // types_test columns: id, val, label. "%l%" matches val and label.
+        // Under the old exact-match filter this returned zero rows.
+        let rows = columns(&conn, None, None, Some("types_test"), Some("%l%")).unwrap();
+        let mut names: Vec<&str> = rows.iter().map(|r| r.column_name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["label", "val"]);
     }
 
     #[test]
@@ -1092,28 +1088,19 @@ mod tests {
         // empty_table: id INTEGER PRIMARY KEY, name TEXT NOT NULL
         // SQLite PRAGMA table_info reports notnull=0 for INTEGER PRIMARY KEY (PK does not imply
         // NOT NULL in SQLite's PRAGMA), and notnull=1 for the explicit NOT NULL constraint.
-        let mut stmt = columns(&conn, None, None, Some("empty_table"), None).unwrap();
+        let rows = columns(&conn, None, None, Some("empty_table"), None).unwrap();
+        assert_eq!(rows.len(), 2);
 
-        let mut nullability: Vec<(String, i16)> = Vec::new();
-        while stmt.fetch().unwrap() == FetchResult::Row {
-            let col_name = match stmt.get_data(4, CDataType::Default).unwrap().into_owned() {
-                ColumnValue::String(s) => s,
-                other => panic!("unexpected column name value: {other:?}"),
-            };
-            let nullable = match stmt.get_data(11, CDataType::Default).unwrap().into_owned() {
-                ColumnValue::I16(v) => v,
-                other => panic!("unexpected nullable value: {other:?}"),
-            };
-            nullability.push((col_name, nullable));
-        }
-
-        assert_eq!(nullability.len(), 2);
-        let id_nullable = nullability.iter().find(|(n, _)| n == "id").unwrap().1;
-        let name_nullable = nullability.iter().find(|(n, _)| n == "name").unwrap().1;
+        let nullable_of = |name: &str| {
+            rows.iter()
+                .find(|r| r.column_name == name)
+                .unwrap_or_else(|| panic!("no column {name}"))
+                .nullable
+        };
         // id INTEGER PRIMARY KEY: PRAGMA notnull=0, so reported as nullable
-        assert_eq!(id_nullable, i16::from(Nullable::SqlNullable));
+        assert_eq!(nullable_of("id"), i16::from(Nullable::SqlNullable));
         // name TEXT NOT NULL: PRAGMA notnull=1, so reported as not null
-        assert_eq!(name_nullable, i16::from(Nullable::SqlNoNulls));
+        assert_eq!(nullable_of("name"), i16::from(Nullable::SqlNoNulls));
     }
 
     #[test]
@@ -1121,10 +1108,10 @@ mod tests {
         // sqlite_type_to_sql_data_type() maps every character declared type
         // (including VARCHAR) to SqlDataType::EXT_W_VARCHAR, never to the bare
         // SqlDataType::VARCHAR, so build_column_row()'s `is_char` compares
-        // against EXT_W_VARCHAR. CHAR_OCTET_LENGTH (column index 15) must then
-        // be declared_length * BYTES_PER_CHAR for a text column, not NULL.
+        // against EXT_W_VARCHAR. CHAR_OCTET_LENGTH must then be
+        // declared_length * BYTES_PER_CHAR for a text column, not NULL.
         let row = build_column_row("t", "label", "VARCHAR(50)", false, 0, None);
-        assert_eq!(row[15], ColumnValue::I32(50 * BYTES_PER_CHAR));
+        assert_eq!(row.char_octet_length, Some(50 * BYTES_PER_CHAR));
     }
 
     #[test]
@@ -1133,7 +1120,7 @@ mod tests {
         // column 16), but a BLOB's declared length is already a byte count and
         // must be passed through as-is, not multiplied by BYTES_PER_CHAR.
         let row = build_column_row("t", "data", "BLOB(50)", false, 0, None);
-        assert_eq!(row[15], ColumnValue::I32(50));
+        assert_eq!(row.char_octet_length, Some(50));
     }
 
     #[test]
@@ -1141,7 +1128,7 @@ mod tests {
         // INTEGER is neither character nor binary data, so CHAR_OCTET_LENGTH
         // is NULL per the ODBC spec.
         let row = build_column_row("t", "id", "INTEGER", false, 0, None);
-        assert_eq!(row[15], ColumnValue::Null);
+        assert_eq!(row.char_octet_length, None);
     }
 
     #[test]
@@ -1152,47 +1139,31 @@ mod tests {
         // (2_000_000_000 * 4 = 8_000_000_000). The checked multiplication
         // reports NULL instead of wrapping or panicking.
         let row = build_column_row("t", "label", "VARCHAR(2000000000)", false, 0, None);
-        assert_eq!(row[15], ColumnValue::Null);
+        assert_eq!(row.char_octet_length, None);
     }
 
     #[test]
     fn primary_keys_returns_pk_column() {
         let conn = setup_test_db();
-        let mut stmt = primary_keys(&conn, None, None, Some("parent")).unwrap();
-
-        let mut pk_cols = Vec::new();
-        while stmt.fetch().unwrap() == FetchResult::Row {
-            // Column 3 = TABLE_NAME, Column 4 = COLUMN_NAME, Column 5 = KEY_SEQ
-            let table = match stmt.get_data(3, CDataType::Default).unwrap().into_owned() {
-                ColumnValue::String(s) => s,
-                other => panic!("unexpected table name: {other:?}"),
-            };
-            let col = match stmt.get_data(4, CDataType::Default).unwrap().into_owned() {
-                ColumnValue::String(s) => s,
-                other => panic!("unexpected column name: {other:?}"),
-            };
-            let seq = match stmt.get_data(5, CDataType::Default).unwrap().into_owned() {
-                ColumnValue::I16(v) => v,
-                other => panic!("unexpected key_seq: {other:?}"),
-            };
-            pk_cols.push((table, col, seq));
-        }
-        assert_eq!(pk_cols.len(), 1);
-        assert_eq!(pk_cols[0], ("parent".to_string(), "pk".to_string(), 1));
+        let rows = primary_keys(&conn, None, None, Some("parent")).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].table_name, "parent");
+        assert_eq!(rows[0].column_name, "pk");
+        assert_eq!(rows[0].key_seq, 1);
     }
 
     #[test]
     fn primary_keys_no_pk_returns_empty() {
         let conn = setup_test_db();
         // types_test has no PRIMARY KEY constraint
-        let mut stmt = primary_keys(&conn, None, None, Some("types_test")).unwrap();
-        assert_eq!(stmt.fetch().unwrap(), FetchResult::NoData);
+        let rows = primary_keys(&conn, None, None, Some("types_test")).unwrap();
+        assert!(rows.is_empty());
     }
 
     #[test]
     fn foreign_keys_by_fk_table() {
         let conn = setup_test_db();
-        let mut stmt = foreign_keys(
+        let rows = foreign_keys(
             &conn,
             None,
             None,
@@ -1203,52 +1174,26 @@ mod tests {
         )
         .unwrap();
 
-        let mut fks = Vec::new();
-        while stmt.fetch().unwrap() == FetchResult::Row {
-            // Column 3 = PKTABLE_NAME, Column 4 = PKCOLUMN_NAME
-            // Column 7 = FKTABLE_NAME, Column 8 = FKCOLUMN_NAME
-            let pk_table = match stmt.get_data(3, CDataType::Default).unwrap().into_owned() {
-                ColumnValue::String(s) => s,
-                other => panic!("unexpected pk_table: {other:?}"),
-            };
-            let pk_col = match stmt.get_data(4, CDataType::Default).unwrap().into_owned() {
-                ColumnValue::String(s) => s,
-                other => panic!("unexpected pk_col: {other:?}"),
-            };
-            let fk_table = match stmt.get_data(7, CDataType::Default).unwrap().into_owned() {
-                ColumnValue::String(s) => s,
-                other => panic!("unexpected fk_table: {other:?}"),
-            };
-            let fk_col = match stmt.get_data(8, CDataType::Default).unwrap().into_owned() {
-                ColumnValue::String(s) => s,
-                other => panic!("unexpected fk_col: {other:?}"),
-            };
-            fks.push((pk_table, pk_col, fk_table, fk_col));
-        }
-        assert_eq!(fks.len(), 1);
-        assert_eq!(
-            fks[0],
-            (
-                "parent".to_string(),
-                "pk".to_string(),
-                "child".to_string(),
-                "parent_pk".to_string(),
-            )
-        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pk_table_name, "parent");
+        assert_eq!(rows[0].pk_column_name, "pk");
+        assert_eq!(rows[0].fk_table_name, "child");
+        assert_eq!(rows[0].fk_column_name, "parent_pk");
+        assert_eq!(rows[0].key_seq, 1);
     }
 
     #[test]
     fn foreign_keys_no_fk_returns_empty() {
         let conn = setup_test_db();
         // parent has no outgoing foreign keys
-        let mut stmt = foreign_keys(&conn, None, None, None, None, None, Some("parent")).unwrap();
-        assert_eq!(stmt.fetch().unwrap(), FetchResult::NoData);
+        let rows = foreign_keys(&conn, None, None, None, None, None, Some("parent")).unwrap();
+        assert!(rows.is_empty());
     }
 
     #[test]
     fn foreign_keys_by_pk_table() {
         let conn = setup_test_db();
-        let mut stmt = foreign_keys(
+        let rows = foreign_keys(
             &conn,
             None,
             None,
@@ -1259,75 +1204,56 @@ mod tests {
         )
         .unwrap();
 
-        let mut count = 0;
-        while stmt.fetch().unwrap() == FetchResult::Row {
-            count += 1;
-            // FK should point from child.parent_pk to parent.pk
-            assert_eq!(
-                stmt.get_data(3, CDataType::Default).unwrap().into_owned(),
-                ColumnValue::String("parent".to_string())
-            );
-            assert_eq!(
-                stmt.get_data(7, CDataType::Default).unwrap().into_owned(),
-                ColumnValue::String("child".to_string())
-            );
-        }
-        assert_eq!(count, 1);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pk_table_name, "parent");
+        assert_eq!(rows[0].fk_table_name, "child");
     }
 
+    /// `PKCOLUMN_NAME` is one of the columns the spec marks "not NULL", and
+    /// `ForeignKeyRow` enforces that. `REFERENCES parent` with no column list
+    /// leaves `PRAGMA foreign_key_list`'s `to` NULL, which this driver used to
+    /// report as a NULL `PKCOLUMN_NAME` — a value the column cannot hold.
+    /// SQLite defines the implicit target as the parent's primary key, so the
+    /// name is recovered rather than dropped.
     #[test]
-    fn tables_table_name_honors_escape_character() {
-        let conn = setup_test_db();
-        // `empty\_table` with ESCAPE '\' means a literal underscore: matches
-        // exactly "empty_table". Without ESCAPE the `_` is a wildcard and the
-        // stray backslash matches nothing.
-        let mut stmt = tables(&conn, None, None, Some("empty\\_table"), None).unwrap();
-        let mut names = Vec::new();
-        while stmt.fetch().unwrap() == FetchResult::Row {
-            if let ColumnValue::String(s) =
-                stmt.get_data(3, CDataType::Default).unwrap().into_owned()
-            {
-                names.push(s);
-            }
-        }
-        assert_eq!(names, vec!["empty_table".to_string()]);
+    fn foreign_keys_implicit_reference_resolves_the_parent_primary_key() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE p (pk INTEGER PRIMARY KEY, info TEXT);
+             CREATE TABLE c (id INTEGER PRIMARY KEY, p_ref INTEGER REFERENCES p);",
+        )
+        .unwrap();
+        let conn = wrap(conn);
+
+        let rows = foreign_keys(&conn, None, None, None, None, None, Some("c")).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pk_table_name, "p");
+        assert_eq!(
+            rows[0].pk_column_name, "pk",
+            "an implicit REFERENCES must resolve to the parent's primary key column"
+        );
     }
 
+    /// A composite implicit reference resolves each position to the parent
+    /// primary key column at the same position, not always the first.
     #[test]
-    fn columns_column_name_is_a_like_pattern() {
-        let conn = setup_test_db();
-        // types_test columns: id, val, label. "%l%" matches val and label.
-        // Under the old exact-match filter this returned zero rows.
-        let mut stmt = columns(&conn, None, None, Some("types_test"), Some("%l%")).unwrap();
-        let mut names = Vec::new();
-        while stmt.fetch().unwrap() == FetchResult::Row {
-            if let ColumnValue::String(s) =
-                stmt.get_data(4, CDataType::Default).unwrap().into_owned()
-            {
-                names.push(s);
-            }
-        }
-        names.sort();
-        assert_eq!(names, vec!["label".to_string(), "val".to_string()]);
-    }
+    fn foreign_keys_implicit_composite_reference_resolves_per_position() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE p (a INTEGER, b INTEGER, PRIMARY KEY (a, b));
+             CREATE TABLE c (x INTEGER, y INTEGER, FOREIGN KEY (x, y) REFERENCES p);",
+        )
+        .unwrap();
+        let conn = wrap(conn);
 
-    #[test]
-    fn tables_table_type_percent_with_table_wildcard_lists_tables() {
-        let conn = setup_test_db();
-        // TableType="%" with TableName="%" is NOT the type-discovery case (that
-        // requires an empty TableName): it must list actual tables/views.
-        let mut stmt = tables(&conn, Some(""), Some(""), Some("%"), Some("%")).unwrap();
-        let mut names = Vec::new();
-        while stmt.fetch().unwrap() == FetchResult::Row {
-            if let ColumnValue::String(s) =
-                stmt.get_data(3, CDataType::Default).unwrap().into_owned()
-            {
-                names.push(s);
-            }
-        }
-        assert!(
-            names.contains(&"types_test".to_string()),
-            "expected real table listing, got {names:?}"
+        let mut rows = foreign_keys(&conn, None, None, None, None, None, Some("c")).unwrap();
+        rows.sort_by_key(|r| r.key_seq);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows.iter()
+                .map(|r| (r.fk_column_name.as_str(), r.pk_column_name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("x", "a"), ("y", "b")]
         );
     }
 
@@ -1339,87 +1265,67 @@ mod tests {
              CREATE INDEX ix_t_bc ON t(b, c DESC);",
         )
         .unwrap();
-        SqliteConnection {
-            conn: Mutex::new(conn),
-            manual_commit: std::sync::atomic::AtomicBool::new(false),
-        }
+        wrap(conn)
     }
 
-    // column ordinals in the 13-column SQLStatistics result set (1-based get_data)
-    const NON_UNIQUE: u16 = 4;
-    const TYPE_COL: u16 = 7;
-    const ORDINAL_POSITION: u16 = 8;
-    const COLUMN_NAME: u16 = 9;
-    const ASC_OR_DESC: u16 = 10;
-    const FILTER_CONDITION: u16 = 13;
-
-    /// (TYPE, NON_UNIQUE, COLUMN_NAME, ORDINAL_POSITION, ASC_OR_DESC) subset of
-    /// each fetched row, in the order `get_data` is called below.
-    fn collect_stats(
-        stmt: &mut SqliteStatement,
-    ) -> Vec<(
-        ColumnValue,
-        ColumnValue,
-        ColumnValue,
-        ColumnValue,
-        ColumnValue,
-    )> {
-        let mut out = Vec::new();
-        while stmt.fetch().unwrap() == FetchResult::Row {
-            out.push((
-                stmt.get_data(TYPE_COL, CDataType::Default)
-                    .unwrap()
-                    .into_owned(),
-                stmt.get_data(NON_UNIQUE, CDataType::Default)
-                    .unwrap()
-                    .into_owned(),
-                stmt.get_data(COLUMN_NAME, CDataType::Default)
-                    .unwrap()
-                    .into_owned(),
-                stmt.get_data(ORDINAL_POSITION, CDataType::Default)
-                    .unwrap()
-                    .into_owned(),
-                stmt.get_data(ASC_OR_DESC, CDataType::Default)
-                    .unwrap()
-                    .into_owned(),
-            ));
-        }
-        out
-    }
-
+    /// The rows [`statistics`] produces, keyed by index name and column so the
+    /// assertions do not depend on an order core owns.
     #[test]
-    fn statistics_reports_table_stat_row_and_indexes_in_order() {
+    fn statistics_reports_a_table_stat_row_and_one_row_per_index_key_column() {
         let conn = setup_stats_db();
-        let mut stmt = statistics(&conn, None, None, Some("t"), false).unwrap();
-        assert_eq!(stmt.column_count(), 13);
-        let rows = collect_stats(&mut stmt);
-        // Row 0: table-stat row (TYPE = SQL_TABLE_STAT, NON_UNIQUE NULL, COLUMN_NAME NULL).
-        assert_eq!(rows[0].0, ColumnValue::I16(SQL_TABLE_STAT));
-        assert_eq!(rows[0].1, ColumnValue::Null);
-        assert_eq!(rows[0].2, ColumnValue::Null);
-        // Next: the UNIQUE index (NON_UNIQUE = SQL_FALSE = 0) before the non-unique one.
-        assert_eq!(rows[1].0, ColumnValue::I16(SQL_INDEX_OTHER));
-        assert_eq!(rows[1].1, ColumnValue::I16(SQL_FALSE as i16));
-        assert_eq!(rows[1].2, ColumnValue::String("a".into()));
-        // Then the non-unique composite index (b, c DESC): 2 rows, NON_UNIQUE = SQL_TRUE = 1.
-        assert_eq!(rows[2].1, ColumnValue::I16(1));
-        assert_eq!(rows[2].2, ColumnValue::String("b".into()));
-        assert_eq!(rows[2].3, ColumnValue::I16(1)); // ORDINAL_POSITION
-        assert_eq!(rows[2].4, ColumnValue::String("A".into()));
-        assert_eq!(rows[3].2, ColumnValue::String("c".into()));
-        assert_eq!(rows[3].3, ColumnValue::I16(2));
-        assert_eq!(rows[3].4, ColumnValue::String("D".into())); // c DESC
+        let rows = statistics(&conn, None, None, Some("t"), false).unwrap();
+
+        let stat_rows: Vec<&StatisticsRow> = rows
+            .iter()
+            .filter(|r| r.index_type == SQL_TABLE_STAT)
+            .collect();
+        assert_eq!(stat_rows.len(), 1, "exactly one table-stat row");
+        assert_eq!(stat_rows[0].table_name, "t");
+        // The table-stat row's NULL NON_UNIQUE is what puts it first once core
+        // sorts, given this driver's SQL_NC_LOW null collation.
+        assert_eq!(stat_rows[0].non_unique, None);
+        assert_eq!(stat_rows[0].column_name, None);
+
+        let index_row = |index: &str, column: &str| {
+            rows.iter()
+                .find(|r| {
+                    r.index_name.as_deref() == Some(index)
+                        && r.column_name.as_deref() == Some(column)
+                })
+                .unwrap_or_else(|| panic!("no row for {index}.{column}"))
+        };
+
+        let unique = index_row("ux_t_a", "a");
+        assert_eq!(unique.index_type, SQL_INDEX_OTHER);
+        assert_eq!(unique.non_unique, Some(SQL_FALSE as i16));
+        assert_eq!(unique.ordinal_position, Some(1));
+
+        // The non-unique composite index (b, c DESC).
+        let b = index_row("ix_t_bc", "b");
+        assert_eq!(b.non_unique, Some(1));
+        assert_eq!(b.ordinal_position, Some(1));
+        assert_eq!(b.asc_or_desc.as_deref(), Some("A"));
+
+        let c = index_row("ix_t_bc", "c");
+        assert_eq!(c.ordinal_position, Some(2));
+        assert_eq!(c.asc_or_desc.as_deref(), Some("D"));
     }
 
     #[test]
     fn statistics_unique_only_drops_non_unique_indexes() {
         let conn = setup_stats_db();
-        let mut stmt = statistics(&conn, None, None, Some("t"), true).unwrap();
-        let rows = collect_stats(&mut stmt);
+        let rows = statistics(&conn, None, None, Some("t"), true).unwrap();
         // table-stat row + the unique index's single column only.
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].0, ColumnValue::I16(SQL_TABLE_STAT));
-        assert_eq!(rows[1].2, ColumnValue::String("a".into()));
+        assert_eq!(
+            rows.iter()
+                .filter(|r| r.index_type == SQL_TABLE_STAT)
+                .count(),
+            1
+        );
+        assert!(rows.iter().any(
+            |r| r.column_name.as_deref() == Some("a") && r.non_unique == Some(SQL_FALSE as i16)
+        ));
     }
 
     #[test]
@@ -1430,82 +1336,59 @@ mod tests {
             .unwrap()
             .execute_batch("CREATE TABLE plain (x INTEGER);")
             .unwrap();
-        let mut stmt = statistics(&conn, None, None, Some("plain"), false).unwrap();
-        let rows = collect_stats(&mut stmt);
+        let rows = statistics(&conn, None, None, Some("plain"), false).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].0, ColumnValue::I16(SQL_TABLE_STAT));
+        assert_eq!(rows[0].index_type, SQL_TABLE_STAT);
     }
 
     #[test]
     fn statistics_with_no_table_returns_empty() {
         let conn = setup_stats_db();
-        let mut stmt = statistics(&conn, None, None, None, false).unwrap();
-        assert_eq!(stmt.column_count(), 13);
-        assert_eq!(stmt.fetch().unwrap(), FetchResult::NoData);
+        assert!(
+            statistics(&conn, None, None, None, false)
+                .unwrap()
+                .is_empty()
+        );
     }
 
-    fn setup_partial_index_db() -> SqliteConnection {
+    #[test]
+    fn statistics_partial_index_reports_empty_filter_condition() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE tp (a INTEGER, b TEXT);
              CREATE INDEX ix_tp_partial ON tp(a) WHERE a > 0;",
         )
         .unwrap();
-        SqliteConnection {
-            conn: Mutex::new(conn),
-            manual_commit: std::sync::atomic::AtomicBool::new(false),
-        }
+        let conn = wrap(conn);
+
+        let rows = statistics(&conn, None, None, Some("tp"), false).unwrap();
+        // table-stat row + a single index-column row: exactly one index.
+        assert_eq!(rows.len(), 2);
+        let index = rows
+            .iter()
+            .find(|r| r.index_type == SQL_INDEX_OTHER)
+            .expect("the partial index's key column");
+        assert_eq!(index.filter_condition.as_deref(), Some(""));
     }
 
     #[test]
-    fn statistics_partial_index_reports_empty_filter_condition() {
-        let conn = setup_partial_index_db();
-        let mut stmt = statistics(&conn, None, None, Some("tp"), false).unwrap();
-        // table-stat row + a single index-column row: exactly one index.
-        assert_eq!(stmt.column_count(), 13);
-        assert_eq!(stmt.fetch().unwrap(), FetchResult::Row);
-        // Row 0: table-stat row; skip it.
-        assert_eq!(stmt.fetch().unwrap(), FetchResult::Row);
-        // Row 1: the partial index's single key column.
-        assert_eq!(
-            stmt.get_data(FILTER_CONDITION, CDataType::Default)
-                .unwrap()
-                .into_owned(),
-            ColumnValue::String(String::new())
-        );
-        assert_eq!(stmt.fetch().unwrap(), FetchResult::NoData);
-    }
-
-    fn setup_expression_index_db() -> SqliteConnection {
+    fn statistics_expression_index_reports_empty_column_name() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE te (a INTEGER, b INTEGER);
              CREATE INDEX ix_te_expr ON te(a + b);",
         )
         .unwrap();
-        SqliteConnection {
-            conn: Mutex::new(conn),
-            manual_commit: std::sync::atomic::AtomicBool::new(false),
-        }
-    }
+        let conn = wrap(conn);
 
-    #[test]
-    fn statistics_expression_index_reports_empty_column_name() {
-        let conn = setup_expression_index_db();
-        let mut stmt = statistics(&conn, None, None, Some("te"), false).unwrap();
+        let rows = statistics(&conn, None, None, Some("te"), false).unwrap();
         // table-stat row + a single index-column row: exactly one index.
-        assert_eq!(stmt.column_count(), 13);
-        assert_eq!(stmt.fetch().unwrap(), FetchResult::Row);
-        // Row 0: table-stat row; skip it.
-        assert_eq!(stmt.fetch().unwrap(), FetchResult::Row);
-        // Row 1: the expression index's key column (key=1, name=NULL).
-        assert_eq!(
-            stmt.get_data(COLUMN_NAME, CDataType::Default)
-                .unwrap()
-                .into_owned(),
-            ColumnValue::String(String::new())
-        );
-        assert_eq!(stmt.fetch().unwrap(), FetchResult::NoData);
+        assert_eq!(rows.len(), 2);
+        let index = rows
+            .iter()
+            .find(|r| r.index_type == SQL_INDEX_OTHER)
+            .expect("the expression index's key column (key=1, name=NULL)");
+        assert_eq!(index.column_name.as_deref(), Some(""));
     }
 
     fn setup_specialcols_db() -> SqliteConnection {
@@ -1516,22 +1399,13 @@ mod tests {
              CREATE TABLE without_rowid (k TEXT PRIMARY KEY, v TEXT) WITHOUT ROWID;",
         )
         .unwrap();
-        SqliteConnection {
-            conn: Mutex::new(conn),
-            manual_commit: std::sync::atomic::AtomicBool::new(false),
-        }
+        wrap(conn)
     }
-
-    const SC_SCOPE: u16 = 1;
-    const SC_COLUMN_NAME: u16 = 2;
-    const SC_DATA_TYPE: u16 = 3;
-    const SC_BUFFER_LENGTH: u16 = 6;
-    const SC_PSEUDO_COLUMN: u16 = 8;
 
     #[test]
     fn special_columns_integer_pk_is_reported_as_real_column() {
         let conn = setup_specialcols_db();
-        let mut stmt = special_columns(
+        let rows = special_columns(
             &conn,
             IdentifierType::BestRowId,
             None,
@@ -1541,43 +1415,22 @@ mod tests {
             Nullable::SqlNullable,
         )
         .unwrap();
-        assert_eq!(stmt.column_count(), 8);
-        assert_eq!(stmt.fetch().unwrap(), FetchResult::Row);
-        assert_eq!(
-            stmt.get_data(SC_COLUMN_NAME, CDataType::Default)
-                .unwrap()
-                .into_owned(),
-            ColumnValue::String("id".into())
-        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].column_name, "id");
         // A declared INTEGER PRIMARY KEY is the 8-byte 64-bit rowid alias, not
         // a plain INTEGER column: DATA_TYPE must be SQL_BIGINT and
         // BUFFER_LENGTH must be 8 (not the 19-byte COLUMN_SIZE-derived value
         // a generic INTEGER column would get).
-        assert_eq!(
-            stmt.get_data(SC_DATA_TYPE, CDataType::Default)
-                .unwrap()
-                .into_owned(),
-            ColumnValue::I16(SqlDataType::EXT_BIG_INT.0)
-        );
-        assert_eq!(
-            stmt.get_data(SC_BUFFER_LENGTH, CDataType::Default)
-                .unwrap()
-                .into_owned(),
-            ColumnValue::I32(8)
-        );
-        assert_eq!(
-            stmt.get_data(SC_PSEUDO_COLUMN, CDataType::Default)
-                .unwrap()
-                .into_owned(),
-            ColumnValue::I16(SQL_PC_NOT_PSEUDO)
-        );
-        assert_eq!(stmt.fetch().unwrap(), FetchResult::NoData);
+        assert_eq!(rows[0].data_type, SqlDataType::EXT_BIG_INT.0);
+        assert_eq!(rows[0].buffer_length, Some(8));
+        assert_eq!(rows[0].pseudo_column, Some(SQL_PC_NOT_PSEUDO));
     }
 
     #[test]
     fn special_columns_rowid_table_reports_rowid_pseudo_column() {
         let conn = setup_specialcols_db();
-        let mut stmt = special_columns(
+        let rows = special_columns(
             &conn,
             IdentifierType::BestRowId,
             None,
@@ -1587,32 +1440,18 @@ mod tests {
             Nullable::SqlNullable,
         )
         .unwrap();
-        assert_eq!(stmt.fetch().unwrap(), FetchResult::Row);
-        assert_eq!(
-            stmt.get_data(SC_COLUMN_NAME, CDataType::Default)
-                .unwrap()
-                .into_owned(),
-            ColumnValue::String("rowid".into())
-        );
-        assert_eq!(
-            stmt.get_data(SC_PSEUDO_COLUMN, CDataType::Default)
-                .unwrap()
-                .into_owned(),
-            ColumnValue::I16(SQL_PC_PSEUDO)
-        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].column_name, "rowid");
+        assert_eq!(rows[0].pseudo_column, Some(SQL_PC_PSEUDO));
         // The volatile rowid pseudo-column only guarantees TRANSACTION scope.
-        assert_eq!(
-            stmt.get_data(SC_SCOPE, CDataType::Default)
-                .unwrap()
-                .into_owned(),
-            ColumnValue::I16(Scope::Transaction.into())
-        );
+        assert_eq!(rows[0].scope, Some(Scope::Transaction.into()));
     }
 
     #[test]
     fn special_columns_without_rowid_reports_pk_columns() {
         let conn = setup_specialcols_db();
-        let mut stmt = special_columns(
+        let rows = special_columns(
             &conn,
             IdentifierType::BestRowId,
             None,
@@ -1622,36 +1461,28 @@ mod tests {
             Nullable::SqlNullable,
         )
         .unwrap();
-        assert_eq!(stmt.fetch().unwrap(), FetchResult::Row);
-        assert_eq!(
-            stmt.get_data(SC_COLUMN_NAME, CDataType::Default)
-                .unwrap()
-                .into_owned(),
-            ColumnValue::String("k".into())
-        );
-        assert_eq!(
-            stmt.get_data(SC_PSEUDO_COLUMN, CDataType::Default)
-                .unwrap()
-                .into_owned(),
-            ColumnValue::I16(SQL_PC_NOT_PSEUDO)
-        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].column_name, "k");
+        assert_eq!(rows[0].pseudo_column, Some(SQL_PC_NOT_PSEUDO));
     }
 
     #[test]
     fn special_columns_rowver_is_empty() {
         let conn = setup_specialcols_db();
-        let mut stmt = special_columns(
-            &conn,
-            IdentifierType::RowVer,
-            None,
-            None,
-            Some("with_int_pk"),
-            Scope::CurRow,
-            Nullable::SqlNullable,
-        )
-        .unwrap();
-        assert_eq!(stmt.column_count(), 8);
-        assert_eq!(stmt.fetch().unwrap(), FetchResult::NoData);
+        assert!(
+            special_columns(
+                &conn,
+                IdentifierType::RowVer,
+                None,
+                None,
+                Some("with_int_pk"),
+                Scope::CurRow,
+                Nullable::SqlNullable,
+            )
+            .unwrap()
+            .is_empty()
+        );
     }
 
     #[test]
@@ -1659,16 +1490,18 @@ mod tests {
         // The rowid pseudo-column only guarantees TRANSACTION scope; a request for
         // SESSION cannot be met, so the result set is empty (per spec).
         let conn = setup_specialcols_db();
-        let mut stmt = special_columns(
-            &conn,
-            IdentifierType::BestRowId,
-            None,
-            None,
-            Some("no_pk"),
-            Scope::Session,
-            Nullable::SqlNullable,
-        )
-        .unwrap();
-        assert_eq!(stmt.fetch().unwrap(), FetchResult::NoData);
+        assert!(
+            special_columns(
+                &conn,
+                IdentifierType::BestRowId,
+                None,
+                None,
+                Some("no_pk"),
+                Scope::Session,
+                Nullable::SqlNullable,
+            )
+            .unwrap()
+            .is_empty()
+        );
     }
 }

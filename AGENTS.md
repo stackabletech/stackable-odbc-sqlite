@@ -19,6 +19,8 @@ the 73 C ABI entry points — lives in
 | [Backend error mapping](#backend-error-mapping) | Touching an error path |
 | [Declaring capabilities](#declaring-capabilities) | Adding or changing any `SQLGetInfo` value |
 | [Transactions](#transactions) | Touching `SQLEndTran`, autocommit or cursor behaviour |
+| [Cancellation](#cancellation) | Touching `SQLCancel` or `SQL_ATTR_QUERY_TIMEOUT` |
+| [Catalog functions](#catalog-functions) | Touching anything in `metadata.rs` |
 | [Architecture](#architecture-of-this-crate) | Understanding the module layout |
 | [Connection string keys](#connection-string-keys) | Adding or changing a parameter |
 | [Testing](#testing) | Writing or running tests |
@@ -58,7 +60,8 @@ crates.io; releases are GitHub Release archives built by
 | `Backend` / `StatementBackend` trait definitions | core |
 | Opening the database, executing, fetching | this crate |
 | SQLite storage class → SQL type mapping, value conversion | this crate |
-| Catalog and metadata queries | this crate |
+| Querying SQLite for catalog metadata | this crate — see [Catalog functions](#catalog-functions) |
+| Catalog column layout, sort order, the `SQL_ALL_*` enumerations | core |
 | Connection-string parsing | this crate |
 | ODBC escape-sequence translation | this crate |
 
@@ -179,9 +182,31 @@ database file is `08001`. Failures after that point are `08S01`.
 `Backend` has around two dozen **required** methods that state what SQLite can
 do — `alter_table_support`, `outer_join_capabilities`, `subqueries`,
 `sql_conformance`, `supports_catalogs`, `identifier_case`,
-`txn_isolation_options` and the rest. They are required, with no default,
-deliberately: a defaulted capability is a claim no backend ever made, and every
-one of them was a bug here before core made it a compile error.
+`txn_isolation_options`, `table_types` and the rest. They are required, with no
+default, deliberately: a defaulted capability is a claim no backend ever made,
+and every one of them was a bug here before core made it a compile error.
+`table_types` is required for the same reason and one of its own: an empty
+table-type list is an *answer* ("this data source has no table types"), not
+"unknown", and unlike catalogs and schemas there is no `supports_*` method for
+core to derive it from.
+
+They all take `&Self::Connection`, because `SQLGetInfo` is a per-connection
+call and a data source's capabilities can differ by server. Every one this
+driver declares is a property of the SQLite `rusqlite` links, not of the file
+opened, so each ignores the argument — but the answer must still be read
+through a connection, and the tests do that via `info::tests::test_connection`
+rather than calling the hook as a free function. `cursor_commit_behavior`,
+`cursor_rollback_behavior` and `catalog_result_column_widths` are the
+exceptions and take none: `SQLGetInfo` must answer the first two before a
+connection exists.
+
+The same split runs through `get_info`. `sqlite_get_info` takes
+`Option<&SqliteConnection>` — `None` on the pre-connect path — and hands it to
+`default_get_info` / `common_get_info_raw`, which answer only what is knowable
+without a data source and leave the rest. An arm that consults a capability
+hook must therefore be guarded on the connection being present, which is why
+`SQL_MAX_CATALOG_NAME_LEN` and `SQL_MAX_SCHEMA_NAME_LEN` only report `0` once
+one is open.
 
 Four rules, all learned the hard way:
 
@@ -263,8 +288,57 @@ reported values through the FFI entry point.
 
 `SQL_ATTR_TXN_ISOLATION` is validated by core against `txn_isolation_options`,
 which this driver answers with `SQL_TXN_SERIALIZABLE` alone. Setting any other
-level is refused with `HY024` rather than stored and echoed back — see
-`txn_isolation_accepts_only_the_level_sqlite_implements`.
+level on an open connection is refused with `HY024` rather than stored and
+echoed back — see `txn_isolation_accepts_only_the_level_sqlite_implements`.
+Because `txn_isolation_options` is a per-connection hook, a level set *before*
+connecting is only checked for naming exactly one level; the comparison against
+the hook happens at connect time, so an unsupported level fails the connect.
+
+### Cancellation
+
+`SQLCancel` is real: `Backend::CancelToken` is `Arc<rusqlite::InterruptHandle>`
+and `cancel` calls `sqlite3_interrupt`, which stops the in-flight
+`sqlite3_step` on that connection.
+
+This is the **aliasing** token shape of the two `Backend::CancelToken`'s doc
+comment describes — the token refers to the same connection the statement is
+executing on — and it is sound only because SQLite documents
+`sqlite3_interrupt` as safe to call from another thread. The `Arc` is core's
+requirement for that shape: core clones the token out of its registry before
+touching anything else, so the token has to survive a concurrent
+`SQLDisconnect`. `rusqlite` already satisfies the underlying rule — its
+`InterruptHandle` holds an `Arc<Mutex<*mut sqlite3>>` shared with the
+connection, and `InnerConnection::close` nulls that pointer while holding the
+same mutex, so a racing `interrupt()` either finds a live handle or finds null
+and does nothing.
+
+Three things this depends on, in order:
+
+- **The handle is captured in `connect`,** not fetched on demand.
+  `cancel_token` can neither block nor fail, and the `rusqlite::Connection`
+  lives behind a `Mutex` — reaching through it would mean waiting on whatever
+  thread is executing. Core's own doc asks for the same thing for a different
+  reason: assemble the token with the connection in hand, never lazily inside
+  `cancel`.
+- **`cancel` takes no lock this driver owns.** On `SQLCancel`'s idle path core
+  holds the connection's group lock across the call, so anything that waited on
+  it would deadlock. `interrupt()` takes only `rusqlite`'s own short-lived
+  interrupt lock, which no ODBC entry point holds.
+- **`SQLITE_INTERRUPT` maps to `HY008`.** `map_sqlite_error` classifies
+  `ErrorCode::OperationInterrupted` as `SqliteError::OperationCanceled`, which
+  is the SQLSTATE the spec's diagnostics tables list for a statement stopped by
+  `SQLCancel`. Without that arm a cancelled statement would report `HY000`.
+
+`sql_cancel_from_another_thread_stops_a_running_statement` drives the real
+entry points across two threads. It was verified by mutation: with
+`token.interrupt()` removed the query runs to completion and the test fails on
+the return code. Note the gate it holds — `SQLCancel`'s idle branch clears the
+statement's diagnostic queue, so a cancel landing after `SQLExecDirectW`
+returns would wipe the `HY008` the test is reading.
+
+`SQL_ATTR_QUERY_TIMEOUT` is still substituted with `0` and reported as `01S02`.
+Cancellation is a signal from another thread; a timeout would need a deadline
+this driver's synchronous execute path has nothing to arm.
 
 ## Architecture of this crate
 
@@ -274,7 +348,7 @@ level is refused with `HY024` rather than stored and echoed back — see
 | `src/backend.rs` | `SqliteBackend`, `SqliteConnection`, `SqliteStatement`, `SqliteError`, `map_sqlite_error` |
 | `src/backend/execute.rs` | `exec_direct`, `prepare`, `execute`, and the `StatementBackend` impl |
 | `src/backend/info.rs` | `SQLGetInfo` answers and the capability bitmaps, plus the snapshot test |
-| `src/backend/metadata.rs` | The catalog functions: tables, columns, primary keys, statistics, special columns |
+| `src/backend/metadata.rs` | The catalog row producers: tables, columns, primary keys, statistics, special columns |
 | `src/backend/params.rs` | Parameter binding |
 | `src/backend/types/connect_params.rs` | `SqliteConnectParams` |
 | `src/escape_dialect.rs` | ODBC escape-sequence translation for SQLite's dialect |
@@ -291,6 +365,40 @@ at that point.
 This is load-bearing well beyond memory use. It is why the cursor-behaviour
 hooks report `Preserve`, why `SQLEndTran` cannot disturb a cursor, and why
 concurrency is a non-issue. Changing it is not a local optimisation.
+
+### Catalog functions
+
+The six catalog methods return **typed row vectors** — `Vec<TableRow>`,
+`Vec<ColumnRow>`, `Vec<PrimaryKeyRow>`, `Vec<ForeignKeyRow>`,
+`Vec<StatisticsRow>`, `Vec<SpecialColumnRow>` — not a `Self::Statement`. Core
+converts each row to the spec's column layout, sorts the set into the order
+that function's spec page mandates, and serves it. Three consequences for
+anything changed in `metadata.rs`:
+
+- **Do not sort, and do not add an `ORDER BY` for ODBC's sake.** Core sorts,
+  stably, on the spec's keys. A second ordering in the backend is one more
+  place for it to be wrong, and it silently overrides nothing — core re-sorts
+  regardless. The one thing to keep in mind is that the sort takes NULL
+  placement from `Backend::null_collation`, which is why `SQLStatistics`'
+  table-stat row (NULL `NON_UNIQUE`) still comes first: this driver reports
+  `SQL_NC_LOW`.
+- **Do not handle the `SQL_ALL_*` enumerations.** `SQL_ALL_CATALOGS`,
+  `SQL_ALL_SCHEMAS` and `SQL_ALL_TABLE_TYPES` are all the same `"%"` sentinel,
+  distinguished by which argument carries it while the others are empty
+  strings. Core detects them on the *raw* arguments before calling `tables`,
+  and answers from `supports_catalogs`, `supports_schemas` and `table_types`.
+  `catalogs` and `schemas` are left defaulted here because the first two hooks
+  say SQLite has neither, so core never asks.
+- **A non-`Option` field is a column the spec marks "not NULL".** The types
+  enforce it, which is how `SQLForeignKeys`' `PKCOLUMN_NAME` stopped being
+  reported as NULL for a `REFERENCES parent` with no column list — SQLite
+  defines that as the parent's primary key, so `parent_pk_column` resolves the
+  name rather than dropping it.
+
+Because ordering is core's, an ordering assertion belongs in
+`ffi_integration_tests.rs`, where core's sort has actually run — the unit tests
+in `metadata.rs` assert only which rows exist and what each field holds. See
+`sql_statistics_w_orders_table_stat_row_first_then_unique_before_non_unique`.
 
 ## Connection string keys
 

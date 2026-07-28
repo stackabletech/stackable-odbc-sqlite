@@ -14,9 +14,9 @@ use stackable_odbc_core::{
         AttrOdbcVersion, CDataType, CompletionType, ConnectionAttribute, Desc,
         EnvironmentAttribute, HandleType, HeaderDiagnosticIdentifier, InfoType, Nullable, Numeric,
         ParamType, SQL_AUTOCOMMIT_OFF, SQL_AUTOCOMMIT_ON, SQL_CASCADE, SQL_CD_FALSE,
-        SQL_CURSOR_FORWARD_ONLY, SQL_DIAG_MESSAGE_TEXT, SQL_DRIVER_ODBC_VER_STRING,
-        SQL_GD_ANY_COLUMN, SQL_GD_ANY_ORDER, SQL_GD_BOUND, SQL_IC_SENSITIVE, SQL_INDEX_UNIQUE,
-        SQL_QUICK, SQL_RESTRICT, SQL_TXN_READ_COMMITTED, SQL_TXN_READ_UNCOMMITTED,
+        SQL_CURSOR_FORWARD_ONLY, SQL_DRIVER_ODBC_VER_STRING, SQL_GD_ANY_COLUMN, SQL_GD_ANY_ORDER,
+        SQL_GD_BOUND, SQL_IC_SENSITIVE, SQL_INDEX_ALL, SQL_INDEX_OTHER, SQL_INDEX_UNIQUE,
+        SQL_QUICK, SQL_RESTRICT, SQL_TABLE_STAT, SQL_TXN_READ_COMMITTED, SQL_TXN_READ_UNCOMMITTED,
         SQL_TXN_REPEATABLE_READ, SQL_TXN_SERIALIZABLE, SqlDataType, SqlReturn, StatementAttribute,
         Timestamp, expected_kind,
     },
@@ -904,6 +904,142 @@ fn sql_tables_w_returns_tables_and_views() {
     }
 }
 
+/// `SQL_ALL_CATALOGS`, `SQL_ALL_SCHEMAS` and `SQL_ALL_TABLE_TYPES` are all the
+/// same sentinel — `"%"` — distinguished by which argument carries it while
+/// the other two are *empty strings*. Core detects and serves all three; this
+/// pins what an application actually receives from this driver.
+const SQL_ALL_SENTINEL: &str = "%";
+
+/// Drive `SQLTablesW` with the three name arguments and the table-type
+/// argument given as explicit-length strings, and collect one column.
+unsafe fn tables_column(
+    stmt: *mut c_void,
+    catalog: &str,
+    schema: &str,
+    table: &str,
+    table_type: &str,
+    col: u16,
+) -> Vec<String> {
+    let cat: Vec<u16> = catalog.encode_utf16().collect();
+    let sch: Vec<u16> = schema.encode_utf16().collect();
+    let tab: Vec<u16> = table.encode_utf16().collect();
+    let tt: Vec<u16> = table_type.encode_utf16().collect();
+    // An empty `Vec<u16>`'s `as_ptr()` is dangling; a real buffer plus a length
+    // of 0 is what makes an argument an empty *string* rather than a null
+    // pointer, which is the whole distinction the enumerations turn on.
+    let backing: [u16; 1] = [0];
+    let ptr = |v: &Vec<u16>| {
+        if v.is_empty() {
+            backing.as_ptr()
+        } else {
+            v.as_ptr()
+        }
+    };
+
+    let ret = unsafe {
+        ffi::metadata::sql_tables_w::<SqliteBackend>(
+            stmt,
+            ptr(&cat),
+            cat.len() as i16,
+            ptr(&sch),
+            sch.len() as i16,
+            ptr(&tab),
+            tab.len() as i16,
+            ptr(&tt),
+            tt.len() as i16,
+        )
+    };
+    assert_eq!(ret, SqlReturn::SUCCESS);
+
+    let mut out = Vec::new();
+    loop {
+        let ret = unsafe { ffi::fetch::sql_fetch::<SqliteBackend>(stmt) };
+        if ret == SqlReturn::NO_DATA {
+            break;
+        }
+        assert_eq!(ret, SqlReturn::SUCCESS);
+        out.push(unsafe { fetch_string_col(stmt, col) });
+    }
+    // Reaching SQL_NO_DATA does not close the cursor; leaving it open would
+    // make the next call on this handle 24000, so callers can reuse the handle.
+    assert_eq!(
+        unsafe { ffi::cursor::sql_close_cursor::<SqliteBackend>(stmt) },
+        SqlReturn::SUCCESS
+    );
+    out
+}
+
+/// `SQL_ALL_TABLE_TYPES` lists what `SqliteBackend::table_types` declares.
+///
+/// This is how a BI tool's navigator populates its type filter. It used to be
+/// answered by this driver's own `metadata::tables`; core serves it now, from
+/// the `table_types` hook, so this test is what keeps the reported list tied
+/// to what `SQLTables` can actually return in `TABLE_TYPE`.
+#[test]
+fn sql_tables_w_all_table_types_lists_table_and_view() {
+    unsafe {
+        let (env, conn, stmt) = alloc_handles();
+        assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
+        setup_metadata_tables(conn);
+
+        // TABLE_TYPE is column 4.
+        let mut types = tables_column(stmt, "", "", "", SQL_ALL_SENTINEL, 4);
+        types.sort();
+        assert_eq!(types, vec!["TABLE".to_string(), "VIEW".to_string()]);
+
+        cleanup(env, conn, stmt);
+    }
+}
+
+/// `SQL_ALL_CATALOGS` and `SQL_ALL_SCHEMAS` are empty result sets.
+///
+/// Core answers both without consulting the backend, because
+/// `supports_catalogs` and `supports_schemas` already say SQLite has neither —
+/// which is why this driver implements neither `catalogs` nor `schemas`.
+#[test]
+fn sql_tables_w_all_catalogs_and_all_schemas_are_empty() {
+    unsafe {
+        let (env, conn, stmt) = alloc_handles();
+        assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
+        setup_metadata_tables(conn);
+
+        // TABLE_CAT is column 1, TABLE_SCHEM column 2.
+        assert!(tables_column(stmt, SQL_ALL_SENTINEL, "", "", "", 1).is_empty());
+        assert!(tables_column(stmt, "", SQL_ALL_SENTINEL, "", "", 2).is_empty());
+
+        cleanup(env, conn, stmt);
+    }
+}
+
+/// `"%"` in every argument is an ordinary match-everything query, not an
+/// enumeration — the sentinel only triggers when the *other* arguments are
+/// empty strings. A detector keyed on `"%"` alone would answer this with a
+/// catalog list instead of the data source's tables.
+#[test]
+fn sql_tables_w_percent_everywhere_is_an_ordinary_query() {
+    unsafe {
+        let (env, conn, stmt) = alloc_handles();
+        assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
+        setup_metadata_tables(conn);
+
+        // TABLE_NAME is column 3.
+        let names = tables_column(
+            stmt,
+            SQL_ALL_SENTINEL,
+            SQL_ALL_SENTINEL,
+            SQL_ALL_SENTINEL,
+            SQL_ALL_SENTINEL,
+            3,
+        );
+        assert!(
+            names.contains(&"test_table".to_string()),
+            "expected a real table listing, got {names:?}"
+        );
+
+        cleanup(env, conn, stmt);
+    }
+}
+
 #[test]
 fn sql_tables_w_with_type_filter() {
     unsafe {
@@ -1582,30 +1718,81 @@ fn get_cursor_type_default_is_forward_only() {
     }
 }
 
+/// `SQL_ATTR_QUERY_TIMEOUT`'s "no timeout" value, and the only one this driver
+/// can honour. Core has the same constant privately; this names the value the
+/// test asks about rather than passing a bare `0`.
+const SQL_QUERY_TIMEOUT_DEFAULT: usize = 0;
+
+/// A requested timeout other than "no timeout" is substituted, not stored.
 #[test]
-fn set_query_timeout_stored_and_retrieved() {
+fn set_query_timeout_is_substituted_with_no_timeout() {
+    // `Backend` is synchronous and this driver implements no cancellation, so
+    // no deadline is ever applied to a running statement. `SQL_ATTR_QUERY_TIMEOUT`
+    // is on the spec's 01S02 substitution list for exactly this case: the value
+    // is replaced with `SQL_QUERY_TIMEOUT_DEFAULT` and reported as
+    // SQL_SUCCESS_WITH_INFO, so an application that asks for 30 seconds can see
+    // it did not get them by reading the attribute back. This previously
+    // returned SUCCESS and echoed 30, confirming a deadline nothing enforced.
     unsafe {
         let (env, conn, stmt) = alloc_handles();
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
 
-        let _ = ffi::stmt_attr::sql_set_stmt_attr_w::<SqliteBackend>(
-            stmt,
-            StatementAttribute::QueryTimeout as i32,
-            30usize as *mut std::ffi::c_void,
-            0,
+        const REQUESTED_TIMEOUT_SECONDS: usize = 30;
+        assert_eq!(
+            ffi::stmt_attr::sql_set_stmt_attr_w::<SqliteBackend>(
+                stmt,
+                StatementAttribute::QueryTimeout as i32,
+                std::ptr::without_provenance_mut(REQUESTED_TIMEOUT_SECONDS),
+                0,
+            ),
+            SqlReturn::SUCCESS_WITH_INFO,
+            "an unsupported query timeout is substituted, not refused"
         );
-        let mut val: u32 = 0;
+        assert_eq!(
+            last_sqlstate(stmt),
+            stackable_odbc_core::types::sql_state::OPTION_VALUE_CHANGED
+        );
+
+        // `SQL_ATTR_QUERY_TIMEOUT` is a SQLUINTEGER attribute, so the driver
+        // writes exactly four bytes here whatever the buffer's width.
+        let mut val: u32 = u32::MAX;
+        let mut len: i32 = 0;
         assert_eq!(
             ffi::stmt_attr::sql_get_stmt_attr_w::<SqliteBackend>(
                 stmt,
-                0,
-                &mut val as *mut u32 as *mut std::ffi::c_void,
-                0,
-                std::ptr::null_mut(),
+                StatementAttribute::QueryTimeout as i32,
+                &raw mut val as *mut std::ffi::c_void,
+                std::mem::size_of::<u32>() as i32,
+                &mut len,
             ),
             SqlReturn::SUCCESS
         );
-        assert_eq!(val, 30);
+        assert_eq!(
+            val as usize, SQL_QUERY_TIMEOUT_DEFAULT,
+            "the substituted value has to be what the application reads back"
+        );
+
+        cleanup(env, conn, stmt);
+    }
+}
+
+/// Asking for the value the driver can honour is a plain success.
+#[test]
+fn set_query_timeout_to_no_timeout_succeeds_without_substitution() {
+    unsafe {
+        let (env, conn, stmt) = alloc_handles();
+        assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
+
+        assert_eq!(
+            ffi::stmt_attr::sql_set_stmt_attr_w::<SqliteBackend>(
+                stmt,
+                StatementAttribute::QueryTimeout as i32,
+                std::ptr::without_provenance_mut(SQL_QUERY_TIMEOUT_DEFAULT),
+                0,
+            ),
+            SqlReturn::SUCCESS,
+            "no timeout is what this driver does, so there is nothing to substitute"
+        );
 
         cleanup(env, conn, stmt);
     }
@@ -2349,6 +2536,103 @@ fn sql_cancel_with_open_cursor_does_not_close_it() {
     }
 }
 
+/// A statement handle carried to another thread so `SQLCancel` can be called
+/// on it while the first thread executes — the cross-thread case the spec
+/// singles out, and the only one where cancellation has anything to do.
+///
+/// Sound because nothing here dereferences the pointer: it is the opaque token
+/// an application holds, which every core entry point validates through its
+/// own registry. Core is built for exactly this — `sql_cancel` clones the
+/// backend's token out of the registry before touching anything else, so the
+/// handle staying valid is core's problem, not this test's.
+struct SendStmt(*mut c_void);
+// SAFETY: see the type's doc comment. The pointer is only ever passed back to
+// core, never read through.
+unsafe impl Send for SendStmt {}
+
+/// `SQLCancel` from another thread stops a running statement with `HY008`.
+///
+/// This is what `Backend::cancel` buys: `sqlite3_interrupt` makes the
+/// in-flight `sqlite3_step` return `SQLITE_INTERRUPT`, which `map_sqlite_error`
+/// classifies as the spec's "operation canceled". Without it the call below
+/// would run to completion and report `SQL_SUCCESS`.
+#[test]
+fn sql_cancel_from_another_thread_stops_a_running_statement() {
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    unsafe {
+        let (env, conn, stmt) = alloc_handles();
+        assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        // Held across each `SQLCancel` so the main thread can be sure no cancel
+        // is in flight before it reads the diagnostic. It matters because
+        // `SQLCancel`'s *idle* branch clears the statement's diagnostic queue —
+        // correctly, since a cancelled statement may be re-executed — so a
+        // cancel landing after `SQLExecDirectW` returned would wipe the very
+        // `HY008` this test is looking for.
+        let gate = Arc::new(Mutex::new(()));
+
+        let handle = SendStmt(stmt);
+        let canceller = {
+            let (stop, gate) = (Arc::clone(&stop), Arc::clone(&gate));
+            std::thread::spawn(move || {
+                let handle = handle;
+                while !stop.load(Ordering::SeqCst) {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    let _held = gate.lock().expect("gate");
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    // Interrupt repeatedly rather than once: SQLite documents an
+                    // interrupt raised while nothing is running as a no-op that
+                    // "has no effect on SQL statements that are started after
+                    // the sqlite3_interrupt() call returns", so a single
+                    // well-timed call would be a race. Each retry is harmless.
+                    // SAFETY: `handle.0` is a live statement handle; the main
+                    // thread outlives this one and frees it only after `join`.
+                    // (The enclosing `unsafe` block already covers this.)
+                    let ret = ffi::cursor::sql_cancel::<SqliteBackend>(handle.0);
+                    assert_eq!(ret, SqlReturn::SUCCESS);
+                }
+            })
+        };
+
+        // A recursive CTE with far more iterations than the cancelling thread
+        // needs. Bounded rather than infinite on purpose: if the interrupt
+        // never lands this finishes and fails the assertion below, instead of
+        // hanging the suite.
+        let ret = exec_direct(
+            stmt,
+            "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 50000000) \
+             SELECT count(*) FROM c",
+        );
+
+        stop.store(true, Ordering::SeqCst);
+        // Acquiring the gate after setting `stop` is the synchronisation point:
+        // any in-flight cancel finishes first, and the canceller re-checks
+        // `stop` under the same gate, so none can start while the diagnostic is
+        // being read.
+        let held = gate.lock().expect("gate");
+        assert_eq!(
+            ret,
+            SqlReturn::ERROR,
+            "the running statement must be stopped, not run to completion"
+        );
+        assert_eq!(
+            last_sqlstate(stmt),
+            crate::backend::SQL_STATE_OPERATION_CANCELED
+        );
+        drop(held);
+        canceller.join().expect("canceller thread");
+
+        cleanup(env, conn, stmt);
+    }
+}
+
 // --- SQLStatisticsW integration tests ---
 
 #[test]
@@ -2396,8 +2680,94 @@ fn sql_statistics_w_returns_table_stat_row() {
     }
 }
 
+/// The spec's `SQLStatistics` order, as an application sees it.
+///
+/// Sorting moved to core, which orders by NON_UNIQUE, TYPE, INDEX_QUALIFIER,
+/// INDEX_NAME, ORDINAL_POSITION. The table-stat row leads only because its
+/// NON_UNIQUE is NULL and this driver reports `SQL_NC_LOW` for
+/// `SQL_NULL_COLLATION` — core takes NULL placement from that hook rather than
+/// choosing for itself, so this is the test that ties the two together. It has
+/// to run through the FFI: the backend now returns rows unsorted.
 #[test]
-fn sql_statistics_w_no_table_filter_also_succeeds() {
+fn sql_statistics_w_orders_table_stat_row_first_then_unique_before_non_unique() {
+    unsafe {
+        let (env, conn, stmt) = alloc_handles();
+        assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
+        setup_sql(
+            conn,
+            "CREATE TABLE idx_t (a INTEGER, b TEXT, c REAL);
+             CREATE INDEX ix_bc ON idx_t(b, c);
+             CREATE UNIQUE INDEX ux_a ON idx_t(a);",
+        );
+
+        let table = "idx_t";
+        let table_wide: Vec<u16> = table.encode_utf16().collect();
+        assert_eq!(
+            ffi::metadata::sql_statistics_w::<SqliteBackend>(
+                stmt,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                table_wide.as_ptr(),
+                table_wide.len() as i16,
+                SQL_INDEX_ALL,
+                SQL_QUICK,
+            ),
+            SqlReturn::SUCCESS
+        );
+
+        // TYPE is column 7, COLUMN_NAME column 9, ORDINAL_POSITION column 8.
+        let mut seen: Vec<(i16, String, i16)> = Vec::new();
+        loop {
+            let ret = ffi::fetch::sql_fetch::<SqliteBackend>(stmt);
+            if ret == SqlReturn::NO_DATA {
+                break;
+            }
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            let index_type = fetch_i16_col(stmt, 7);
+            // COLUMN_NAME is NULL on the table-stat row; read it only for the
+            // index rows, where the driver always supplies a string.
+            let column = if index_type == SQL_TABLE_STAT {
+                String::new()
+            } else {
+                fetch_string_col(stmt, 9)
+            };
+            let ordinal = if index_type == SQL_TABLE_STAT {
+                0
+            } else {
+                fetch_i16_col(stmt, 8)
+            };
+            seen.push((index_type, column, ordinal));
+        }
+
+        assert_eq!(
+            seen,
+            vec![
+                // The table-stat row: NON_UNIQUE is NULL, which SQL_NC_LOW puts first.
+                (SQL_TABLE_STAT, String::new(), 0),
+                // The unique index (NON_UNIQUE = SQL_FALSE = 0) before the non-unique one.
+                (SQL_INDEX_OTHER, "a".to_string(), 1),
+                // Then the non-unique composite index, in key order.
+                (SQL_INDEX_OTHER, "b".to_string(), 1),
+                (SQL_INDEX_OTHER, "c".to_string(), 2),
+            ]
+        );
+
+        cleanup(env, conn, stmt);
+    }
+}
+
+/// A null `TableName` is `HY009`, not an empty result set.
+///
+/// `SQLStatistics` is one of only two catalog functions whose "the *TableName*
+/// argument was a null pointer" clause carries no **(DM)** marker, so the
+/// driver owns it rather than the Driver Manager — and a table this function
+/// describes indexes of is not optional. This previously returned
+/// `SQL_SUCCESS` with no rows, which an application reads as "that table has
+/// no indexes".
+#[test]
+fn sql_statistics_w_null_table_name_is_rejected() {
     unsafe {
         let (env, conn, stmt) = alloc_handles();
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
@@ -2414,7 +2784,45 @@ fn sql_statistics_w_no_table_filter_also_succeeds() {
             0,
             0,
         );
+        assert_eq!(ret, SqlReturn::ERROR);
+        assert_eq!(
+            last_sqlstate(stmt),
+            stackable_odbc_core::types::sql_state::INVALID_USE_OF_NULL_POINTER
+        );
+
+        cleanup(env, conn, stmt);
+    }
+}
+
+/// An empty-string `TableName` is a legal ordinary argument that names no
+/// table, which is an empty result set rather than an error.
+#[test]
+fn sql_statistics_w_empty_table_name_returns_no_rows() {
+    unsafe {
+        let (env, conn, stmt) = alloc_handles();
+        assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
+        setup_metadata_tables(conn);
+
+        // A real, non-dangling pointer with length 0: an empty `Vec<u16>`'s
+        // `as_ptr()` is dangling, which is what makes this an empty *string*
+        // rather than a null pointer.
+        let empty: [u16; 1] = [0];
+        let ret = ffi::metadata::sql_statistics_w::<SqliteBackend>(
+            stmt,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            empty.as_ptr(),
+            0,
+            0,
+            0,
+        );
         assert_eq!(ret, SqlReturn::SUCCESS);
+        assert_eq!(
+            ffi::fetch::sql_fetch::<SqliteBackend>(stmt),
+            SqlReturn::NO_DATA
+        );
 
         cleanup(env, conn, stmt);
     }
@@ -2930,7 +3338,7 @@ fn get_diag_field_native_error_after_error() {
 
 #[test]
 fn get_diag_field_message_text_after_error() {
-    // SQL_DIAG_MESSAGE_TEXT (6) returns the diagnostic message string.
+    // SQL_DIAG_MESSAGE_TEXT returns the diagnostic message string.
     // After an invalid-SQL error the message must be non-empty.
     unsafe {
         let (env, conn, stmt) = alloc_handles();
@@ -2946,7 +3354,7 @@ fn get_diag_field_message_text_after_error() {
             HandleType::Stmt as i16,
             stmt,
             1, // first record
-            SQL_DIAG_MESSAGE_TEXT,
+            HeaderDiagnosticIdentifier::MessageText as i16,
             msg_buf.as_mut_ptr() as *mut c_void,
             buffer_length,
             &mut str_len,
@@ -2990,7 +3398,7 @@ fn get_diag_field_message_text_long_message_does_not_panic() {
             HandleType::Stmt as i16,
             stmt,
             1,
-            SQL_DIAG_MESSAGE_TEXT,
+            HeaderDiagnosticIdentifier::MessageText as i16,
             msg_buf.as_mut_ptr() as *mut c_void,
             buffer_length,
             &mut str_len,
@@ -3539,7 +3947,7 @@ fn bulk_operations_returns_hyc00() {
     // SQLBulkOperations is not supported by this driver. It must return ERROR
     // with SQLSTATE HYC00 (optional feature not implemented) even when a cursor
     // is open.
-    use stackable_odbc_core::types::SQL_ADD;
+    use stackable_odbc_core::odbc_sys::BulkOperation;
 
     unsafe {
         let (env, conn, stmt) = alloc_handles();
@@ -3555,7 +3963,8 @@ fn bulk_operations_returns_hyc00() {
             SqlReturn::SUCCESS
         );
 
-        let ret = ffi::cursor::sql_bulk_operations::<SqliteBackend>(stmt, SQL_ADD);
+        let ret =
+            ffi::cursor::sql_bulk_operations::<SqliteBackend>(stmt, BulkOperation::Add as i16);
         assert_eq!(ret, SqlReturn::ERROR);
 
         cleanup(env, conn, stmt);

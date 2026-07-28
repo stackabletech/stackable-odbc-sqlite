@@ -9,6 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `SQLCancel` actually cancels. A statement running on one thread can be
+  stopped from another, which is the case the spec singles out: the driver now
+  holds `sqlite3_interrupt`'s handle for the connection and calls it, so the
+  in-flight query fails with SQLSTATE `HY008` ("operation canceled") instead of
+  running to completion. It previously reported "not implemented", which
+  `SQLCancel` treats as success — an application that asked to stop a runaway
+  query got `SQL_SUCCESS` and then waited for it anyway. Cancelling an idle
+  statement is still a no-op and still succeeds, per spec, and a cancelled
+  statement can be re-executed.
+
+  `SQL_ATTR_QUERY_TIMEOUT` is unaffected and still substituted with `0`:
+  cancellation is a signal from another thread, whereas a timeout would need a
+  deadline this driver's synchronous execution path has nothing to arm.
+
+- `SQLTables` answers the `SQL_ALL_CATALOGS`, `SQL_ALL_SCHEMAS` and
+  `SQL_ALL_TABLE_TYPES` enumerations, which is how a BI tool's navigator
+  browses a data source. `SQL_ALL_TABLE_TYPES` reports `TABLE` and `VIEW`, the
+  two values `SQLTables` can put in `TABLE_TYPE`; the other two are empty
+  result sets, SQLite having neither catalogs nor schemas. The driver used to
+  answer the table-type case itself and now declares the list through the new
+  `Backend::table_types` hook, with `stackable-odbc-core` detecting all three
+  enumerations and serving them — including the distinction that makes them
+  work, since all three sentinels are the same `"%"` and differ only in which
+  argument carries it while the others are empty strings.
+
+- `SQL_ATTR_ROWS_FETCHED_PTR`, `SQL_ATTR_ROW_STATUS_PTR` and
+  `SQL_ATTR_ROW_BIND_OFFSET_PTR` are honoured instead of accepted and ignored.
+  With `SQL_ATTR_ROW_ARRAY_SIZE` pinned at 1 the rowset holds exactly one row,
+  so the fetched count is 1 per row and 0 at `SQL_NO_DATA`, the status is
+  `SQL_ROW_SUCCESS` (or `SQL_ROW_SUCCESS_WITH_INFO` when the row raised
+  `01004`), and the bind offset is added to every bound column and indicator
+  address on each fetch. This follows a `stackable-odbc-core` change.
+
+- `SQLGetData` retrieves a long character or binary value in parts, returning
+  `SQL_SUCCESS_WITH_INFO` with `01004` and resuming from the read position on
+  the next call, rather than restarting from the beginning each time. This
+  follows a `stackable-odbc-core` change.
+
 - Diagnostics now carry SQLite's own error code and the failure that caused
   them. `map_sqlite_error` keeps the `rusqlite::Error` it classified rather
   than flattening it into a message, so `SQLGetDiagRec` reports SQLite's
@@ -53,6 +91,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that matters: `SQLGetFunctions` is what the Windows Driver Manager builds its
   dispatch table from, so naming a function core does not export would hand it
   a null pointer. A test keeps the historical list checked against core's.
+
+- `SQLSetStmtAttr(SQL_ATTR_QUERY_TIMEOUT)` and
+  `SQLSetStmtAttr(SQL_ATTR_MAX_ROWS)` now substitute `0` and return
+  `SQL_SUCCESS_WITH_INFO` with SQLSTATE `01S02` for any other value, where both
+  were previously stored and echoed back by `SQLGetStmtAttr`. Both are on the
+  spec's `01S02` substitution list. Nothing in this driver counts rows or
+  enforces a deadline — `Backend` is synchronous and `SQLCancel` is not
+  implemented — so an application that set a 30-second timeout and got
+  `SQL_SUCCESS` would wait indefinitely on a runaway query. Setting either to
+  `0` still succeeds plainly, that being the value the driver honours. This
+  follows a `stackable-odbc-core` change.
+
+- An infinite `REAL` read as `SQL_C_CHAR` or `SQL_C_WCHAR` now renders as
+  `Infinity` / `-Infinity` rather than `inf` / `-inf`. Both spellings parse
+  back into a float, and `Infinity` is what Trino, its JDBC driver and
+  PostgreSQL emit; the ODBC spec defines no textual form for a non-finite
+  float. `NaN` is unchanged. This follows a `stackable-odbc-core` change to its
+  shared coercion path.
 
 - `SQLSetStmtAttr(SQL_ATTR_CURSOR_TYPE)` with an unsupported cursor type now
   substitutes `SQL_CURSOR_FORWARD_ONLY` and returns `SQL_SUCCESS_WITH_INFO`
@@ -168,6 +224,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `SQLForeignKeys` reported `PKCOLUMN_NAME` as NULL for a foreign key declared
+  without an explicit column list (`REFERENCES parent`), a column the spec
+  marks "not NULL". SQLite defines the implicit target as the parent table's
+  primary key, so the name is now resolved from it — per position, for a
+  composite key — rather than dropped. `PRAGMA foreign_key_list` leaves its
+  `to` column NULL in that case, which is what the old code passed straight
+  through.
+
+- `SQLStatistics` with a null `TableName` returned `SQL_SUCCESS` and an empty
+  result set, which an application reads as "that table has no indexes". It is
+  now `HY009`. `SQLStatistics` is one of only two catalog functions whose
+  null-`TableName` clause carries no **(DM)** marker, so the driver owns it
+  rather than the Driver Manager. An empty-string `TableName` is still a legal
+  argument naming no table, and still returns no rows.
+
+- Every catalog result set is now sorted into the order its spec page
+  mandates, by `stackable-odbc-core`, which holds the rows. `SQLTables`,
+  `SQLColumns`, `SQLPrimaryKeys`, `SQLForeignKeys` and `SQLSpecialColumns` were
+  previously returned in whatever order the underlying `sqlite_master` or
+  `PRAGMA` query produced, which matched the spec only by accident;
+  `SQLStatistics` sorted itself. Integer key columns (`KEY_SEQ`,
+  `ORDINAL_POSITION`) compare numerically, so a table with more than nine
+  columns no longer sorts column 10 before column 2.
+
+- `SQLDescribeCol` reported `2^64 - 4` as the column size of an unbounded
+  column instead of `0`, `SQLGetInfoW` wrote four bytes into the two-byte
+  buffer an application supplies for four `SQLUSMALLINT` info types, and a
+  parameter bound `SQL_PARAM_OUTPUT` had its buffer read as an input value.
+  `SQLAllocHandle`, `SQLFreeHandle` and `SQLFreeStmt` now post a diagnostic on
+  failure rather than returning a bare `SQL_ERROR` with nothing for
+  `SQLGetDiagRec` to report. All follow `stackable-odbc-core` fixes.
+
 - `SQL_MAX_COLUMNS_IN_SELECT`, `_IN_TABLE`, `_IN_GROUP_BY`, `_IN_ORDER_BY`,
   `_IN_INDEX`, `SQL_MAX_STATEMENT_LEN` and `SQL_MAX_ROW_SIZE` now report the
   connection's actual limits instead of `0`. The spec allows `0` for "no
@@ -184,6 +272,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of the generic identifier length. This driver supports neither
   catalogs nor schemas, so there is no name for these to bound; they were
   stating a maximum length for something the same driver says does not exist.
+  Both answers are derived from `supports_catalogs` / `supports_schemas` rather
+  than pinned to `0`, so they stay right if either hook flips — and because
+  those hooks are per-connection, the `0` applies once a connection is open.
+  Asked before `SQLDriverConnectW`, both fall through to
+  `stackable-odbc-core`'s generic identifier length, the same answer it gives
+  pre-connect for every other `SQL_MAX_*_NAME_LEN`.
 
 - `SQL_SUBQUERIES` no longer claims `SQL_SQ_QUANTIFIED`. `< ALL`, `< ANY` and
   `< SOME` are all syntax errors in SQLite, which this driver already recorded
