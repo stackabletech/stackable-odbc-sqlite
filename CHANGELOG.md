@@ -70,6 +70,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `SQL_QUOTED_IDENTIFIER_CASE` reports `SQL_IC_MIXED` instead of
+  `SQL_IC_SENSITIVE`. In SQLite, double quotes are a *delimiter* — they let a
+  keyword or a name with punctuation be used as an identifier — and do not
+  switch on case-sensitive matching the way they do in a SQL-92 conformant
+  DBMS: a table created as `"MixedCase"` is found by `"mixedcase"`, and the
+  catalog stores the name with the case it was written in. The old value told
+  an application that `"T"` and `"t"` were different tables. Both halves of the
+  new claim — case-insensitive matching and mixed-case storage — are probed
+  against the bundled library rather than read off the documentation.
+
+- `SQL_SPECIAL_CHARACTERS` reports `$` instead of the empty string. SQLite's
+  tokenizer treats `$` as an identifier character, so `a$b` parses undelimited
+  and round-trips through `sqlite_master` unchanged. An application reads this
+  info type to decide when it must quote, and the empty string had it quoting a
+  name that needs no quoting. The empty string was `stackable-odbc-core`'s
+  default rather than a claim this driver ever made; it is now a per-connection
+  `Backend` hook, and every candidate character is executed against the bundled
+  library, the rejected ones included.
+
+- `SQL_CURSOR_SENSITIVITY` reports `SQL_UNSPECIFIED` instead of
+  `SQL_INSENSITIVE`, and `SQL_FORWARD_ONLY_CURSOR_ATTRIBUTES2` reports
+  `SQL_CA2_READ_ONLY_CONCURRENCY` instead of `0`. Both describe
+  `stackable-odbc-core`'s own fetch path rather than SQLite, and both now come
+  from core: insensitivity would be a promise that no other cursor's changes
+  become visible, which core does not make about rows it has not read yet,
+  while `0` for the second denied the one concurrency
+  `SQLSetStmtAttr(SQL_ATTR_CONCURRENCY)` actually accepts. This follows a
+  `stackable-odbc-core` change.
+
 - `SQLDescribeCol` and `SQLColAttribute` report each result column's real
   nullability instead of claiming every column is nullable. A column declared
   `NOT NULL` is now `SQL_NO_NULLS`, a plain table column `SQL_NULLABLE`, and a
@@ -223,6 +252,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it describes against the bundled library, not assumed from release notes.
 
 ### Fixed
+
+- `SQLRowCount` reported `0` after a `CREATE TABLE`, `DROP TABLE`, `ALTER
+  TABLE`, `BEGIN`, `COMMIT`, `PRAGMA` or `VACUUM`, where the spec's
+  affected-row count does not apply at all. The three answers are now distinct:
+  a count for a searched INSERT / UPDATE / DELETE, the materialised size of a
+  result set, and *no count* for everything else. This matters beyond
+  tidiness — `stackable-odbc-core` reads a zero-column statement reporting a
+  counted zero as `SQL_NO_DATA`, per `SQLExecDirect`'s Comments, so every DDL
+  statement this driver ran returned `SQL_NO_DATA` to the application instead
+  of `SQL_SUCCESS`. A searched DELETE that matches nothing still reports `0`,
+  which is the case the spec reserves `SQL_NO_DATA` for.
+
+  The same fix removes a stale count: `sqlite3_changes()` reports the rows
+  touched by the *most recently completed* INSERT, UPDATE or DELETE, so a
+  `CREATE TABLE` run straight after a three-row `INSERT` was handed that `3`
+  and reported it.
 
 - `SQLForeignKeys` reported `PKCOLUMN_NAME` as NULL for a foreign key declared
   without an explicit column list (`REFERENCES parent`), a column the spec

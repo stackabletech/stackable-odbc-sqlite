@@ -4,10 +4,11 @@
 //! query helpers those functions share.
 
 use stackable_odbc_core::types::{
-    ColumnRow, ForeignKeyRow, IdentifierType, Nullable, PrimaryKeyRow, SQL_CASCADE,
-    SQL_INDEX_OTHER, SQL_NO_ACTION, SQL_PC_NOT_PSEUDO, SQL_PC_PSEUDO, SQL_RESTRICT,
-    SQL_SET_DEFAULT, SQL_SET_NULL, SQL_TABLE_STAT, Scope, SpecialColumnRow, SqlDataType,
-    StatisticsRow, TableRow,
+    ColumnRow, ColumnsQuery, ForeignKeyRow, ForeignKeysQuery, IdentifierType, Nullable,
+    PrimaryKeyRow, PrimaryKeysQuery, SQL_CASCADE, SQL_INDEX_OTHER, SQL_NO_ACTION,
+    SQL_PC_NOT_PSEUDO, SQL_PC_PSEUDO, SQL_RESTRICT, SQL_SET_DEFAULT, SQL_SET_NULL, SQL_TABLE_STAT,
+    Scope, SpecialColumnRow, SpecialColumnsQuery, SqlDataType, StatisticsQuery, StatisticsRow,
+    TableRow, TablesQuery,
 };
 
 /// Column indices for `PRAGMA table_info(table)`.
@@ -168,12 +169,13 @@ fn build_column_row(
         i32::MAX
     });
 
-    ColumnRow {
-        catalog: None,
-        schema: None,
-        table_name: table_name.to_string(),
-        column_name: col_name.to_string(),
-        data_type: sql_type.0,
+    // `catalog`, `schema`, `remarks` and `sql_datetime_sub` are left at their
+    // NULL default: SQLite has no catalogs or schemas, no column comments, and
+    // no datetime subcode to report.
+    ColumnRow::default()
+        .table_name(table_name)
+        .column_name(col_name)
+        .data_type(sql_type.0)
         // Spec (SQLColumns.TYPE_NAME / SQL_DESC_TYPE_NAME): both list bare
         // examples ("CHAR", "VARCHAR", ...), not declarations, so `col_type`
         // ("VARCHAR(50)") matches no `SQLGetTypeInfo` row.
@@ -181,20 +183,17 @@ fn build_column_row(
         // execute.rs) returns the bare name that does; the declared length
         // is still carried above via COLUMN_SIZE (`precision`), just not the
         // name.
-        type_name: sqlite_bare_type_name(sql_type).to_string(),
-        column_size: Some(column_size),
-        buffer_length: Some(0),
-        decimal_digits: Some(scale),
-        num_prec_radix: if is_numeric { Some(10) } else { None },
-        nullable: nullable.into(),
-        remarks: None,
-        column_def: dflt_value.map(str::to_string),
-        sql_data_type: sql_type.0,
-        sql_datetime_sub: None,
-        char_octet_length,
-        ordinal_position,
-        is_nullable: Some(nullable.as_is_nullable_str().to_string()),
-    }
+        .type_name(sqlite_bare_type_name(sql_type))
+        .column_size(column_size)
+        .buffer_length(0)
+        .decimal_digits(scale)
+        .num_prec_radix(if is_numeric { Some(10) } else { None })
+        .nullable(i16::from(nullable))
+        .column_def(dflt_value.map(str::to_string))
+        .sql_data_type(sql_type.0)
+        .char_octet_length(char_octet_length)
+        .ordinal_position(ordinal_position)
+        .is_nullable(nullable.as_is_nullable_str().to_string())
 }
 
 /// Return the base tables to inspect: the exact named table if one is given,
@@ -252,16 +251,25 @@ const TABLE_TYPE_VIEW: &str = "VIEW";
 /// TABLE_TYPE, TABLE_CAT, TABLE_SCHEM, TABLE_NAME.
 pub(super) fn tables(
     conn: &SqliteConnection,
-    _catalog: Option<&str>,
-    _schema: Option<&str>,
-    table: Option<&str>,
-    table_type: Option<&str>,
+    query: &TablesQuery<'_>,
 ) -> Result<Vec<TableRow>, SqliteError> {
     // ODBC spec: empty string is a valid (but useless for SQLite) filter; treat
     // as no-filter. Treat "%" (match-all wildcard) as no-filter too, to avoid
     // LIKE '%' overhead -- an ordinary query is all that can arrive now.
-    let table = table.filter(|s| !s.is_empty() && *s != "%");
-    let table_type = table_type.filter(|s| !s.is_empty() && *s != "%");
+    let table = query.table().filter(|s| !s.is_empty() && *s != "%");
+
+    // `TableType` is a value list, not a pattern, and core has already split it
+    // on commas and stripped the optional single quotes -- so what arrives is
+    // the parsed values, with empty ones already dropped. A lone "%" still
+    // reaches here: the `SQL_ALL_TABLE_TYPES` enumeration core answers itself
+    // additionally requires the other three arguments to be empty strings, so
+    // "%" alongside a table pattern is an ordinary query. It is not a pattern
+    // either, and no table type is literally named "%", so read it as the
+    // no-filter an application sending "%" everywhere means.
+    let table_types: &[String] = match query.table_types() {
+        [only] if only == "%" => &[],
+        types => types,
+    };
 
     let db = conn.conn.lock().map_err(|e| SqliteError::General {
         message: format!("Mutex poisoned: {e}"),
@@ -291,21 +299,20 @@ pub(super) fn tables(
             TABLE_TYPE_TABLE
         };
 
-        // Filter by table_type if specified (comma-separated list, not a pattern).
-        if let Some(tt) = table_type {
-            let allowed: Vec<&str> = tt.split(',').map(|s| s.trim().trim_matches('\'')).collect();
-            if !allowed.iter().any(|a| a.eq_ignore_ascii_case(odbc_type)) {
-                continue;
-            }
+        // Filter by table type if the value list named any.
+        if !table_types.is_empty()
+            && !table_types
+                .iter()
+                .any(|a| a.eq_ignore_ascii_case(odbc_type))
+        {
+            continue;
         }
 
-        rows.push(TableRow {
-            catalog: None,
-            schema: None,
-            name: Some(name),
-            table_type: Some(odbc_type.to_string()),
-            remarks: None,
-        });
+        rows.push(
+            TableRow::default()
+                .name(name)
+                .table_type(odbc_type.to_string()),
+        );
     }
 
     Ok(rows)
@@ -313,14 +320,11 @@ pub(super) fn tables(
 
 pub(super) fn columns(
     conn: &SqliteConnection,
-    _catalog: Option<&str>,
-    _schema: Option<&str>,
-    table: Option<&str>,
-    column: Option<&str>,
+    query: &ColumnsQuery<'_>,
 ) -> Result<Vec<ColumnRow>, SqliteError> {
     // Same normalization as tables(): empty string and "%" both mean "no filter".
-    let table = table.filter(|s| !s.is_empty() && *s != "%");
-    let column = column.filter(|s| !s.is_empty() && *s != "%");
+    let table = query.table().filter(|s| !s.is_empty() && *s != "%");
+    let column = query.column().filter(|s| !s.is_empty() && *s != "%");
 
     let db = conn.conn.lock().map_err(|e| SqliteError::General {
         message: format!("Mutex poisoned: {e}"),
@@ -395,16 +399,14 @@ pub(super) fn columns(
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlprimarykeys-function>
 pub(super) fn primary_keys(
     conn: &SqliteConnection,
-    _catalog: Option<&str>,
-    _schema: Option<&str>,
-    table: Option<&str>,
+    query: &PrimaryKeysQuery<'_>,
 ) -> Result<Vec<PrimaryKeyRow>, SqliteError> {
     let db = conn.conn.lock().map_err(|e| SqliteError::General {
         message: format!("Mutex poisoned: {e}"),
     })?;
 
     // Collect table names to query (either the specific one or all tables).
-    let table_names = tables_to_inspect(&db, table).map_err(map_sqlite_error)?;
+    let table_names = tables_to_inspect(&db, query.table()).map_err(map_sqlite_error)?;
 
     let mut result_rows: Vec<PrimaryKeyRow> = Vec::new();
     for table_name in &table_names {
@@ -436,17 +438,17 @@ pub(super) fn primary_keys(
         // and a second ordering in the backend is one more place for it to be
         // wrong.
         for (key_seq, col_name) in pk_cols {
-            result_rows.push(PrimaryKeyRow {
-                catalog: None,
-                schema: None,
-                table_name: table_name.clone(),
-                column_name: col_name,
-                key_seq: i16::try_from(key_seq).unwrap_or_else(|_| {
-                    tracing::warn!(key_seq, "key sequence exceeds i16");
-                    i16::MAX
-                }),
-                pk_name: None, // not available in SQLite
-            });
+            // `pk_name` is left NULL: SQLite does not record a primary key
+            // constraint name.
+            result_rows.push(
+                PrimaryKeyRow::default()
+                    .table_name(table_name.clone())
+                    .column_name(col_name)
+                    .key_seq(i16::try_from(key_seq).unwrap_or_else(|_| {
+                        tracing::warn!(key_seq, "key sequence exceeds i16");
+                        i16::MAX
+                    })),
+            );
         }
     }
 
@@ -461,19 +463,16 @@ pub(super) fn primary_keys(
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlforeignkeys-function>
 pub(super) fn foreign_keys(
     conn: &SqliteConnection,
-    _pk_catalog: Option<&str>,
-    _pk_schema: Option<&str>,
-    pk_table: Option<&str>,
-    _fk_catalog: Option<&str>,
-    _fk_schema: Option<&str>,
-    fk_table: Option<&str>,
+    query: &ForeignKeysQuery<'_>,
 ) -> Result<Vec<ForeignKeyRow>, SqliteError> {
+    let pk_table = query.pk_table();
+
     let db = conn.conn.lock().map_err(|e| SqliteError::General {
         message: format!("Mutex poisoned: {e}"),
     })?;
 
     // Which FK tables do we query?
-    let fk_table_names = tables_to_inspect(&db, fk_table).map_err(map_sqlite_error)?;
+    let fk_table_names = tables_to_inspect(&db, query.fk_table()).map_err(map_sqlite_error)?;
 
     let mut result_rows: Vec<ForeignKeyRow> = Vec::new();
 
@@ -524,25 +523,22 @@ pub(super) fn foreign_keys(
                 }),
             };
 
-            result_rows.push(ForeignKeyRow {
-                pk_catalog: None,
-                pk_schema: None,
-                pk_table_name: referenced_table,
-                pk_column_name,
-                fk_catalog: None,
-                fk_schema: None,
-                fk_table_name: fk_tbl.clone(),
-                fk_column_name: from_col,
-                key_seq: i16::try_from(seq + 1).unwrap_or_else(|_| {
-                    tracing::warn!(seq, "key sequence exceeds i16");
-                    i16::MAX
-                }), // 1-based
-                update_rule: Some(fk_action_to_odbc(&on_update)),
-                delete_rule: Some(fk_action_to_odbc(&on_delete)),
-                fk_name: None, // not in SQLite's PRAGMA
-                pk_name: None, // not in SQLite's PRAGMA
-                deferrability: None,
-            });
+            // `fk_name`, `pk_name` and `deferrability` are left NULL: SQLite's
+            // PRAGMA reports none of the three.
+            result_rows.push(
+                ForeignKeyRow::default()
+                    .pk_table_name(referenced_table)
+                    .pk_column_name(pk_column_name)
+                    .fk_table_name(fk_tbl.clone())
+                    .fk_column_name(from_col)
+                    // 1-based
+                    .key_seq(i16::try_from(seq + 1).unwrap_or_else(|_| {
+                        tracing::warn!(seq, "key sequence exceeds i16");
+                        i16::MAX
+                    }))
+                    .update_rule(fk_action_to_odbc(&on_update))
+                    .delete_rule(fk_action_to_odbc(&on_delete)),
+            );
         }
     }
 
@@ -587,16 +583,15 @@ fn parent_pk_column(
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlstatistics-function>
 pub(super) fn statistics(
     conn: &SqliteConnection,
-    _catalog: Option<&str>,
-    _schema: Option<&str>,
-    table: Option<&str>,
-    unique_only: bool,
+    query: &StatisticsQuery<'_>,
 ) -> Result<Vec<StatisticsRow>, SqliteError> {
     use stackable_odbc_core::types::{SQL_FALSE, SQL_TRUE};
 
+    let unique_only = query.unique_only();
+
     // SQLStatistics.TableName cannot be a search pattern; an absent name has no
     // table to describe, so there are no rows to report.
-    let Some(table) = table.filter(|s| !s.is_empty()) else {
+    let Some(table) = query.table().filter(|s| !s.is_empty()) else {
         return Ok(Vec::new());
     };
 
@@ -609,21 +604,12 @@ pub(super) fn statistics(
 
     // The table-stat row. TABLE_NAME and TYPE are the NOT NULL columns;
     // everything index-specific is NULL.
-    let mut rows: Vec<StatisticsRow> = vec![StatisticsRow {
-        catalog: None,
-        schema: None,
-        table_name: table.to_string(),
-        non_unique: None,
-        index_qualifier: None,
-        index_name: None,
-        index_type: SQL_TABLE_STAT,
-        ordinal_position: None,
-        column_name: None,
-        asc_or_desc: None,
-        cardinality,
-        pages: None,
-        filter_condition: None,
-    }];
+    let mut rows: Vec<StatisticsRow> = vec![
+        StatisticsRow::default()
+            .table_name(table)
+            .index_type(SQL_TABLE_STAT)
+            .cardinality(cardinality),
+    ];
 
     // Enumerate indexes. Use the pragma_ TVF form so the name binds safely.
     let mut list_stmt = db
@@ -679,30 +665,29 @@ pub(super) fn statistics(
                 .get(pragma_index_xinfo_col::DESC)
                 .map_err(map_sqlite_error)?;
 
-            rows.push(StatisticsRow {
-                catalog: None,
-                schema: None,
-                table_name: table.to_string(),
-                non_unique: Some(if *is_unique {
-                    SQL_FALSE as i16
-                } else {
-                    SQL_TRUE as i16
-                }),
-                index_qualifier: None,
-                index_name: Some(index_name.clone()),
-                index_type: SQL_INDEX_OTHER,
-                ordinal_position: Some(ordinal),
-                // "" for an expression index, which has no column name.
-                column_name: Some(col_name.unwrap_or_default()),
-                asc_or_desc: Some(if desc != 0 { "D" } else { "A" }.into()),
-                cardinality: None,
-                pages: None,
-                filter_condition: if *is_partial {
-                    Some(String::new())
-                } else {
-                    None
-                },
-            });
+            // `index_qualifier`, `cardinality` and `pages` are left NULL: the
+            // first has no meaning without catalogs, and the latter two belong
+            // to the table-stat row above.
+            rows.push(
+                StatisticsRow::default()
+                    .table_name(table)
+                    .non_unique(if *is_unique {
+                        SQL_FALSE as i16
+                    } else {
+                        SQL_TRUE as i16
+                    })
+                    .index_name(index_name.clone())
+                    .index_type(SQL_INDEX_OTHER)
+                    .ordinal_position(ordinal)
+                    // "" for an expression index, which has no column name.
+                    .column_name(col_name.unwrap_or_default())
+                    .asc_or_desc(if desc != 0 { "D" } else { "A" }.to_string())
+                    .filter_condition(if *is_partial {
+                        Some(String::new())
+                    } else {
+                        None
+                    }),
+            );
         }
     }
 
@@ -735,22 +720,21 @@ fn table_cardinality_from_stat1(db: &rusqlite::Connection, table: &str) -> Optio
 /// the identifier's guaranteed scope yields an empty result set.
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlspecialcolumns-function>
+/// `query.nullable()` is not read: every identifier this reports is NOT NULL,
+/// so the `Nullable` filter can never exclude a row.
 pub(super) fn special_columns(
     conn: &SqliteConnection,
-    identifier_type: IdentifierType,
-    _catalog: Option<&str>,
-    _schema: Option<&str>,
-    table: Option<&str>,
-    scope: Scope,
-    _nullable: Nullable, // our identifiers are all NOT NULL -> Nullable never filters
+    query: &SpecialColumnsQuery<'_>,
 ) -> Result<Vec<SpecialColumnRow>, SqliteError> {
     let empty = || Ok(Vec::new());
 
+    let scope = query.scope();
+
     // ROWVER: SQLite has no auto-updated columns.
-    if matches!(identifier_type, IdentifierType::RowVer) {
+    if matches!(query.identifier_type(), IdentifierType::RowVer) {
         return empty();
     }
-    let Some(table) = table.filter(|s| !s.is_empty()) else {
+    let Some(table) = query.table().filter(|s| !s.is_empty()) else {
         return empty();
     };
 
@@ -863,17 +847,16 @@ fn special_column_row(name: &str, decl_type: &str, pseudo: i16, scope: Scope) ->
     let sql_type = sqlite_type_to_sql_data_type(decl_type);
     let column_size = i32::try_from(sqlite_declared_type_precision(decl_type)).unwrap_or(i32::MAX);
     let scale = sqlite_declared_type_scale(decl_type);
-    SpecialColumnRow {
-        scope: Some(scope.into()),
-        column_name: name.to_string(),
-        data_type: sql_type.0,
-        type_name: sqlite_bare_type_name(sql_type).to_string(),
-        column_size: Some(column_size),
+    SpecialColumnRow::default()
+        .scope(i16::from(scope))
+        .column_name(name)
+        .data_type(sql_type.0)
+        .type_name(sqlite_bare_type_name(sql_type))
+        .column_size(column_size)
         // BUFFER_LENGTH (approx: transfer octet length)
-        buffer_length: Some(column_size),
-        decimal_digits: if scale > 0 { Some(scale) } else { None },
-        pseudo_column: Some(pseudo),
-    }
+        .buffer_length(column_size)
+        .decimal_digits(if scale > 0 { Some(scale) } else { None })
+        .pseudo_column(pseudo)
 }
 
 /// Build one SQLSpecialColumns row for the 64-bit rowid pseudo-column / an
@@ -881,16 +864,15 @@ fn special_column_row(name: &str, decl_type: &str, pseudo: i16, scope: Scope) ->
 fn special_column_row_bigint(name: &str, pseudo: i16, scope: Scope) -> SpecialColumnRow {
     let sql_type = SqlDataType::EXT_BIG_INT;
     let column_size = i32::try_from(default_precision_for_type(sql_type)).unwrap_or(i32::MAX);
-    SpecialColumnRow {
-        scope: Some(scope.into()),
-        column_name: name.to_string(),
-        data_type: sql_type.0,
-        type_name: sqlite_bare_type_name(sql_type).to_string(),
-        column_size: Some(column_size),
-        buffer_length: Some(8), // 8 bytes for a 64-bit integer
-        decimal_digits: None,   // not applicable to integers
-        pseudo_column: Some(pseudo),
-    }
+    // `decimal_digits` is left NULL: not applicable to integers.
+    SpecialColumnRow::default()
+        .scope(i16::from(scope))
+        .column_name(name)
+        .data_type(sql_type.0)
+        .type_name(sqlite_bare_type_name(sql_type))
+        .column_size(column_size)
+        .buffer_length(8) // 8 bytes for a 64-bit integer
+        .pseudo_column(pseudo)
 }
 
 /// True if `table` is an ordinary rowid table. Probes `SELECT rowid`: a
@@ -962,7 +944,7 @@ mod tests {
     #[test]
     fn tables_returns_all_tables_and_views() {
         let conn = setup_test_db();
-        let rows = tables(&conn, None, None, None, None).unwrap();
+        let rows = tables(&conn, &TablesQuery::default()).unwrap();
 
         let names: Vec<&str> = rows.iter().filter_map(|r| r.name.as_deref()).collect();
         for expected in ["empty_table", "types_test", "types_view", "parent", "child"] {
@@ -992,7 +974,7 @@ mod tests {
         let conn = setup_test_db();
         let declared: Vec<String> = table_types().iter().map(|t| t.to_string()).collect();
 
-        let mut reported: Vec<String> = tables(&conn, None, None, None, None)
+        let mut reported: Vec<String> = tables(&conn, &TablesQuery::default())
             .unwrap()
             .into_iter()
             .filter_map(|r| r.table_type)
@@ -1011,7 +993,14 @@ mod tests {
     #[test]
     fn tables_filter_by_table_type() {
         let conn = setup_test_db();
-        let rows = tables(&conn, None, None, None, Some(TABLE_TYPE_TABLE)).unwrap();
+        // Core hands the backend the already-parsed value list, so the test
+        // supplies one rather than the raw comma-separated argument.
+        let only_tables = [TABLE_TYPE_TABLE.to_string()];
+        let rows = tables(
+            &conn,
+            &TablesQuery::default().with_table_types(&only_tables[..]),
+        )
+        .unwrap();
         let names: Vec<&str> = rows.iter().filter_map(|r| r.name.as_deref()).collect();
         assert!(names.contains(&"empty_table"));
         assert!(names.contains(&"types_test"));
@@ -1021,7 +1010,7 @@ mod tests {
     #[test]
     fn tables_filter_by_name() {
         let conn = setup_test_db();
-        let rows = tables(&conn, None, None, Some("types_test"), None).unwrap();
+        let rows = tables(&conn, &TablesQuery::default().with_table("types_test")).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name.as_deref(), Some("types_test"));
     }
@@ -1032,7 +1021,7 @@ mod tests {
         // `empty\_table` with ESCAPE '\' means a literal underscore: matches
         // exactly "empty_table". Without ESCAPE the `_` is a wildcard and the
         // stray backslash matches nothing.
-        let rows = tables(&conn, None, None, Some("empty\\_table"), None).unwrap();
+        let rows = tables(&conn, &TablesQuery::default().with_table("empty\\_table")).unwrap();
         let names: Vec<&str> = rows.iter().filter_map(|r| r.name.as_deref()).collect();
         assert_eq!(names, vec!["empty_table"]);
     }
@@ -1044,7 +1033,16 @@ mod tests {
         // treats "%" as `SQL_ALL_TABLE_TYPES` when the other three arguments
         // are empty strings, so this reaches the backend as an ordinary query
         // and must list actual tables and views.
-        let rows = tables(&conn, Some(""), Some(""), Some("%"), Some("%")).unwrap();
+        let percent = ["%".to_string()];
+        let rows = tables(
+            &conn,
+            &TablesQuery::default()
+                .with_catalog("")
+                .with_schema("")
+                .with_table("%")
+                .with_table_types(&percent[..]),
+        )
+        .unwrap();
         let names: Vec<&str> = rows.iter().filter_map(|r| r.name.as_deref()).collect();
         assert!(
             names.contains(&"types_test"),
@@ -1055,7 +1053,7 @@ mod tests {
     #[test]
     fn columns_returns_correct_columns() {
         let conn = setup_test_db();
-        let rows = columns(&conn, None, None, Some("types_test"), None).unwrap();
+        let rows = columns(&conn, &ColumnsQuery::default().with_table("types_test")).unwrap();
         let names: Vec<&str> = rows.iter().map(|r| r.column_name.as_str()).collect();
         assert_eq!(names, vec!["id", "val", "label"]);
         // ORDINAL_POSITION is 1-based and is what core sorts on.
@@ -1066,7 +1064,13 @@ mod tests {
     #[test]
     fn columns_filter_by_column_name() {
         let conn = setup_test_db();
-        let rows = columns(&conn, None, None, Some("types_test"), Some("val")).unwrap();
+        let rows = columns(
+            &conn,
+            &ColumnsQuery::default()
+                .with_table("types_test")
+                .with_column("val"),
+        )
+        .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].column_name, "val");
     }
@@ -1076,7 +1080,13 @@ mod tests {
         let conn = setup_test_db();
         // types_test columns: id, val, label. "%l%" matches val and label.
         // Under the old exact-match filter this returned zero rows.
-        let rows = columns(&conn, None, None, Some("types_test"), Some("%l%")).unwrap();
+        let rows = columns(
+            &conn,
+            &ColumnsQuery::default()
+                .with_table("types_test")
+                .with_column("%l%"),
+        )
+        .unwrap();
         let mut names: Vec<&str> = rows.iter().map(|r| r.column_name.as_str()).collect();
         names.sort();
         assert_eq!(names, vec!["label", "val"]);
@@ -1088,7 +1098,7 @@ mod tests {
         // empty_table: id INTEGER PRIMARY KEY, name TEXT NOT NULL
         // SQLite PRAGMA table_info reports notnull=0 for INTEGER PRIMARY KEY (PK does not imply
         // NOT NULL in SQLite's PRAGMA), and notnull=1 for the explicit NOT NULL constraint.
-        let rows = columns(&conn, None, None, Some("empty_table"), None).unwrap();
+        let rows = columns(&conn, &ColumnsQuery::default().with_table("empty_table")).unwrap();
         assert_eq!(rows.len(), 2);
 
         let nullable_of = |name: &str| {
@@ -1145,7 +1155,7 @@ mod tests {
     #[test]
     fn primary_keys_returns_pk_column() {
         let conn = setup_test_db();
-        let rows = primary_keys(&conn, None, None, Some("parent")).unwrap();
+        let rows = primary_keys(&conn, &PrimaryKeysQuery::default().with_table("parent")).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].table_name, "parent");
         assert_eq!(rows[0].column_name, "pk");
@@ -1156,23 +1166,17 @@ mod tests {
     fn primary_keys_no_pk_returns_empty() {
         let conn = setup_test_db();
         // types_test has no PRIMARY KEY constraint
-        let rows = primary_keys(&conn, None, None, Some("types_test")).unwrap();
+        let rows =
+            primary_keys(&conn, &PrimaryKeysQuery::default().with_table("types_test")).unwrap();
         assert!(rows.is_empty());
     }
 
     #[test]
     fn foreign_keys_by_fk_table() {
         let conn = setup_test_db();
-        let rows = foreign_keys(
-            &conn,
-            None,
-            None,
-            None, // pk table: unfiltered
-            None,
-            None,
-            Some("child"), // fk table: child
-        )
-        .unwrap();
+        // pk table unfiltered; fk table `child`.
+        let rows =
+            foreign_keys(&conn, &ForeignKeysQuery::default().with_fk_table("child")).unwrap();
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].pk_table_name, "parent");
@@ -1186,23 +1190,17 @@ mod tests {
     fn foreign_keys_no_fk_returns_empty() {
         let conn = setup_test_db();
         // parent has no outgoing foreign keys
-        let rows = foreign_keys(&conn, None, None, None, None, None, Some("parent")).unwrap();
+        let rows =
+            foreign_keys(&conn, &ForeignKeysQuery::default().with_fk_table("parent")).unwrap();
         assert!(rows.is_empty());
     }
 
     #[test]
     fn foreign_keys_by_pk_table() {
         let conn = setup_test_db();
-        let rows = foreign_keys(
-            &conn,
-            None,
-            None,
-            Some("parent"), // pk table: parent
-            None,
-            None,
-            None, // fk table: unfiltered
-        )
-        .unwrap();
+        // pk table `parent`; fk table unfiltered.
+        let rows =
+            foreign_keys(&conn, &ForeignKeysQuery::default().with_pk_table("parent")).unwrap();
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].pk_table_name, "parent");
@@ -1225,7 +1223,7 @@ mod tests {
         .unwrap();
         let conn = wrap(conn);
 
-        let rows = foreign_keys(&conn, None, None, None, None, None, Some("c")).unwrap();
+        let rows = foreign_keys(&conn, &ForeignKeysQuery::default().with_fk_table("c")).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].pk_table_name, "p");
         assert_eq!(
@@ -1246,7 +1244,8 @@ mod tests {
         .unwrap();
         let conn = wrap(conn);
 
-        let mut rows = foreign_keys(&conn, None, None, None, None, None, Some("c")).unwrap();
+        let mut rows =
+            foreign_keys(&conn, &ForeignKeysQuery::default().with_fk_table("c")).unwrap();
         rows.sort_by_key(|r| r.key_seq);
         assert_eq!(rows.len(), 2);
         assert_eq!(
@@ -1273,7 +1272,7 @@ mod tests {
     #[test]
     fn statistics_reports_a_table_stat_row_and_one_row_per_index_key_column() {
         let conn = setup_stats_db();
-        let rows = statistics(&conn, None, None, Some("t"), false).unwrap();
+        let rows = statistics(&conn, &StatisticsQuery::new(false).with_table("t")).unwrap();
 
         let stat_rows: Vec<&StatisticsRow> = rows
             .iter()
@@ -1314,7 +1313,7 @@ mod tests {
     #[test]
     fn statistics_unique_only_drops_non_unique_indexes() {
         let conn = setup_stats_db();
-        let rows = statistics(&conn, None, None, Some("t"), true).unwrap();
+        let rows = statistics(&conn, &StatisticsQuery::new(true).with_table("t")).unwrap();
         // table-stat row + the unique index's single column only.
         assert_eq!(rows.len(), 2);
         assert_eq!(
@@ -1336,7 +1335,7 @@ mod tests {
             .unwrap()
             .execute_batch("CREATE TABLE plain (x INTEGER);")
             .unwrap();
-        let rows = statistics(&conn, None, None, Some("plain"), false).unwrap();
+        let rows = statistics(&conn, &StatisticsQuery::new(false).with_table("plain")).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].index_type, SQL_TABLE_STAT);
     }
@@ -1345,7 +1344,7 @@ mod tests {
     fn statistics_with_no_table_returns_empty() {
         let conn = setup_stats_db();
         assert!(
-            statistics(&conn, None, None, None, false)
+            statistics(&conn, &StatisticsQuery::new(false))
                 .unwrap()
                 .is_empty()
         );
@@ -1361,7 +1360,7 @@ mod tests {
         .unwrap();
         let conn = wrap(conn);
 
-        let rows = statistics(&conn, None, None, Some("tp"), false).unwrap();
+        let rows = statistics(&conn, &StatisticsQuery::new(false).with_table("tp")).unwrap();
         // table-stat row + a single index-column row: exactly one index.
         assert_eq!(rows.len(), 2);
         let index = rows
@@ -1381,7 +1380,7 @@ mod tests {
         .unwrap();
         let conn = wrap(conn);
 
-        let rows = statistics(&conn, None, None, Some("te"), false).unwrap();
+        let rows = statistics(&conn, &StatisticsQuery::new(false).with_table("te")).unwrap();
         // table-stat row + a single index-column row: exactly one index.
         assert_eq!(rows.len(), 2);
         let index = rows
@@ -1407,12 +1406,12 @@ mod tests {
         let conn = setup_specialcols_db();
         let rows = special_columns(
             &conn,
-            IdentifierType::BestRowId,
-            None,
-            None,
-            Some("with_int_pk"),
-            Scope::CurRow,
-            Nullable::SqlNullable,
+            &SpecialColumnsQuery::new(
+                IdentifierType::BestRowId,
+                Scope::CurRow,
+                Nullable::SqlNullable,
+            )
+            .with_table("with_int_pk"),
         )
         .unwrap();
 
@@ -1432,12 +1431,12 @@ mod tests {
         let conn = setup_specialcols_db();
         let rows = special_columns(
             &conn,
-            IdentifierType::BestRowId,
-            None,
-            None,
-            Some("no_pk"),
-            Scope::CurRow,
-            Nullable::SqlNullable,
+            &SpecialColumnsQuery::new(
+                IdentifierType::BestRowId,
+                Scope::CurRow,
+                Nullable::SqlNullable,
+            )
+            .with_table("no_pk"),
         )
         .unwrap();
 
@@ -1453,12 +1452,12 @@ mod tests {
         let conn = setup_specialcols_db();
         let rows = special_columns(
             &conn,
-            IdentifierType::BestRowId,
-            None,
-            None,
-            Some("without_rowid"),
-            Scope::CurRow,
-            Nullable::SqlNullable,
+            &SpecialColumnsQuery::new(
+                IdentifierType::BestRowId,
+                Scope::CurRow,
+                Nullable::SqlNullable,
+            )
+            .with_table("without_rowid"),
         )
         .unwrap();
 
@@ -1473,12 +1472,12 @@ mod tests {
         assert!(
             special_columns(
                 &conn,
-                IdentifierType::RowVer,
-                None,
-                None,
-                Some("with_int_pk"),
-                Scope::CurRow,
-                Nullable::SqlNullable,
+                &SpecialColumnsQuery::new(
+                    IdentifierType::RowVer,
+                    Scope::CurRow,
+                    Nullable::SqlNullable,
+                )
+                .with_table("with_int_pk"),
             )
             .unwrap()
             .is_empty()
@@ -1493,12 +1492,12 @@ mod tests {
         assert!(
             special_columns(
                 &conn,
-                IdentifierType::BestRowId,
-                None,
-                None,
-                Some("no_pk"),
-                Scope::Session,
-                Nullable::SqlNullable,
+                &SpecialColumnsQuery::new(
+                    IdentifierType::BestRowId,
+                    Scope::Session,
+                    Nullable::SqlNullable,
+                )
+                .with_table("no_pk"),
             )
             .unwrap()
             .is_empty()

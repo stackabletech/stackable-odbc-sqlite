@@ -84,6 +84,73 @@ fn describe_column(
     }
 }
 
+/// The first bare word of `sql`, with leading whitespace and SQL comments
+/// skipped. The empty string when there is none.
+///
+/// SQLite accepts both comment forms before the opening keyword, and an
+/// unterminated block comment is legal — it swallows the rest of the text — so
+/// both are handled rather than assumed away.
+fn leading_keyword(sql: &str) -> &str {
+    let mut rest = sql.trim_start();
+    loop {
+        if let Some(after) = rest.strip_prefix("--") {
+            rest = match after.find('\n') {
+                Some(newline) => after[newline + 1..].trim_start(),
+                None => return "",
+            };
+        } else if let Some(after) = rest.strip_prefix("/*") {
+            rest = match after.find("*/") {
+                Some(end) => after[end + 2..].trim_start(),
+                None => return "",
+            };
+        } else {
+            break;
+        }
+    }
+    let end = rest
+        .find(|c: char| !c.is_ascii_alphabetic())
+        .unwrap_or(rest.len());
+    &rest[..end]
+}
+
+/// Whether `sql` is a searched INSERT, UPDATE or DELETE — the only statements
+/// that have an affected-row count for `SQLRowCount` to report.
+///
+/// Core reads [`StatementBackend::row_count`] as three distinct answers:
+/// `Some(n)` is "the backend counted", `Some(SQL_NO_TOTAL)` is "cannot
+/// determine", and `None` is "not applicable to this statement". It turns a
+/// zero-column statement answering `Some(0)` into `SQL_NO_DATA`, per
+/// `SQLExecDirect`'s Comments — "if SQLExecDirect executes a searched update,
+/// insert, or delete statement that doesn't affect any rows at the data
+/// source, the call to SQLExecDirect returns SQL_NO_DATA". A `CREATE TABLE`
+/// answering `Some(0)` therefore looked to an application exactly like a
+/// searched DELETE that matched nothing.
+///
+/// SQLite exposes no predicate for this — `sqlite3_stmt_readonly` is false for
+/// DDL too, and `sqlite3_changes()` is worse than useless here, since it holds
+/// the count from the *most recently completed* INSERT, UPDATE or DELETE and
+/// so reports a stale count after a `CREATE TABLE`. The leading keyword is what
+/// is left. Two SQLite specifics beyond the obvious three:
+///
+/// - `REPLACE` is an alias for `INSERT OR REPLACE` and counts the same way.
+/// - `WITH` fronts a CTE, which SQLite permits before an INSERT, UPDATE or
+///   DELETE as well as before a SELECT. This is only ever consulted for a
+///   statement that declared no result columns, and a `WITH ... SELECT`
+///   declares its columns, so a zero-column `WITH` is necessarily one of the
+///   three.
+///
+/// The unrecognised case answers `false` because being wrong is not symmetric:
+/// withholding a count that exists leaves `SQLRowCount` reporting -1, while
+/// inventing one where there is none fabricates `SQL_NO_DATA`.
+fn is_searched_dml(sql: &str) -> bool {
+    const DML_KEYWORDS: [&str; 5] = ["INSERT", "REPLACE", "UPDATE", "DELETE", "WITH"];
+
+    let keyword = leading_keyword(sql);
+    DML_KEYWORDS
+        .iter()
+        .any(|dml| keyword.eq_ignore_ascii_case(dml))
+}
+
 pub(super) fn exec_direct(
     conn: &SqliteConnection,
     sql: &str,
@@ -96,10 +163,12 @@ pub(super) fn exec_direct(
     let mut stmt = db.prepare(sql).map_err(map_sqlite_error)?;
 
     // Statements with no result columns are DML (INSERT/UPDATE/DELETE) or DDL.
-    // Use execute() to run them and capture the affected-row count.
+    // Use execute() to run them; only the DML has an affected-row count.
     if stmt.column_count() == 0 {
         let n = db.execute(sql, []).map_err(map_sqlite_error)?;
-        return Ok(SqliteStatement::dml(n));
+        return Ok(SqliteStatement::non_query(
+            is_searched_dml(sql).then_some(n),
+        ));
     }
 
     // SELECT path: collect column metadata, then eagerly fetch all rows.
@@ -181,7 +250,7 @@ pub(super) fn execute(
             .map_err(map_sqlite_error)?;
         stmt.columns = vec![];
         stmt.rows = vec![];
-        stmt.affected_rows = Some(n);
+        stmt.affected_rows = is_searched_dml(&sql).then_some(n);
         stmt.cursor = -1;
         // SQLite has no stored-procedure output parameters.
         return Ok(ExecuteOutcome::default());
@@ -288,14 +357,29 @@ impl StatementBackend for SqliteStatement {
 
     /// `i64` because `SQLRowCount` writes through a signed `SQLLEN *`.
     ///
-    /// A count that does not fit reports `SQL_NO_TOTAL` (-1), the spec's "the
-    /// driver cannot determine the row count" — which is what a value this
-    /// type cannot name actually means. It is unreachable in practice: rows
-    /// are materialised in memory, so `i64::MAX` of them cannot be held.
+    /// Three answers, and core distinguishes all three — see
+    /// [`is_searched_dml`] for what it does with them:
+    ///
+    /// - **`Some(n)`** for a searched INSERT / UPDATE / DELETE, and for a
+    ///   result set, whose materialised size this driver genuinely knows.
+    /// - **`Some(SQL_NO_TOTAL)`** for a count that does not fit `i64`, the
+    ///   spec's "the driver cannot determine the row count" — which is what a
+    ///   value this type cannot name actually means. Unreachable in practice:
+    ///   rows are materialised in memory, so `i64::MAX` of them cannot be held.
+    /// - **`None`** for a statement with no affected-row count at all: DDL,
+    ///   transaction control, a PRAGMA, or a prepared statement not yet
+    ///   executed. Answering `Some(0)` for these is what made a successful
+    ///   `CREATE TABLE` report `SQL_NO_DATA`.
     fn row_count(&self) -> Option<i64> {
         const SQL_NO_TOTAL: i64 = -1;
 
-        let count = self.affected_rows.unwrap_or(self.rows.len());
+        let count = match self.affected_rows {
+            Some(affected) => affected,
+            // No affected-row count. A result set still has a size worth
+            // reporting; a statement that produced neither has nothing.
+            None if !self.columns.is_empty() => self.rows.len(),
+            None => return None,
+        };
         Some(i64::try_from(count).unwrap_or(SQL_NO_TOTAL))
     }
 
@@ -370,6 +454,92 @@ mod tests {
         let conn = conn_with("CREATE TABLE base (id INTEGER);");
         let stmt = exec_direct(&conn, "CREATE TABLE more (x TEXT)").unwrap();
         assert_eq!(stmt.column_count(), 0);
+    }
+
+    /// A zero-column statement that reports `Some(0)` is what core turns into
+    /// `SQL_NO_DATA`, so DDL must report `None` — "no affected-row count" —
+    /// rather than "counted zero". With `Some(0)` here every `CREATE TABLE`
+    /// this driver ran came back as `SQL_NO_DATA`, and the whole FFI test
+    /// suite's table setup failed.
+    #[test]
+    fn exec_direct_ddl_reports_no_row_count_rather_than_zero() {
+        let conn = conn_with("CREATE TABLE t (id INTEGER);");
+
+        for sql in [
+            "CREATE TABLE more (x TEXT)",
+            "CREATE INDEX ix_t_id ON t(id)",
+            "DROP INDEX ix_t_id",
+            "ALTER TABLE t ADD COLUMN extra TEXT",
+        ] {
+            let stmt = exec_direct(&conn, sql).unwrap();
+            assert_eq!(
+                stmt.row_count(),
+                None,
+                "{sql} has no affected-row count; Some(0) here is SQL_NO_DATA"
+            );
+        }
+    }
+
+    /// The stale-count hazard, which is why the leading keyword decides this
+    /// rather than the number SQLite hands back. `sqlite3_changes()` reports
+    /// the count from the *most recently completed* INSERT, UPDATE or DELETE,
+    /// so a `CREATE TABLE` run straight after a three-row INSERT is handed a
+    /// `3` that has nothing to do with it.
+    #[test]
+    fn ddl_after_dml_does_not_inherit_the_dml_row_count() {
+        let conn = conn_with("CREATE TABLE t (id INTEGER);");
+        let insert = exec_direct(&conn, "INSERT INTO t VALUES (1), (2), (3)").unwrap();
+        assert_eq!(insert.row_count(), Some(3));
+
+        let ddl = exec_direct(&conn, "CREATE TABLE later (x TEXT)").unwrap();
+        assert_eq!(
+            ddl.row_count(),
+            None,
+            "the CREATE TABLE must not inherit the INSERT's count"
+        );
+    }
+
+    /// A searched DELETE matching nothing is the case the spec actually
+    /// reserves `SQL_NO_DATA` for, and it must keep reporting `Some(0)` — the
+    /// fix above must not suppress it along with the DDL.
+    #[test]
+    fn searched_dml_matching_nothing_still_counts_zero() {
+        let conn = conn_with("CREATE TABLE t (id INTEGER);");
+        let stmt = exec_direct(&conn, "DELETE FROM t WHERE id = 99").unwrap();
+        assert_eq!(stmt.row_count(), Some(0));
+    }
+
+    /// `is_searched_dml` reads the leading keyword, so it must see past
+    /// leading whitespace and both of SQLite's comment forms, and must accept
+    /// the two spellings beyond the obvious three.
+    #[test]
+    fn searched_dml_is_recognised_through_comments_and_aliases() {
+        for sql in [
+            "INSERT INTO t VALUES (1)",
+            "  \n\t update t SET a = 1",
+            "delete from t",
+            "REPLACE INTO t VALUES (1)",
+            "-- a leading line comment\nINSERT INTO t VALUES (1)",
+            "/* a leading block comment */ DELETE FROM t",
+            "WITH c AS (SELECT 1) INSERT INTO t SELECT * FROM c",
+        ] {
+            assert!(is_searched_dml(sql), "{sql:?} is searched DML");
+        }
+
+        for sql in [
+            "CREATE TABLE t (a INTEGER)",
+            "DROP TABLE t",
+            "ALTER TABLE t RENAME TO u",
+            "BEGIN",
+            "COMMIT",
+            "PRAGMA foreign_keys = ON",
+            "VACUUM",
+            "-- an unterminated line comment",
+            "/* an unterminated block comment",
+            "",
+        ] {
+            assert!(!is_searched_dml(sql), "{sql:?} has no affected-row count");
+        }
     }
 
     #[test]

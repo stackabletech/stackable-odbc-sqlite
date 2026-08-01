@@ -10,8 +10,8 @@ use stackable_odbc_core::{
     types::{
         ColumnDescriptor, ColumnRow, ColumnValue, ConnectParams, CursorBehavior, ExecuteOutcome,
         ForeignKeyRow, InfoValue, PrimaryKeyRow, SQL_CB_NULL, SQL_CN_ANY, SQL_GB_NO_RELATION,
-        SQL_IC_MIXED, SQL_NC_LOW, SQL_NNC_NON_NULL, SQL_TXN_SERIALIZABLE, SpecialColumnRow,
-        StatisticsRow, TableRow, TypeInfoRow,
+        SQL_IC_MIXED, SQL_NC_LOW, SQL_NNC_NON_NULL, SQL_TC_DML, SQL_TXN_SERIALIZABLE,
+        SpecialColumnRow, StatisticsRow, TableRow, TypeInfoRow,
     },
 };
 
@@ -60,8 +60,14 @@ pub struct SqliteStatement {
     pub(crate) prepared_sql: Option<String>,
     columns: Vec<ColumnDescriptor>,
     rows: Vec<Vec<ColumnValue>>,
-    cursor: i64,                  // -1 = before first row
-    affected_rows: Option<usize>, // Some(n) for DML; None for SELECT (use rows.len())
+    cursor: i64, // -1 = before first row
+    /// `Some(n)` for a searched INSERT / UPDATE / DELETE, which is the only
+    /// case with an affected-row count. `None` everywhere else: a SELECT
+    /// reports its materialised row count instead, and DDL, transaction
+    /// control and the rest have no count at all. See
+    /// `StatementBackend::row_count` in `execute.rs` for why the distinction
+    /// between "counted zero" and "no count" is load-bearing.
+    affected_rows: Option<usize>,
 }
 
 impl SqliteStatement {
@@ -76,16 +82,19 @@ impl SqliteStatement {
         }
     }
 
-    /// Create a new SqliteStatement representing a completed DML statement
-    /// (INSERT / UPDATE / DELETE / DDL). `affected_rows` is the count reported
-    /// by rusqlite's `execute()`.
-    pub fn dml(affected_rows: usize) -> Self {
+    /// Create a new SqliteStatement representing a completed statement that
+    /// produced no result set — DML, DDL, transaction control or a PRAGMA.
+    ///
+    /// `affected_rows` is `Some` only for a searched INSERT / UPDATE / DELETE,
+    /// carrying the count reported by rusqlite's `execute()`; everything else
+    /// passes `None`. See `execute::is_searched_dml`.
+    pub fn non_query(affected_rows: Option<usize>) -> Self {
         Self {
             prepared_sql: None,
             columns: vec![],
             rows: vec![],
             cursor: -1,
-            affected_rows: Some(affected_rows),
+            affected_rows,
         }
     }
 
@@ -398,7 +407,9 @@ impl Backend for SqliteBackend {
 
     /// Hand out the connection's interrupt handle. Infallible and lock-free:
     /// the handle was captured in [`SqliteBackend::connect`], so this only
-    /// bumps a refcount — see [`SqliteConnection::interrupt`].
+    /// bumps a refcount — see `SqliteConnection::interrupt`. Not an intra-doc
+    /// link: that field is `pub(crate)`, and rustdoc rejects a public item
+    /// linking to a private one.
     fn cancel_token(conn: &SqliteConnection) -> Arc<rusqlite::InterruptHandle> {
         Arc::clone(&conn.interrupt)
     }
@@ -556,11 +567,33 @@ impl Backend for SqliteBackend {
     /// carries ICU; that does not change the answer, since ODBC has no value
     /// for "case-insensitive for some characters".
     ///
-    /// Distinct from `SQL_QUOTED_IDENTIFIER_CASE`, which core answers, and
-    /// which is `SQL_IC_SENSITIVE` here: a quoted `"T"` does not match `"t"`.
+    /// Distinct from [`SqliteBackend::quoted_identifier_case`], which describes
+    /// *quoted* identifiers — and which answers the same here, for the reason
+    /// given there.
     ///
     /// <https://sqlite.org/lang_keywords.html>
     fn identifier_case(_conn: &SqliteConnection) -> u16 {
+        SQL_IC_MIXED
+    }
+
+    /// `SQL_IC_MIXED`, the same as [`SqliteBackend::identifier_case`]: in
+    /// SQLite quoting an identifier does **not** make it case-sensitive.
+    ///
+    /// This is the one place the two commonly diverge for other data sources,
+    /// so it is worth stating what SQLite actually does. Double quotes are a
+    /// *delimiter* here, not a case-sensitivity switch: they let a keyword or a
+    /// name with punctuation be used as an identifier, and nothing more. A
+    /// table created as `"MixedCase"` is still found by `"mixedcase"`, and the
+    /// catalog stores the name with the case it was written in — which is
+    /// precisely `SQL_IC_MIXED`.
+    ///
+    /// `quoted_identifiers_are_not_case_sensitive` probes this against the
+    /// bundled library rather than taking it from the documentation. It
+    /// corrects a claim of `SQL_IC_SENSITIVE`, which would have had an
+    /// application quote-and-case-match identifiers that SQLite folds anyway.
+    ///
+    /// <https://sqlite.org/lang_keywords.html>
+    fn quoted_identifier_case(_conn: &SqliteConnection) -> u16 {
         SQL_IC_MIXED
     }
 
@@ -626,6 +659,65 @@ impl Backend for SqliteBackend {
     /// `HY024` before it reaches the backend.
     fn txn_isolation_options(_conn: &SqliteConnection) -> u32 {
         SQL_TXN_SERIALIZABLE
+    }
+
+    /// `SQL_TC_DML`: SQLite runs DML inside a transaction, and a DDL statement
+    /// inside one causes neither a commit nor an error — SQLite's DDL is
+    /// transactional, so `CREATE TABLE` simply participates.
+    ///
+    /// `SQL_TC_ALL` would be the stronger claim and is tempting for that
+    /// reason, but the spec defines it as "transactions can contain DDL
+    /// statements **and** DML statements in any order", and this driver's
+    /// manual-commit mode is built on `BEGIN`/`COMMIT` around whatever the
+    /// application sends. `SQL_TC_DML` states what an application can rely on
+    /// without also promising the DDL-ordering freedom the spec attaches to
+    /// `SQL_TC_ALL`.
+    ///
+    /// Core pins this against [`SqliteBackend::txn_isolation_options`]:
+    /// `SQL_TC_NONE` if and only if no isolation level is declared. Declaring a
+    /// level and then reporting no transaction support is the
+    /// self-contradiction that pairing exists to catch.
+    ///
+    /// `SQL_TC_DML` is a small fixed constant, so the narrowing `as u16` — the
+    /// `SQL_TC_*` constants are typed `u32` for bitmask use, while the info
+    /// type is `SQLUSMALLINT` — cannot lose information.
+    fn txn_capable(_conn: &SqliteConnection) -> u16 {
+        SQL_TC_DML as u16
+    }
+
+    /// `true`: each connection this driver opens is its own
+    /// `rusqlite::Connection` with its own SQLite handle, so two connections
+    /// can each have a transaction open at the same time.
+    ///
+    /// The spec asks about the *driver*, not about one connection: "`"Y"` if
+    /// the driver supports more than one active transaction at the same time".
+    /// Nothing here serialises across connections — `SqliteBackend::connect`
+    /// opens a fresh handle per call and shares no state between them. What
+    /// SQLite does when those transactions contend for the same file is a
+    /// locking question (`SQLITE_BUSY`), not a question of how many can be
+    /// active.
+    fn multiple_active_txn(_conn: &SqliteConnection) -> bool {
+        true
+    }
+
+    /// `true`: SQLite implements the whole Integrity Enhancement Facility —
+    /// `PRIMARY KEY`, `UNIQUE`, `NOT NULL`, `CHECK`, `DEFAULT` and `FOREIGN
+    /// KEY` with referential actions — and this build enforces all of it.
+    ///
+    /// Referential integrity in particular is enforced by construction, not by
+    /// chance: [`SqliteBackend::connect`] issues `PRAGMA foreign_keys = ON`,
+    /// because plain SQLite defaults it off for backward compatibility and the
+    /// bundled library only *happens* to compile with
+    /// `SQLITE_DEFAULT_FOREIGN_KEYS`. Without the pragma this claim would
+    /// depend on a dependency's build flags.
+    /// `integrity_enhancement_facility_is_actually_enforced` asserts it through
+    /// `connect`, and fails loudly if that ever stops holding.
+    ///
+    /// `SQLForeignKeys` is genuinely implemented (`metadata::foreign_keys`,
+    /// over `PRAGMA foreign_key_list`), so an application that acts on this
+    /// finds the metadata it then asks for.
+    fn integrity(_conn: &SqliteConnection) -> bool {
+        true
     }
 
     /// `SQL_GB_NO_RELATION`: SQLite relates the `GROUP BY` list and the select
@@ -739,6 +831,19 @@ impl Backend for SqliteBackend {
         true
     }
 
+    /// `false`: SQLite has no stored procedures, so there is no procedure the
+    /// connected user can execute.
+    ///
+    /// The counterpart of [`SqliteBackend::accessible_tables`], and the
+    /// opposite answer for a different reason. That one is `true` because every
+    /// table SQLTables returns is reachable; this is `false` because
+    /// `SQLProcedures` returns nothing to be reachable in the first place —
+    /// this driver leaves `Backend::procedures` defaulted to no rows, and
+    /// reports `SQL_PROCEDURES = "N"` through core.
+    fn accessible_procedures(_conn: &SqliteConnection) -> bool {
+        false
+    }
+
     /// `false`: the driver opens the database read-write.
     ///
     /// This describes the driver's own behaviour, not the file. A database on
@@ -759,12 +864,89 @@ impl Backend for SqliteBackend {
         Cow::Borrowed(info::sqlite_keywords())
     }
 
+    /// `"$"` — the one character beyond `a`–`z`, `A`–`Z`, `0`–`9` and `_` that
+    /// SQLite accepts in an undelimited identifier.
+    ///
+    /// SQLite's tokenizer treats `$` as an identifier character, so
+    /// `CREATE TABLE a$b (...)` parses and the name round-trips through
+    /// `sqlite_master` unchanged. An application reads this info type to decide
+    /// when it must quote, so the previous `""` — core's old default, not a
+    /// claim this driver ever made — told it to quote a name that needs no
+    /// quoting.
+    ///
+    /// Every candidate is executed against the bundled library in
+    /// `special_characters_are_each_live_probed`, which checks the characters
+    /// *not* claimed as well: a list that only grows when someone notices can
+    /// understate forever.
+    ///
+    /// Deliberately excluded even though SQLite's tokenizer accepts them:
+    /// characters at or above `0x80`. The spec wants a character list, and
+    /// "every non-ASCII code point" is not one that fits in a `SQLGetInfo`
+    /// string.
+    ///
+    /// <https://sqlite.org/lang_keywords.html>
+    fn special_characters(_conn: &SqliteConnection) -> Cow<'static, str> {
+        Cow::Borrowed(info::SQLITE_SPECIAL_CHARACTERS)
+    }
+
     /// Backslash: SQLite's `LIKE ... ESCAPE` takes any character, and this
     /// driver reports `SQL_LIKE_ESCAPE_CLAUSE = "Y"`. Backslash is the
     /// conventional choice and the one `SQLTables`-style pattern arguments are
     /// documented against.
     fn search_pattern_escape(_conn: &SqliteConnection) -> Cow<'static, str> {
         Cow::Borrowed("\\")
+    }
+
+    // --- Identity ---
+    //
+    // `driver_name` and `driver_version` take no connection: the Windows
+    // Driver Manager asks for driver identity before `SQLDriverConnectW`, and
+    // an answer that needed a connection could not be given then. The two DBMS
+    // values are per-connection by signature but constant here, since a
+    // `rusqlite` link always reaches the one bundled library.
+
+    fn driver_name() -> Cow<'static, str> {
+        Cow::Borrowed("stackable-odbc-sqlite")
+    }
+
+    /// This crate's version in the spec's `##.##.####` form.
+    ///
+    /// `driver_version!` reads it from `CARGO_PKG_VERSION` at compile time, so
+    /// a release bump cannot leave the reported version behind;
+    /// `driver_version_tracks_the_crate_version` pins that.
+    fn driver_version() -> Cow<'static, str> {
+        stackable_odbc_core::driver_version!().into()
+    }
+
+    fn dbms_name(_conn: &SqliteConnection) -> Cow<'static, str> {
+        Cow::Borrowed("SQLite")
+    }
+
+    /// The bundled library's version, `##.##.####` followed by SQLite's own
+    /// spelling in parentheses.
+    ///
+    /// The spec permits appending the data source's own version string after
+    /// the fixed-width prefix, which keeps the familiar `3.53.2` visible to
+    /// anyone reading the value by eye. Read from `rusqlite::version()` — the
+    /// library actually linked — rather than written down, for the reason
+    /// AGENTS.md gives about the system `sqlite3` binary being a different
+    /// version.
+    fn dbms_version(_conn: &SqliteConnection) -> Cow<'static, str> {
+        use stackable_odbc_core::types::{format_odbc_version, parse_dotted_version};
+
+        let raw = rusqlite::version();
+        match parse_dotted_version(raw) {
+            Some((major, minor, release)) => {
+                format!("{} ({raw})", format_odbc_version(major, minor, release)).into()
+            }
+            None => {
+                tracing::warn!(
+                    raw,
+                    "could not parse the SQLite version; reporting it verbatim"
+                );
+                raw.into()
+            }
+        }
     }
 
     // --- Delegations ---
@@ -825,12 +1007,9 @@ impl Backend for SqliteBackend {
     fn tables(
         conn: &SqliteConnection,
         _cancel: &Arc<rusqlite::InterruptHandle>,
-        catalog: Option<&str>,
-        schema: Option<&str>,
-        table: Option<&str>,
-        table_type: Option<&str>,
+        query: &stackable_odbc_core::types::TablesQuery<'_>,
     ) -> Result<Vec<TableRow>, SqliteError> {
-        metadata::tables(conn, catalog, schema, table, table_type)
+        metadata::tables(conn, query)
     }
 
     /// `TABLE` and `VIEW` — the two values `metadata::tables` can put in
@@ -842,69 +1021,41 @@ impl Backend for SqliteBackend {
     fn columns(
         conn: &SqliteConnection,
         _cancel: &Arc<rusqlite::InterruptHandle>,
-        catalog: Option<&str>,
-        schema: Option<&str>,
-        table: Option<&str>,
-        column: Option<&str>,
+        query: &stackable_odbc_core::types::ColumnsQuery<'_>,
     ) -> Result<Vec<ColumnRow>, SqliteError> {
-        metadata::columns(conn, catalog, schema, table, column)
+        metadata::columns(conn, query)
     }
 
     fn primary_keys(
         conn: &SqliteConnection,
         _cancel: &Arc<rusqlite::InterruptHandle>,
-        catalog: Option<&str>,
-        schema: Option<&str>,
-        table: Option<&str>,
+        query: &stackable_odbc_core::types::PrimaryKeysQuery<'_>,
     ) -> Result<Vec<PrimaryKeyRow>, SqliteError> {
-        metadata::primary_keys(conn, catalog, schema, table)
+        metadata::primary_keys(conn, query)
     }
 
     fn foreign_keys(
         conn: &SqliteConnection,
         _cancel: &Arc<rusqlite::InterruptHandle>,
-        pk_catalog: Option<&str>,
-        pk_schema: Option<&str>,
-        pk_table: Option<&str>,
-        fk_catalog: Option<&str>,
-        fk_schema: Option<&str>,
-        fk_table: Option<&str>,
+        query: &stackable_odbc_core::types::ForeignKeysQuery<'_>,
     ) -> Result<Vec<ForeignKeyRow>, SqliteError> {
-        metadata::foreign_keys(
-            conn, pk_catalog, pk_schema, pk_table, fk_catalog, fk_schema, fk_table,
-        )
+        metadata::foreign_keys(conn, query)
     }
 
     fn statistics(
         conn: &SqliteConnection,
         _cancel: &Arc<rusqlite::InterruptHandle>,
-        catalog: Option<&str>,
-        schema: Option<&str>,
-        table: Option<&str>,
-        unique_only: bool,
+        query: &stackable_odbc_core::types::StatisticsQuery<'_>,
     ) -> Result<Vec<StatisticsRow>, SqliteError> {
-        metadata::statistics(conn, catalog, schema, table, unique_only)
+        metadata::statistics(conn, query)
     }
 
     fn special_columns(
         conn: &SqliteConnection,
         _cancel: &Arc<rusqlite::InterruptHandle>,
-        identifier_type: stackable_odbc_core::types::IdentifierType,
-        catalog: Option<&str>,
-        schema: Option<&str>,
-        table: Option<&str>,
-        scope: stackable_odbc_core::types::Scope,
-        nullable: stackable_odbc_core::types::Nullable,
+        query: &stackable_odbc_core::types::SpecialColumnsQuery<'_>,
     ) -> Result<Vec<SpecialColumnRow>, SqliteError> {
-        metadata::special_columns(
-            conn,
-            identifier_type,
-            catalog,
-            schema,
-            table,
-            scope,
-            nullable,
-        )
+        metadata::special_columns(conn, query)
     }
 
     /// SQLite's `{fn}`/`{d}`/`{t}`/`{ts}` escape-translation dialect. See

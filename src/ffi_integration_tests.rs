@@ -15,10 +15,10 @@ use stackable_odbc_core::{
         EnvironmentAttribute, HandleType, HeaderDiagnosticIdentifier, InfoType, Nullable, Numeric,
         ParamType, SQL_AUTOCOMMIT_OFF, SQL_AUTOCOMMIT_ON, SQL_CASCADE, SQL_CD_FALSE,
         SQL_CURSOR_FORWARD_ONLY, SQL_DRIVER_ODBC_VER_STRING, SQL_GD_ANY_COLUMN, SQL_GD_ANY_ORDER,
-        SQL_GD_BOUND, SQL_IC_SENSITIVE, SQL_INDEX_ALL, SQL_INDEX_OTHER, SQL_INDEX_UNIQUE,
-        SQL_QUICK, SQL_RESTRICT, SQL_TABLE_STAT, SQL_TXN_READ_COMMITTED, SQL_TXN_READ_UNCOMMITTED,
-        SQL_TXN_REPEATABLE_READ, SQL_TXN_SERIALIZABLE, SqlDataType, SqlReturn, StatementAttribute,
-        Timestamp, expected_kind,
+        SQL_GD_BOUND, SQL_IC_MIXED, SQL_INDEX_ALL, SQL_INDEX_OTHER, SQL_INDEX_UNIQUE,
+        SQL_MULTIPLE_ACTIVE_TXN, SQL_QUICK, SQL_RESTRICT, SQL_TABLE_STAT, SQL_TXN_READ_COMMITTED,
+        SQL_TXN_READ_UNCOMMITTED, SQL_TXN_REPEATABLE_READ, SQL_TXN_SERIALIZABLE, SqlDataType,
+        SqlReturn, StatementAttribute, Timestamp, expected_kind,
     },
 };
 
@@ -647,7 +647,10 @@ unsafe fn assert_get_info_str(conn: *mut c_void, info_type: InfoType, expected: 
 /// `odbc_sys::InfoType` variants, but `sqlite_get_info` has no arm for
 /// either and `default_get_info` doesn't cover them either; the only place
 /// that produces a real value for them is `common_get_info_raw`, reached
-/// through the `get_info_raw` fallback in `sql_get_info_w`.
+/// through the `get_info_raw` fallback in `sql_get_info_w`. The quoted case is
+/// core answering from `Backend::quoted_identifier_case`, so this pins the
+/// value an application sees no matter which layer produced it — see
+/// `quoted_identifiers_are_not_case_sensitive` for why it is `SQL_IC_MIXED`.
 ///
 /// The ten capability bitmaps below (`AggregateFunctions`, `Sql92Predicates`,
 /// etc., computed by `SqliteBackend::get_info_raw` in `backend/info.rs`) are
@@ -667,7 +670,31 @@ fn get_info_named_but_unhandled_types_fall_back_to_get_info_raw() {
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
 
         assert_get_info_u16(conn, InfoType::SqlFileUsage, 0);
-        assert_get_info_u16(conn, InfoType::SqlQuotedIdentifierCase, SQL_IC_SENSITIVE);
+        assert_get_info_u16(conn, InfoType::SqlQuotedIdentifierCase, SQL_IC_MIXED);
+
+        // SQL_MULTIPLE_ACTIVE_TXN has no `odbc_sys::InfoType` variant at all,
+        // so this raw path is the only way to reach it and the only place its
+        // value can be pinned -- `get_info_snapshot` iterates named types.
+        // "Y": each connection is its own rusqlite::Connection with its own
+        // SQLite handle, so two can have transactions open at once. See
+        // SqliteBackend::multiple_active_txn.
+        {
+            let mut buf = [0u16; 32];
+            let mut str_len: i16 = 0;
+            let ret = ffi::info::sql_get_info_w::<SqliteBackend>(
+                conn,
+                SQL_MULTIPLE_ACTIVE_TXN,
+                buf.as_mut_ptr() as *mut c_void,
+                64,
+                &mut str_len,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS, "SQL_MULTIPLE_ACTIVE_TXN");
+            assert_eq!(
+                String::from_utf16_lossy(&buf[..(str_len / 2) as usize]),
+                "Y",
+                "SQL_MULTIPLE_ACTIVE_TXN must be a \"Y\"/\"N\" string, not a number"
+            );
+        }
 
         // SQLite capability bitmaps computed by SqliteBackend::get_info_raw
         // (backend/info.rs) -- reference the same constants that function
@@ -4716,9 +4743,13 @@ fn get_info_every_named_info_type_has_the_declared_shape_connected() {
         for info_type in all_info_types() {
             let (ret, kind, _string_length) =
                 observe_info_value_kind::<SqliteBackend>(conn, info_type as u16);
-            assert_eq!(
+            // Not `== SUCCESS`: the probe deliberately passes a non-null
+            // buffer of length 0, and core reports that as total truncation
+            // (`01004`, `SQL_SUCCESS_WITH_INFO`) for a string-shaped value.
+            // The property under test is that no info type errors.
+            assert_ne!(
                 ret,
-                SqlReturn::SUCCESS,
+                SqlReturn::ERROR,
                 "{info_type:?}: SQLGetInfoW must not return SQL_ERROR"
             );
             assert_eq!(
@@ -4749,9 +4780,11 @@ fn get_info_every_named_info_type_has_the_declared_shape_pre_connect() {
         for info_type in all_info_types() {
             let (ret, kind, _string_length) =
                 observe_info_value_kind::<SqliteBackend>(conn, info_type as u16);
-            assert_eq!(
+            // See the connected test: a zero-length buffer is truncation, not
+            // failure.
+            assert_ne!(
                 ret,
-                SqlReturn::SUCCESS,
+                SqlReturn::ERROR,
                 "{info_type:?}: SQLGetInfoW must not return SQL_ERROR pre-connect"
             );
             assert_eq!(

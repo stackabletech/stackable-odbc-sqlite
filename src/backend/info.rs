@@ -25,9 +25,8 @@ use stackable_odbc_core::types::{
     SQL_SRJO_CROSS_JOIN, SQL_SRJO_EXCEPT_JOIN, SQL_SRJO_FULL_OUTER_JOIN, SQL_SRJO_INNER_JOIN,
     SQL_SRJO_INTERSECT_JOIN, SQL_SRJO_LEFT_OUTER_JOIN, SQL_SRJO_NATURAL_JOIN,
     SQL_SRJO_RIGHT_OUTER_JOIN, SQL_STRING_FUNCTIONS, SQL_SVE_CASE, SQL_SVE_CAST, SQL_SVE_COALESCE,
-    SQL_SVE_NULLIF, SQL_SYSTEM_FUNCTIONS, SQL_TC_DML, SQL_TIMEDATE_FUNCTIONS, SQL_TXN_SERIALIZABLE,
+    SQL_SVE_NULLIF, SQL_SYSTEM_FUNCTIONS, SQL_TIMEDATE_FUNCTIONS, SQL_TXN_SERIALIZABLE,
     SQL_U_UNION, SQL_U_UNION_ALL, SqlDataType, TypeInfoRow, catalog_column_size,
-    format_odbc_version, parse_dotted_version,
 };
 
 use super::SqliteBackend;
@@ -365,31 +364,15 @@ fn sqlite_get_info(
     conn: Option<&SqliteConnection>,
     info_type: InfoType,
 ) -> Result<InfoValue, SqliteError> {
-    // Driver-specific overrides
+    // Driver-specific overrides.
+    //
+    // The identity group (`SQL_DRIVER_NAME`, `SQL_DRIVER_VER`,
+    // `SQL_DBMS_NAME`, `SQL_DBMS_VER`) is deliberately absent: each is a
+    // `Backend` hook now, so core answers all four, and stating them here as
+    // well would be the "declare it once" violation AGENTS.md describes.
+    // `SQL_INTEGRITY` and `SQL_TXN_CAPABLE` moved for the same reason.
+    // `get_info_snapshot` still pins every value an application sees.
     match info_type {
-        InfoType::DriverName => return Ok(InfoValue::String("stackable-odbc-sqlite".into())),
-        InfoType::DriverVer => {
-            return Ok(InfoValue::String(stackable_odbc_core::driver_version!()));
-        }
-        InfoType::DbmsName => return Ok(InfoValue::String("SQLite".into())),
-        InfoType::DbmsVer => {
-            let raw = rusqlite::version();
-            // The spec permits appending the data source's own version string
-            // after the ##.##.#### prefix, which keeps SQLite's native
-            // spelling visible to anyone reading the value by eye.
-            return Ok(InfoValue::String(match parse_dotted_version(raw) {
-                Some((major, minor, release)) => {
-                    format!("{} ({raw})", format_odbc_version(major, minor, release))
-                }
-                None => {
-                    tracing::warn!(
-                        raw,
-                        "could not parse the SQLite version; reporting it verbatim"
-                    );
-                    raw.to_string()
-                }
-            }));
-        }
         // 0, not an identifier length: this driver reports no catalogs and no
         // schemas, so there is no name whose maximum length these could
         // describe. Core defaults them to its generic identifier length, which
@@ -410,26 +393,6 @@ fn sqlite_get_info(
         InfoType::MaxSchemaNameLen if conn.is_some_and(|c| !SqliteBackend::supports_schemas(c)) => {
             return Ok(InfoValue::U16(0));
         }
-        // "Y": SQLite implements the whole Integrity Enhancement Facility --
-        // PRIMARY KEY, UNIQUE, NOT NULL, CHECK, DEFAULT and FOREIGN KEY with
-        // referential actions -- and this build enforces all of it. Core
-        // defaults to "N", which is the right conservative answer for a data
-        // source without it and the wrong one here.
-        //
-        // Referential integrity in particular is enforced by construction, not
-        // by chance: the bundled library is compiled with
-        // SQLITE_DEFAULT_FOREIGN_KEYS, so `PRAGMA foreign_keys` is already on
-        // when a connection opens. Plain SQLite defaults it off for backward
-        // compatibility, so this claim is a property of *this* build.
-        // `integrity_enhancement_facility_is_actually_enforced` asserts that,
-        // and fails loudly if a dependency change ever takes the compile
-        // option away -- switching `rusqlite` off `bundled` to a system SQLite
-        // would.
-        //
-        // `SQLForeignKeys` is genuinely implemented (`metadata::foreign_keys`,
-        // over `PRAGMA foreign_key_list`), so an application that acts on this
-        // "Y" finds the metadata it then asks for.
-        InfoType::Integrity => return Ok(InfoValue::String("Y".into())),
         // Only SERIALIZABLE. "Transactions in SQLite are SERIALIZABLE", and
         // READ COMMITTED and REPEATABLE READ do not exist in SQLite at all.
         //
@@ -451,11 +414,6 @@ fn sqlite_get_info(
         InfoType::TransactionIsolationProtocol => {
             return Ok(InfoValue::U32(SQL_TXN_SERIALIZABLE));
         }
-        // SQL_TXN_CAPABLE is `An SQLUSMALLINT value` per the SQLGetInfo spec,
-        // not SQLUINTEGER -- found by the info-type conformance test
-        // (`stackable_odbc_core::conformance`). `SQL_TC_DML` is a small fixed constant
-        // (1), so the narrowing `as u16` cannot lose information.
-        InfoType::TransactionCapable => return Ok(InfoValue::U16(SQL_TC_DML as u16)),
         // SQL_GETDATA_EXTENSIONS is deliberately not answered here. It states
         // what core's own fetch path supports -- `sql_get_data` checks neither
         // column order nor binding state, and `sql_set_stmt_attr_w` substitutes
@@ -628,6 +586,28 @@ pub(crate) const SQLITE_SUBQUERIES: u32 =
 
 /// `SQL_UNION` (96) — SQLite has both `UNION` and `UNION ALL`.
 pub(crate) const SQLITE_UNION: u32 = SQL_U_UNION | SQL_U_UNION_ALL;
+
+/// `SQL_SPECIAL_CHARACTERS` (94) — the characters beyond `a`–`z`, `A`–`Z`,
+/// `0`–`9` and `_` that may appear in an undelimited SQLite identifier.
+///
+/// Just `$`. SQLite's tokenizer classifies it as an identifier character, so a
+/// name containing it parses unquoted and round-trips through `sqlite_master`
+/// unchanged. Every character in [`SPECIAL_CHARACTER_CANDIDATES`] is executed
+/// against the bundled library by
+/// `special_characters_are_each_live_probed`, which checks the rejected ones
+/// too.
+pub(crate) const SQLITE_SPECIAL_CHARACTERS: &str = "$";
+
+/// The punctuation `special_characters_are_each_live_probed` tries in an
+/// undelimited identifier: everything on a US keyboard that is not
+/// alphanumeric or `_`.
+///
+/// The probe asserts membership in [`SQLITE_SPECIAL_CHARACTERS`] both ways, so
+/// this list is what stops that bitmap-equivalent from understating. A
+/// character SQLite starts accepting shows up as a failure here rather than
+/// going unnoticed.
+#[cfg(test)]
+pub(crate) const SPECIAL_CHARACTER_CANDIDATES: &str = "$#@!%^&*-+=./:?~`|\\'\"<>(){}[],;";
 
 /// `SQL_CONVERT_FUNCTIONS` (48) — SQLite's `CAST(x AS type)`. It has no
 /// ODBC `CONVERT` scalar function, so only the `CAST` bit is claimed.
@@ -1018,23 +998,23 @@ mod tests {
         ConnectParams, DEFAULT_IDENTIFIER_LEN, InfoType, InfoValue, SQL_AM_NONE,
         SQL_AT_DROP_COLUMN_CASCADE, SQL_AT_DROP_COLUMN_DEFAULT, SQL_AT_DROP_COLUMN_RESTRICT,
         SQL_AT_DROP_TABLE_CONSTRAINT_CASCADE, SQL_AT_DROP_TABLE_CONSTRAINT_RESTRICT,
-        SQL_AT_SET_COLUMN_DEFAULT, SQL_CA1_NEXT, SQL_CB_PRESERVE, SQL_CN_ANY,
-        SQL_DRIVER_ODBC_VER_STRING, SQL_FN_NUM_CEILING, SQL_FN_NUM_COS, SQL_FN_NUM_FLOOR,
-        SQL_FN_NUM_LOG, SQL_FN_NUM_MOD, SQL_FN_NUM_POWER, SQL_FN_NUM_RAND, SQL_FN_NUM_SQRT,
-        SQL_FN_NUM_TRUNCATE, SQL_FN_STR_BIT_LENGTH, SQL_FN_STR_CHAR_LENGTH,
+        SQL_AT_SET_COLUMN_DEFAULT, SQL_CA1_NEXT, SQL_CA2_READ_ONLY_CONCURRENCY, SQL_CB_PRESERVE,
+        SQL_CN_ANY, SQL_DRIVER_ODBC_VER_STRING, SQL_FN_NUM_CEILING, SQL_FN_NUM_COS,
+        SQL_FN_NUM_FLOOR, SQL_FN_NUM_LOG, SQL_FN_NUM_MOD, SQL_FN_NUM_POWER, SQL_FN_NUM_RAND,
+        SQL_FN_NUM_SQRT, SQL_FN_NUM_TRUNCATE, SQL_FN_STR_BIT_LENGTH, SQL_FN_STR_CHAR_LENGTH,
         SQL_FN_STR_CHARACTER_LENGTH, SQL_FN_STR_DIFFERENCE, SQL_FN_STR_INSERT, SQL_FN_STR_LEFT,
         SQL_FN_STR_LOCATE, SQL_FN_STR_LOCATE_2, SQL_FN_STR_POSITION, SQL_FN_STR_REPEAT,
         SQL_FN_STR_RIGHT, SQL_FN_STR_SPACE, SQL_FN_TD_DAYNAME, SQL_FN_TD_DAYOFMONTH,
         SQL_FN_TD_EXTRACT, SQL_FN_TD_MONTH, SQL_FN_TD_MONTHNAME, SQL_FN_TD_QUARTER,
         SQL_FN_TD_TIMESTAMPADD, SQL_FN_TD_TIMESTAMPDIFF, SQL_FN_TD_YEAR, SQL_GB_NO_RELATION,
-        SQL_GD_ANY_COLUMN, SQL_GD_ANY_ORDER, SQL_GD_BOUND, SQL_IC_MIXED, SQL_INSENSITIVE,
-        SQL_KEYWORDS, SQL_MAX_CURSOR_NAME_LEN, SQL_NC_LOW, SQL_NNC_NON_NULL, SQL_OIC_CORE,
-        SQL_SO_FORWARD_ONLY, SQL_SP_MATCH_FULL, SQL_SP_MATCH_PARTIAL, SQL_SP_MATCH_UNIQUE_FULL,
+        SQL_GD_ANY_COLUMN, SQL_GD_ANY_ORDER, SQL_GD_BOUND, SQL_IC_MIXED, SQL_KEYWORDS,
+        SQL_MAX_CURSOR_NAME_LEN, SQL_NC_LOW, SQL_NNC_NON_NULL, SQL_OIC_CORE, SQL_SO_FORWARD_ONLY,
+        SQL_SP_MATCH_FULL, SQL_SP_MATCH_PARTIAL, SQL_SP_MATCH_UNIQUE_FULL,
         SQL_SP_MATCH_UNIQUE_PARTIAL, SQL_SP_OVERLAPS, SQL_SP_QUANTIFIED_COMPARISON, SQL_SP_UNIQUE,
         SQL_SQ_COMPARISON, SQL_SQ_CORRELATED_SUBQUERIES, SQL_SQ_EXISTS, SQL_SQ_IN,
         SQL_SQ_QUANTIFIED, SQL_SRJO_CORRESPONDING_CLAUSE, SQL_SRJO_UNION_JOIN, SQL_TC_DML,
         SQL_TXN_READ_COMMITTED, SQL_TXN_READ_UNCOMMITTED, SQL_TXN_REPEATABLE_READ,
-        SQL_TXN_SERIALIZABLE,
+        SQL_TXN_SERIALIZABLE, SQL_UNSPECIFIED,
     };
 
     enum Expected {
@@ -1084,9 +1064,11 @@ mod tests {
         (InfoType::AccessibleTables,              Expected::Str("Y")),
         (InfoType::AccessibleProcedures,          Expected::Str("N")),
         // "Y", not "N": SQLite implements and enforces the Integrity
-        // Enhancement Facility. See the arm in sqlite_get_info.
+        // Enhancement Facility. See Backend::integrity.
         (InfoType::Integrity,                     Expected::Str("Y")),
-        (InfoType::SpecialCharacters,             Expected::Str("")),
+        // "$", not "": SQLite parses it inside an undelimited identifier. See
+        // special_characters_are_each_live_probed.
+        (InfoType::SpecialCharacters,             Expected::Str(SQLITE_SPECIAL_CHARACTERS)),
         (InfoType::XopenCliYear,                  Expected::Str("1995")),
         (InfoType::CollationSeq,                  Expected::Str("")),
         (InfoType::DescribeParameter,             Expected::Str("Y")),
@@ -1126,7 +1108,14 @@ mod tests {
         // --- U32 values ---
         // CursorSensitivity is SQLUINTEGER per spec, not SQLUSMALLINT -- see
         // the matching comment in stackable-odbc-core's default_get_info.
-        (InfoType::CursorSensitivity,             Expected::U32(SQL_INSENSITIVE as u32)),
+        //
+        // SQL_UNSPECIFIED, not SQL_INSENSITIVE. This describes core's fetch
+        // path rather than SQLite, and core answers it: insensitivity is a
+        // promise that no other cursor's changes become visible, which core
+        // does not make about rows it has not read yet. Pinned here anyway,
+        // because the snapshot's job is the value an application sees
+        // regardless of which layer produced it.
+        (InfoType::CursorSensitivity,             Expected::U32(SQL_UNSPECIFIED as u32)),
         // SQL_SQ_QUANTIFIED dropped: `< ALL` / `< ANY` / `< SOME` do not
         // parse, which SQL_SQL92_PREDICATES already recorded. Core's default
         // claimed it, so the two info types disagreed.
@@ -1162,7 +1151,12 @@ mod tests {
         (InfoType::DynamicCursorAttributes1,      Expected::U32(0)),
         (InfoType::DynamicCursorAttributes2,      Expected::U32(0)),
         (InfoType::ForwardOnlyCursorAttributes1,  Expected::U32(SQL_CA1_NEXT)),
-        (InfoType::ForwardOnlyCursorAttributes2,  Expected::U32(0)),
+        // SQL_CA2_READ_ONLY_CONCURRENCY, not 0: core answers this, and reports
+        // the concurrency its one cursor actually offers. `SQLSetStmtAttr`
+        // accepts SQL_CONCUR_READ_ONLY unchanged and substitutes every other
+        // value back to it with 01S02, so 0 would deny a concurrency the
+        // driver had just accepted.
+        (InfoType::ForwardOnlyCursorAttributes2,  Expected::U32(SQL_CA2_READ_ONLY_CONCURRENCY)),
         (InfoType::KeysetCursorAttributes1,       Expected::U32(0)),
         (InfoType::KeysetCursorAttributes2,       Expected::U32(0)),
         (InfoType::StaticCursorAttributes1,       Expected::U32(0)),
@@ -1190,11 +1184,12 @@ mod tests {
         }
     }
 
+    /// `SQL_DBMS_VER` is a per-connection `Backend` hook now, so it is read
+    /// through a connection rather than off the pre-connect path — which
+    /// cannot answer it, having no data source to name the version of.
     #[test]
     fn dbms_ver_is_well_formed() {
-        let InfoValue::String(s) = sqlite_get_info(None, InfoType::DbmsVer).unwrap() else {
-            panic!("expected String for DbmsVer");
-        };
+        let s = SqliteBackend::dbms_version(&test_connection());
         let prefix = s.split(' ').next().unwrap_or("");
         let parts: Vec<&str> = prefix.split('.').collect();
         assert_eq!(
@@ -1212,14 +1207,121 @@ mod tests {
         );
     }
 
+    /// `SQL_QUOTED_IDENTIFIER_CASE` claims `SQL_IC_MIXED`, which asserts two
+    /// separate things about quoted identifiers: that they are matched
+    /// case-*insensitively*, and that the catalog stores them with the case
+    /// they were written in. Both are probed against the bundled library,
+    /// because the value this replaced (`SQL_IC_SENSITIVE`) was neither.
+    ///
+    /// A driver that claims `SQL_IC_SENSITIVE` here tells an application that
+    /// `"T"` and `"t"` are different tables. In SQLite they are the same one:
+    /// double quotes are a *delimiter*, letting a keyword or a name with
+    /// punctuation be used as an identifier, and they do not switch on
+    /// case-sensitive matching the way they do in a SQL-92 conformant DBMS.
+    #[test]
+    fn quoted_identifiers_are_not_case_sensitive() {
+        let conn = test_connection();
+        let db = conn.conn.lock().unwrap();
+        db.execute_batch(r#"CREATE TABLE "MixedCase" (a INTEGER);"#)
+            .unwrap();
+
+        // Case-insensitive: a differently-cased quoted name finds the table.
+        for spelling in [r#""mixedcase""#, r#""MIXEDCASE""#, r#""MiXeDcAsE""#] {
+            db.execute_batch(&format!("SELECT * FROM {spelling};"))
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "SQLite resolved the quoted identifier {spelling} \
+                         case-sensitively ({e}), so SQL_QUOTED_IDENTIFIER_CASE \
+                         is not SQL_IC_MIXED"
+                    )
+                });
+        }
+
+        // Mixed *storage*: the catalog keeps the case it was created with,
+        // which is what separates SQL_IC_MIXED from SQL_IC_UPPER/SQL_IC_LOWER.
+        let stored: String = db
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type = 'table'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stored, "MixedCase",
+            "SQLite folded a quoted identifier's stored case, so \
+             SQL_QUOTED_IDENTIFIER_CASE is not SQL_IC_MIXED"
+        );
+
+        assert_eq!(
+            SqliteBackend::quoted_identifier_case(&conn),
+            SQL_IC_MIXED,
+            "the probe above says SQL_IC_MIXED"
+        );
+    }
+
+    /// Every character in [`SPECIAL_CHARACTER_CANDIDATES`] is executed inside
+    /// an undelimited identifier, and the outcome is asserted against
+    /// [`SQLITE_SPECIAL_CHARACTERS`] **both ways**.
+    ///
+    /// The negative half is the point, and is the same lesson
+    /// `alter_table_capabilities_are_each_live_probed` records: a list that is
+    /// only extended when someone notices can understate forever. `""` — core's
+    /// old default, inherited rather than chosen — was exactly that, and had an
+    /// application quoting `a$b`, a name SQLite parses bare.
+    ///
+    /// "Accepted" means more than "the CREATE parsed": the name must also come
+    /// back out of `sqlite_master` unchanged. A character the tokenizer treats
+    /// as punctuation could otherwise split the identifier and leave a
+    /// differently-named table behind, which would be a *worse* answer than
+    /// rejecting it.
+    #[test]
+    fn special_characters_are_each_live_probed() {
+        let conn = test_connection();
+        let db = conn.conn.lock().unwrap();
+
+        for (index, ch) in SPECIAL_CHARACTER_CANDIDATES.chars().enumerate() {
+            // A distinct table per candidate, and the character in the middle
+            // so a leading-digit or leading-punctuation rule cannot be what is
+            // actually being measured.
+            let name = format!("probe{index}{ch}tail");
+            let accepted = db
+                .execute_batch(&format!("CREATE TABLE {name} (a INTEGER);"))
+                .is_ok()
+                && db
+                    .query_row(
+                        "SELECT 1 FROM sqlite_master WHERE name = ?1",
+                        [&name],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .is_ok();
+
+            let claimed = SQLITE_SPECIAL_CHARACTERS.contains(ch);
+            assert_eq!(
+                accepted,
+                claimed,
+                "SQL_SPECIAL_CHARACTERS {}claims {ch:?}, but the bundled \
+                 SQLite {} it in an undelimited identifier",
+                if claimed { "" } else { "does not " },
+                if accepted { "accepts" } else { "rejects" },
+            );
+        }
+
+        assert_eq!(
+            SqliteBackend::special_characters(&conn),
+            SQLITE_SPECIAL_CHARACTERS,
+            "the hook must report the probed list"
+        );
+    }
+
     /// SQL_DRIVER_VER is derived from Cargo.toml, so it cannot be asserted
     /// against a literal without reintroducing drift between the two.
     /// Assert the spec's shape instead.
+    ///
+    /// Unlike `SQL_DBMS_VER` this needs no connection: it describes the driver,
+    /// which the Windows Driver Manager asks about before one exists.
     #[test]
     fn driver_ver_is_well_formed() {
-        let InfoValue::String(v) = sqlite_get_info(None, InfoType::DriverVer).unwrap() else {
-            panic!("expected String for DriverVer");
-        };
+        let v = SqliteBackend::driver_version();
         let parts: Vec<&str> = v.split('.').collect();
         assert_eq!(
             parts.len(),

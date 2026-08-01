@@ -20,6 +20,7 @@ the 73 C ABI entry points — lives in
 | [Declaring capabilities](#declaring-capabilities) | Adding or changing any `SQLGetInfo` value |
 | [Transactions](#transactions) | Touching `SQLEndTran`, autocommit or cursor behaviour |
 | [Cancellation](#cancellation) | Touching `SQLCancel` or `SQL_ATTR_QUERY_TIMEOUT` |
+| [`row_count` has three answers](#row_count-has-three-answers-not-two) | Touching `SQLRowCount` or the execute path |
 | [Catalog functions](#catalog-functions) | Touching anything in `metadata.rs` |
 | [Architecture](#architecture-of-this-crate) | Understanding the module layout |
 | [Connection string keys](#connection-string-keys) | Adding or changing a parameter |
@@ -179,16 +180,21 @@ database file is `08001`. Failures after that point are `08S01`.
 
 ### Declaring capabilities
 
-`Backend` has around two dozen **required** methods that state what SQLite can
+`Backend` has around thirty **required** methods that state what SQLite can
 do — `alter_table_support`, `outer_join_capabilities`, `subqueries`,
 `sql_conformance`, `supports_catalogs`, `identifier_case`,
-`txn_isolation_options`, `table_types` and the rest. They are required, with no
-default, deliberately: a defaulted capability is a claim no backend ever made,
-and every one of them was a bug here before core made it a compile error.
-`table_types` is required for the same reason and one of its own: an empty
-table-type list is an *answer* ("this data source has no table types"), not
-"unknown", and unlike catalogs and schemas there is no `supports_*` method for
-core to derive it from.
+`quoted_identifier_case`, `txn_capable`, `txn_isolation_options`, `integrity`,
+`multiple_active_txn`, `special_characters`, `accessible_procedures`,
+`dbms_name`, `dbms_version`, `table_types` and the rest. They are required,
+with no default, deliberately: a defaulted capability is a claim no backend
+ever made, and every one of them was a bug here before core made it a compile
+error. `table_types` is required for the same reason and one of its own: an
+empty table-type list is an *answer* ("this data source has no table types"),
+not "unknown", and unlike catalogs and schemas there is no `supports_*` method
+for core to derive it from. `special_characters` is required on that same
+principle — `""` asserts that nothing beyond the alphanumerics and underscore
+is legal unquoted, which is a claim, not an absence, and inheriting it as a
+default is how this driver came to under-report `$`.
 
 They all take `&Self::Connection`, because `SQLGetInfo` is a per-connection
 call and a data source's capabilities can differ by server. Every one this
@@ -196,9 +202,13 @@ driver declares is a property of the SQLite `rusqlite` links, not of the file
 opened, so each ignores the argument — but the answer must still be read
 through a connection, and the tests do that via `info::tests::test_connection`
 rather than calling the hook as a free function. `cursor_commit_behavior`,
-`cursor_rollback_behavior` and `catalog_result_column_widths` are the
-exceptions and take none: `SQLGetInfo` must answer the first two before a
-connection exists.
+`cursor_rollback_behavior`, `catalog_result_column_widths`, `driver_name` and
+`driver_version` are the exceptions and take none: `SQLGetInfo` must answer the
+first three before a connection exists, and the Windows Driver Manager asks for
+driver identity before `SQLDriverConnectW`. Note the split within the identity
+group — `driver_name`/`driver_version` describe the driver and take no
+connection, while `dbms_name`/`dbms_version` describe what was connected to and
+take one.
 
 The same split runs through `get_info`. `sqlite_get_info` takes
 `Option<&SqliteConnection>` — `None` on the pre-connect path — and hands it to
@@ -366,14 +376,77 @@ This is load-bearing well beyond memory use. It is why the cursor-behaviour
 hooks report `Preserve`, why `SQLEndTran` cannot disturb a cursor, and why
 concurrency is a non-issue. Changing it is not a local optimisation.
 
+### `row_count` has three answers, not two
+
+`StatementBackend::row_count` returns `Option<i64>`, and core reads all three
+possibilities differently:
+
+| Answer | Means | Here |
+|--------|-------|------|
+| `Some(n)` | the backend counted | a searched INSERT / UPDATE / DELETE, or a materialised result set |
+| `Some(-1)` | `SQL_NO_TOTAL`, cannot determine | a count exceeding `i64`; unreachable in practice |
+| `None` | not applicable to this statement | DDL, transaction control, `PRAGMA`, an unexecuted prepared statement |
+
+The distinction between the last two is not cosmetic. Core turns a statement
+with **zero columns** reporting **`Some(0)`** into `SQL_NO_DATA`, which is
+`SQLExecDirect`'s documented behaviour for "a searched update, insert, or
+delete statement that doesn't affect any rows". Answering `Some(0)` for DDL
+therefore made every `CREATE TABLE` return `SQL_NO_DATA`.
+
+SQLite offers no predicate for "is this DML" — `sqlite3_stmt_readonly` is false
+for DDL too — so `execute::is_searched_dml` decides it from the statement's
+leading keyword, past whitespace and both comment forms. `REPLACE` and `WITH`
+count alongside the obvious three: the first is an `INSERT OR REPLACE` alias,
+and the second fronts a CTE, which is only ever consulted for a zero-column
+statement, so a `WITH` that declared no columns cannot be a `WITH ... SELECT`.
+Being wrong is not symmetric, so an unrecognised keyword answers "no count":
+withholding a count leaves `SQLRowCount` at -1, while inventing one fabricates
+`SQL_NO_DATA`.
+
+Do **not** replace this with the number `rusqlite`'s `execute()` returns.
+`sqlite3_changes()` reports the rows touched by the *most recently completed*
+INSERT, UPDATE or DELETE, so a `CREATE TABLE` run after a three-row `INSERT` is
+handed that `3`. `ddl_after_dml_does_not_inherit_the_dml_row_count` pins it.
+
 ### Catalog functions
 
-The six catalog methods return **typed row vectors** — `Vec<TableRow>`,
+The six catalog methods take a **typed query object** — `&TablesQuery`,
+`&ColumnsQuery`, `&PrimaryKeysQuery`, `&ForeignKeysQuery`, `&StatisticsQuery`,
+`&SpecialColumnsQuery` — and return **typed row vectors** — `Vec<TableRow>`,
 `Vec<ColumnRow>`, `Vec<PrimaryKeyRow>`, `Vec<ForeignKeyRow>`,
 `Vec<StatisticsRow>`, `Vec<SpecialColumnRow>` — not a `Self::Statement`. Core
 converts each row to the spec's column layout, sorts the set into the order
-that function's spec page mandates, and serves it. Three consequences for
-anything changed in `metadata.rs`:
+that function's spec page mandates, and serves it.
+
+Both sides are core's types and both are sealed, which is what a change in
+`metadata.rs` has to work with:
+
+- **Neither has a struct expression here.** Every row type is
+  `#[non_exhaustive]`, so a row is built from `Default` and the consuming
+  setter per column: `TableRow::default().name(n).table_type(t)`. Each setter
+  takes `impl Into<T>`, so an `Option<String>` column accepts a bare `String`.
+  A column a driver does not populate is simply not named — which is the point,
+  since it makes a column added to a spec result set a core-only change instead
+  of a break in every driver. The query types are sealed the same way, with
+  crate-private fields, an accessor and a `with_*` setter per field, and a
+  `new()` for the arguments that have no honest default (`StatisticsQuery`'s
+  `unique_only`, `SpecialColumnsQuery`'s `identifier_type`/`scope`/`nullable`).
+- **Read the filters off the query, do not destructure it.** The run of
+  same-typed `Option<&str>` arguments these hooks used to take is exactly what
+  the query types exist to remove: `SQLForeignKeys` took six in a row, where
+  swapping a primary-key argument for its foreign-key counterpart compiled
+  without complaint. Unpacking a query back into positional arguments at the
+  trait boundary reintroduces that hazard one layer down, so the query travels
+  all the way into `metadata.rs`.
+- **`TablesQuery::table_types()` is already parsed.** Core splits `TableType`
+  on commas and strips the optional single quotes — it is a value list, not a
+  pattern, and `SQL_ATTR_METADATA_ID` never applies to it — so a backend gets a
+  `&[String]` and never parses it. Empty means no filter. A lone `"%"` does
+  still arrive, because the `SQL_ALL_TABLE_TYPES` enumeration core answers
+  itself additionally requires the other three arguments to be empty strings;
+  `metadata::tables` reads that as no filter.
+
+Three further consequences for anything changed in `metadata.rs`:
 
 - **Do not sort, and do not add an `ORDER BY` for ODBC's sake.** Core sorts,
   stably, on the spec's keys. A second ordering in the backend is one more
