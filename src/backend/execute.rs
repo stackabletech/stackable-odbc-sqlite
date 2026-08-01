@@ -21,7 +21,7 @@ use crate::type_conversion::{
 /// Nullability and the originating table come from
 /// `sqlite3_table_column_metadata`, which SQLite answers only for a column
 /// that is a plain reference to a stored table column. For a computed
-/// column — an expression, a literal, an aggregate — it reports nothing, and
+/// column (an expression, a literal, an aggregate) it reports nothing, and
 /// that is precisely `SQL_NULLABLE_UNKNOWN`: the driver cannot determine
 /// whether the column admits NULL, and the spec's third value says exactly
 /// that instead of guessing one of the other two. Guessing is not harmless in
@@ -31,7 +31,7 @@ use crate::type_conversion::{
 /// The catalog and schema stay empty even though SQLite names a database for
 /// the column. This driver reports `supports_catalogs() == false` and
 /// `supports_schemas() == false`, so naming either here would contradict what
-/// it tells applications everywhere else — `metadata::tables` reports
+/// it tells applications everywhere else: `metadata::tables` reports
 /// `TABLE_CAT` and `TABLE_SCHEM` as NULL for every row.
 fn describe_column(
     stmt: &rusqlite::Statement<'_>,
@@ -55,7 +55,7 @@ fn describe_column(
         // ("VARCHAR(50)") matches no `SQLGetTypeInfo` row.
         // `sqlite_bare_type_name` returns the bare name that does (see its doc
         // comment in `backend/info.rs`); the declared length is not lost, only
-        // moved out of the name — it is still carried as the precision above.
+        // moved out of the name. It is still carried as the precision above.
         .with_type_name(sqlite_bare_type_name(sql_type));
 
     // `Ok(None)` is a computed column and `Err` is SQLite failing to resolve a
@@ -88,7 +88,7 @@ fn describe_column(
 /// skipped. The empty string when there is none.
 ///
 /// SQLite accepts both comment forms before the opening keyword, and an
-/// unterminated block comment is legal — it swallows the rest of the text — so
+/// unterminated block comment is legal (it swallows the rest of the text), so
 /// both are handled rather than assumed away.
 fn leading_keyword(sql: &str) -> &str {
     let mut rest = sql.trim_start();
@@ -113,20 +113,20 @@ fn leading_keyword(sql: &str) -> &str {
     &rest[..end]
 }
 
-/// Whether `sql` is a searched INSERT, UPDATE or DELETE — the only statements
+/// Whether `sql` is a searched INSERT, UPDATE or DELETE, the only statements
 /// that have an affected-row count for `SQLRowCount` to report.
 ///
 /// Core reads [`StatementBackend::row_count`] as three distinct answers:
 /// `Some(n)` is "the backend counted", `Some(SQL_NO_TOTAL)` is "cannot
 /// determine", and `None` is "not applicable to this statement". It turns a
 /// zero-column statement answering `Some(0)` into `SQL_NO_DATA`, per
-/// `SQLExecDirect`'s Comments — "if SQLExecDirect executes a searched update,
+/// `SQLExecDirect`'s Comments: "if SQLExecDirect executes a searched update,
 /// insert, or delete statement that doesn't affect any rows at the data
 /// source, the call to SQLExecDirect returns SQL_NO_DATA". A `CREATE TABLE`
 /// answering `Some(0)` therefore looked to an application exactly like a
 /// searched DELETE that matched nothing.
 ///
-/// SQLite exposes no predicate for this — `sqlite3_stmt_readonly` is false for
+/// SQLite exposes no predicate for this. `sqlite3_stmt_readonly` is false for
 /// DDL too, and `sqlite3_changes()` is worse than useless here, since it holds
 /// the count from the *most recently completed* INSERT, UPDATE or DELETE and
 /// so reports a stale count after a `CREATE TABLE`. The leading keyword is what
@@ -357,13 +357,13 @@ impl StatementBackend for SqliteStatement {
 
     /// `i64` because `SQLRowCount` writes through a signed `SQLLEN *`.
     ///
-    /// Three answers, and core distinguishes all three — see
+    /// Three answers, and core distinguishes all three. See
     /// [`is_searched_dml`] for what it does with them:
     ///
     /// - **`Some(n)`** for a searched INSERT / UPDATE / DELETE, and for a
     ///   result set, whose materialised size this driver genuinely knows.
     /// - **`Some(SQL_NO_TOTAL)`** for a count that does not fit `i64`, the
-    ///   spec's "the driver cannot determine the row count" — which is what a
+    ///   spec's "the driver cannot determine the row count", which is what a
     ///   value this type cannot name actually means. Unreachable in practice:
     ///   rows are materialised in memory, so `i64::MAX` of them cannot be held.
     /// - **`None`** for a statement with no affected-row count at all: DDL,
@@ -457,7 +457,7 @@ mod tests {
     }
 
     /// A zero-column statement that reports `Some(0)` is what core turns into
-    /// `SQL_NO_DATA`, so DDL must report `None` — "no affected-row count" —
+    /// `SQL_NO_DATA`, so DDL must report `None` ("no affected-row count")
     /// rather than "counted zero". With `Some(0)` here every `CREATE TABLE`
     /// this driver ran came back as `SQL_NO_DATA`, and the whole FFI test
     /// suite's table setup failed.
@@ -500,7 +500,7 @@ mod tests {
     }
 
     /// A searched DELETE matching nothing is the case the spec actually
-    /// reserves `SQL_NO_DATA` for, and it must keep reporting `Some(0)` — the
+    /// reserves `SQL_NO_DATA` for, and it must keep reporting `Some(0)`. The
     /// fix above must not suppress it along with the DDL.
     #[test]
     fn searched_dml_matching_nothing_still_counts_zero() {

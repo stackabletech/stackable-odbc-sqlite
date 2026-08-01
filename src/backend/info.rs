@@ -124,12 +124,12 @@ static SUPPORTED_FUNCTIONS: &[FunctionId] = &[
 //
 // A `LazyLock` rather than a plain `static`: `TypeInfoRow`'s string fields are
 // `Cow<'static, str>` so a backend can compute them, and converting a `&'static
-// str` literal through `Into` is not a const operation — `TypeInfoRow::new` and
-// the three string builders are therefore not `const fn`. The table is fixed at
+// str` literal through `Into` is not a const operation, so `TypeInfoRow::new`
+// and the three string builders are not `const fn`. The table is fixed at
 // compile time, so it is built once and borrowed for the life of the process.
 static SQLITE_TYPE_INFO: std::sync::LazyLock<Vec<TypeInfoRow>> = std::sync::LazyLock::new(|| {
     vec![
-        // WVARCHAR — sqlite_type_to_sql_data_type maps VARCHAR/CHAR/CHARACTER/
+        // WVARCHAR: sqlite_type_to_sql_data_type maps VARCHAR/CHAR/CHARACTER/
         // NCHAR/NVARCHAR/VARYING CHARACTER/NATIVE CHARACTER/TEXT/CLOB here, and
         // it is the CHAR/CLOB/TEXT-affinity fallback too. This is the row that
         // actually satisfies the invariant for every text-affinity declared
@@ -144,7 +144,7 @@ static SQLITE_TYPE_INFO: std::sync::LazyLock<Vec<TypeInfoRow>> = std::sync::Lazy
             .with_literal_affixes(Some("'"), Some("'"))
             .with_create_params(Some("max length"))
             .with_case_sensitive(true),
-        // WCHAR — Unicode counterpart to the CHAR row further down this list,
+        // WCHAR: Unicode counterpart to the CHAR row further down this list,
         // included for symmetry per the Windows DM checklist even though
         // sqlite_type_to_sql_data_type itself never produces EXT_W_CHAR (declared
         // CHAR(n) collapses into the WVARCHAR affinity above, matching real
@@ -158,13 +158,13 @@ static SQLITE_TYPE_INFO: std::sync::LazyLock<Vec<TypeInfoRow>> = std::sync::Lazy
             .with_literal_affixes(Some("'"), Some("'"))
             .with_create_params(Some("length"))
             .with_case_sensitive(true),
-        // BIT — sqlite_type_to_sql_data_type maps BOOLEAN/BOOL here.
+        // BIT: sqlite_type_to_sql_data_type maps BOOLEAN/BOOL here.
         TypeInfoRow::new("BIT", SqlDataType::EXT_BIT).with_column_size(catalog_column_size(
             SqlDataType::EXT_BIT,
             MaxPrecision(0),
             MaxScale(0),
         )),
-        // TINYINT — sqlite_type_to_sql_data_type maps TINYINT here.
+        // TINYINT: sqlite_type_to_sql_data_type maps TINYINT here.
         TypeInfoRow::new("TINYINT", SqlDataType::EXT_TINY_INT)
             .with_column_size(catalog_column_size(
                 SqlDataType::EXT_TINY_INT,
@@ -175,7 +175,7 @@ static SQLITE_TYPE_INFO: std::sync::LazyLock<Vec<TypeInfoRow>> = std::sync::Lazy
             .with_auto_unique_value(Some(false))
             .with_scale_range(Some(0), Some(0))
             .with_num_prec_radix(Some(10)),
-        // BIGINT — sqlite_type_to_sql_data_type maps INTEGER/INT/BIGINT/INT8 here
+        // BIGINT: sqlite_type_to_sql_data_type maps INTEGER/INT/BIGINT/INT8 here
         // (and the "INT"-substring affinity fallback), since SQLite integers are
         // always 64-bit storage. This is the row an INTEGER column's reported
         // type (SQL_BIGINT) actually resolves to.
@@ -197,7 +197,7 @@ static SQLITE_TYPE_INFO: std::sync::LazyLock<Vec<TypeInfoRow>> = std::sync::Lazy
             ))
             .with_literal_affixes(Some("X'"), Some("'"))
             .with_create_params(Some("max length")),
-        // SQL_CHAR (1) — ANSI alias. See the SQL_VARCHAR comment further down
+        // SQL_CHAR (1): ANSI alias. See the SQL_VARCHAR comment further down
         // this list; same rationale for why this is a distinct row from the
         // WCHAR row above.
         TypeInfoRow::new("CHAR", SqlDataType::CHAR)
@@ -209,7 +209,7 @@ static SQLITE_TYPE_INFO: std::sync::LazyLock<Vec<TypeInfoRow>> = std::sync::Lazy
             .with_literal_affixes(Some("'"), Some("'"))
             .with_create_params(Some("length"))
             .with_case_sensitive(true),
-        // DECIMAL — sqlite_type_to_sql_data_type maps DECIMAL/NUMERIC here, and
+        // DECIMAL: sqlite_type_to_sql_data_type maps DECIMAL/NUMERIC here, and
         // it is also the NUMERIC-affinity fallback for any declared type that
         // SQLite's own affinity rules do not otherwise classify.
         TypeInfoRow::new("DECIMAL", SqlDataType::DECIMAL)
@@ -233,7 +233,7 @@ static SQLITE_TYPE_INFO: std::sync::LazyLock<Vec<TypeInfoRow>> = std::sync::Lazy
             .with_auto_unique_value(Some(false))
             .with_scale_range(Some(0), Some(0))
             .with_num_prec_radix(Some(10)),
-        // SMALLINT — sqlite_type_to_sql_data_type maps SMALLINT/INT2 here.
+        // SMALLINT: sqlite_type_to_sql_data_type maps SMALLINT/INT2 here.
         TypeInfoRow::new("SMALLINT", SqlDataType::SMALLINT)
             .with_column_size(catalog_column_size(
                 SqlDataType::SMALLINT,
@@ -252,7 +252,7 @@ static SQLITE_TYPE_INFO: std::sync::LazyLock<Vec<TypeInfoRow>> = std::sync::Lazy
             ))
             .with_unsigned(Some(false))
             .with_num_prec_radix(Some(2)),
-        // TEXT — column_size matches VARCHAR_DEFAULT_COLUMN_SIZE (255), the
+        // TEXT: column_size matches VARCHAR_DEFAULT_COLUMN_SIZE (255), the
         // same default `default_precision_for_type` reports for both VARCHAR and
         // EXT_W_VARCHAR (see type_conversion.rs). This row and the VARCHAR row
         // immediately below both describe SQLite's single, unbounded TEXT
@@ -269,7 +269,7 @@ static SQLITE_TYPE_INFO: std::sync::LazyLock<Vec<TypeInfoRow>> = std::sync::Lazy
             .with_literal_affixes(Some("'"), Some("'"))
             .with_create_params(Some("max length"))
             .with_case_sensitive(true),
-        // SQL_VARCHAR (12) — ANSI alias needed for Windows DM / pyodbc type
+        // SQL_VARCHAR (12): ANSI alias needed for Windows DM / pyodbc type
         // conversion (AGENTS.md "Windows Driver Manager compatibility
         // checklist"). sqlite_type_to_sql_data_type never actually returns this
         // ANSI code (only EXT_W_VARCHAR, see the WVARCHAR row above); this row
@@ -288,7 +288,7 @@ static SQLITE_TYPE_INFO: std::sync::LazyLock<Vec<TypeInfoRow>> = std::sync::Lazy
             .with_literal_affixes(Some("'"), Some("'"))
             .with_create_params(Some("max length"))
             .with_case_sensitive(true),
-        // DATE — sqlite_type_to_sql_data_type maps DATE here. SQLite has no DATE
+        // DATE: sqlite_type_to_sql_data_type maps DATE here. SQLite has no DATE
         // literal syntax; a date value is just a quoted ISO-8601 string, hence
         // the plain quote prefix/suffix (matching the TEXT row's convention)
         // rather than a typed `DATE '...'` literal.
@@ -302,14 +302,15 @@ static SQLITE_TYPE_INFO: std::sync::LazyLock<Vec<TypeInfoRow>> = std::sync::Lazy
             // 'YYYY-MM-DD'
             .with_literal_affixes(Some("'"), Some("'"))
             .with_verbose_type(SqlDataType::DATETIME.0, Some(SQL_CODE_DATE)),
-        // TIME — sqlite_type_to_sql_data_type maps TIME here. SQLite stores time
-        // values as plain "HH:MM:SS" text with no fractional-seconds field (see
-        // column_value_to_rusqlite), so scale is fixed at 0.
+        // TIME: sqlite_type_to_sql_data_type maps TIME here. SQLite stores
+        // time values as text, and MAX_FRACTIONAL_SECONDS_PRECISION (3) is the
+        // fraction its own date/time functions render (see
+        // column_value_to_rusqlite), so that is the maximum scale reported.
         // DATA_TYPE=92 (SQL_TYPE_TIME), SQL_DATA_TYPE=9 (SQL_DATETIME), SQL_DATETIME_SUB=2 (SQL_CODE_TIME)
         TypeInfoRow::new("TIME", SqlDataType::TIME)
-            // 'HH:MM:SS': SQLite has no fractional-seconds capability to report
-            // as a maximum (MAX_FRACTIONAL_SECONDS_PRECISION = 0), so this is
-            // the plain (scale-0) form of the TIME formula.
+            // 'HH:MM:SS.fff': the spec's TIME formula at
+            // MAX_FRACTIONAL_SECONDS_PRECISION, which budgets the separator
+            // and the three fractional digits alongside the eight fixed ones.
             .with_column_size(catalog_column_size(
                 SqlDataType::TIME,
                 MaxPrecision(0),
@@ -318,17 +319,17 @@ static SQLITE_TYPE_INFO: std::sync::LazyLock<Vec<TypeInfoRow>> = std::sync::Lazy
             .with_literal_affixes(Some("'"), Some("'"))
             .with_scale_range(Some(0), Some(MAX_FRACTIONAL_SECONDS_PRECISION))
             .with_verbose_type(SqlDataType::DATETIME.0, Some(SQL_CODE_TIME)),
-        // TIMESTAMP — sqlite_type_to_sql_data_type maps DATETIME/TIMESTAMP here.
-        // column_size intentionally excludes a fractional-seconds allowance: it
-        // is computed via catalog_column_size at MAX_FRACTIONAL_SECONDS_PRECISION
-        // (0), the same constant sqlite_declared_type_precision uses as the
-        // fallback for an undeclared TIMESTAMP column (see the consistency test
-        // below), so minimum/maximum scale are reported as fixed at 0 rather
-        // than claiming precision the column size does not budget for.
+        // TIMESTAMP: sqlite_type_to_sql_data_type maps DATETIME/TIMESTAMP
+        // here. column_size is computed via catalog_column_size at
+        // MAX_FRACTIONAL_SECONDS_PRECISION, the same constant
+        // sqlite_declared_type_precision uses as the fallback for an
+        // undeclared TIMESTAMP column (see the consistency test below), so the
+        // reported maximum scale and the budgeted column size cannot
+        // disagree.
         // DATA_TYPE=93 (SQL_TYPE_TIMESTAMP), SQL_DATA_TYPE=9 (SQL_DATETIME), SQL_DATETIME_SUB=3 (SQL_CODE_TIMESTAMP)
         TypeInfoRow::new("TIMESTAMP", SqlDataType::TIMESTAMP)
-            // 'YYYY-MM-DD HH:MM:SS': same no-fractional-capability rationale
-            // as the TIME row above.
+            // 'YYYY-MM-DD HH:MM:SS.fff': same rationale as the TIME row
+            // above.
             .with_column_size(catalog_column_size(
                 SqlDataType::TIMESTAMP,
                 MaxPrecision(0),
@@ -383,7 +384,7 @@ fn sqlite_get_info(
         // `supports_catalogs`/`supports_schemas` are per-connection hooks, so
         // these arms only apply once a connection exists. Pre-connect the
         // question falls through to core, which answers its generic identifier
-        // length -- the same shape it reports for every other `SQL_MAX_*_LEN`
+        // length, the same shape it reports for every other `SQL_MAX_*_LEN`
         // before a data source is open.
         InfoType::MaxCatalogNameLen
             if conn.is_some_and(|c| !SqliteBackend::supports_catalogs(c)) =>
@@ -405,8 +406,8 @@ fn sqlite_get_info(
         // level is unreachable.
         //
         // This previously advertised all four levels. Nothing applies the
-        // value an application sets -- `SQL_ATTR_TXN_ISOLATION` is stored on
-        // the connection and read back, never pushed to SQLite -- so an
+        // value an application sets (`SQL_ATTR_TXN_ISOLATION` is stored on
+        // the connection and read back, never pushed to SQLite), so an
         // application that asked for REPEATABLE READ was told it had it while
         // running serializable.
         //
@@ -415,7 +416,7 @@ fn sqlite_get_info(
             return Ok(InfoValue::U32(SQL_TXN_SERIALIZABLE));
         }
         // SQL_GETDATA_EXTENSIONS is deliberately not answered here. It states
-        // what core's own fetch path supports -- `sql_get_data` checks neither
+        // what core's own fetch path supports: `sql_get_data` checks neither
         // column order nor binding state, and `sql_set_stmt_attr_w` substitutes
         // 1 back for any SQL_ATTR_ROW_ARRAY_SIZE, so no block cursor can exist
         // for SQL_GD_BLOCK to describe. None of that is a fact about SQLite,
@@ -447,7 +448,7 @@ pub(super) fn get_info(
 /// `sqlite3_limit` (`rusqlite::Connection::limit`, a safe wrapper).
 ///
 /// The spec allows `0` for "no specified limit or the limit is unknown", and
-/// core answers `0` for exactly that reason — it has no way to know. This
+/// core answers `0` for exactly that reason, having no way to know. This
 /// driver does: these are real, enforced limits, and an application reads them
 /// to decide whether to chunk a wide `SELECT` or a long `IN` list. `0` tells it
 /// there is nothing to chunk around.
@@ -458,7 +459,7 @@ pub(super) fn get_info(
 ///
 /// Returns `None` for every other info type, leaving `sqlite_get_info` to
 /// answer. `get_info_pre_connect` has no connection and so keeps reporting
-/// `0` — with no connection the limit genuinely is unknown, which is what `0`
+/// `0`: with no connection the limit genuinely is unknown, which is what `0`
 /// means.
 fn connection_limit(
     conn: &SqliteConnection,
@@ -513,17 +514,17 @@ pub(super) fn get_info_pre_connect(info_type: InfoType) -> Result<InfoValue, Sql
     sqlite_get_info(None, info_type)
 }
 
-/// `SQL_AGGREGATE_FUNCTIONS` — SQLite has every ODBC aggregate, and accepts
+/// `SQL_AGGREGATE_FUNCTIONS`: SQLite has every ODBC aggregate, and accepts
 /// both `DISTINCT` and `ALL` as set quantifiers.
 /// <https://sqlite.org/lang_aggfunc.html>
 pub(crate) const SQLITE_AGGREGATE_FUNCTIONS: u32 =
     SQL_AF_AVG | SQL_AF_COUNT | SQL_AF_MAX | SQL_AF_MIN | SQL_AF_SUM | SQL_AF_DISTINCT | SQL_AF_ALL;
 
-/// `SQL_ALTER_TABLE` (86) — the `ALTER TABLE` clauses SQLite accepts, of those
+/// `SQL_ALTER_TABLE` (86): the `ALTER TABLE` clauses SQLite accepts, of those
 /// the ODBC bitmap can express.
 ///
 /// Every bit here was established by executing the clause against the bundled
-/// library (3.53.2), not read off the documentation —
+/// library (3.53.2), not read off the documentation.
 /// `alter_table_capabilities_are_each_live_probed` is that probe, and it
 /// checks the unclaimed bits too. That matters: `ADD CONSTRAINT` and
 /// `DROP CONSTRAINT` are recent additions, rejected by 3.51.3 and accepted by
@@ -535,7 +536,7 @@ pub(crate) const SQLITE_AGGREGATE_FUNCTIONS: u32 =
 /// - `ADD COLUMN`, with `DEFAULT` and `COLLATE`.
 /// - `ADD CONSTRAINT <name> CHECK (...)`, which rewrites the stored schema to
 ///   carry a genuine table constraint. Note the ODBC bit is all-or-nothing
-///   while SQLite accepts only `CHECK` here — `UNIQUE`, `PRIMARY KEY` and
+///   while SQLite accepts only `CHECK` here; `UNIQUE`, `PRIMARY KEY` and
 ///   `FOREIGN KEY` are still syntax errors.
 /// - `SQL_AT_CONSTRAINT_NAME_DEFINITION`, since that `CONSTRAINT <name>` clause
 ///   is exactly what the bit describes.
@@ -549,7 +550,7 @@ pub(crate) const SQLITE_AGGREGATE_FUNCTIONS: u32 =
 /// Supported by SQLite but *unrepresentable*, so absent by necessity rather
 /// than because SQLite lacks them: unqualified `DROP COLUMN` (3.35.0+) and
 /// unqualified `DROP CONSTRAINT`, for which the ODBC 3.x bitmap offers only
-/// `CASCADE` and `RESTRICT` variants — and SQLite rejects both keywords, so
+/// `CASCADE` and `RESTRICT` variants, and SQLite rejects both keywords, so
 /// claiming either would advertise a syntax an application would send and have
 /// refused. `sql.h` does carry ODBC 2.0-era `SQL_AT_ADD_COLUMN` and
 /// `SQL_AT_DROP_COLUMN` bits for the unqualified forms, but the ODBC 3.x
@@ -573,10 +574,10 @@ pub(crate) const SQLITE_AGGREGATE_FUNCTIONS: u32 =
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlgetinfo-function>
 /// SQLite: <https://www.sqlite.org/lang_altertable.html>
-/// `SQL_SUBQUERIES` (95) — the subquery forms SQLite accepts.
+/// `SQL_SUBQUERIES` (95): the subquery forms SQLite accepts.
 ///
 /// `SQL_SQ_QUANTIFIED` is deliberately absent. It covers `< ALL` / `< ANY` /
-/// `< SOME`, which SQLite does not parse — the same finding
+/// `< SOME`, which SQLite does not parse. That is the same finding
 /// `sql92_predicates_excludes_quantified_comparison_and_match` records for
 /// `SQL_SP_QUANTIFIED_COMPARISON`. Core's default claimed it, so this driver
 /// denied quantified comparison in one info type and asserted it in another.
@@ -584,10 +585,10 @@ pub(crate) const SQLITE_AGGREGATE_FUNCTIONS: u32 =
 pub(crate) const SQLITE_SUBQUERIES: u32 =
     SQL_SQ_COMPARISON | SQL_SQ_EXISTS | SQL_SQ_IN | SQL_SQ_CORRELATED_SUBQUERIES;
 
-/// `SQL_UNION` (96) — SQLite has both `UNION` and `UNION ALL`.
+/// `SQL_UNION` (96): SQLite has both `UNION` and `UNION ALL`.
 pub(crate) const SQLITE_UNION: u32 = SQL_U_UNION | SQL_U_UNION_ALL;
 
-/// `SQL_SPECIAL_CHARACTERS` (94) — the characters beyond `a`–`z`, `A`–`Z`,
+/// `SQL_SPECIAL_CHARACTERS` (94): the characters beyond `a`–`z`, `A`–`Z`,
 /// `0`–`9` and `_` that may appear in an undelimited SQLite identifier.
 ///
 /// Just `$`. SQLite's tokenizer classifies it as an identifier character, so a
@@ -609,11 +610,11 @@ pub(crate) const SQLITE_SPECIAL_CHARACTERS: &str = "$";
 #[cfg(test)]
 pub(crate) const SPECIAL_CHARACTER_CANDIDATES: &str = "$#@!%^&*-+=./:?~`|\\'\"<>(){}[],;";
 
-/// `SQL_CONVERT_FUNCTIONS` (48) — SQLite's `CAST(x AS type)`. It has no
+/// `SQL_CONVERT_FUNCTIONS` (48): SQLite's `CAST(x AS type)`. It has no
 /// ODBC `CONVERT` scalar function, so only the `CAST` bit is claimed.
 pub(crate) const SQLITE_CONVERT_FUNCTIONS: u32 = SQL_FN_CVT_CAST;
 
-/// `SQL_OUTER_JOIN_CAPABILITIES` (115) — every outer-join form SQLite
+/// `SQL_OUTER_JOIN_CAPABILITIES` (115): every outer-join form SQLite
 /// implements, and every relaxation of the `ON` clause the bitmap asks about.
 ///
 /// Each bit is proved by executing the join it describes against the bundled
@@ -637,7 +638,7 @@ pub(crate) const SQLITE_ALTER_TABLE: u32 = SQL_AT_ADD_COLUMN_SINGLE
 /// `SQL_SQL92_PREDICATES`.
 ///
 /// Deliberately absent: quantified comparison (`< ALL` / `< ANY` / `< SOME`
-/// all fail to prepare -- SQLite's `ALL`/`ANY` are set quantifiers on
+/// all fail to prepare, SQLite's `ALL`/`ANY` being set quantifiers on
 /// compound selects, not comparison quantifiers); the four `MATCH` variants
 /// (SQLite's `MATCH` is an FTS extension hook, not the SQL-92 row-matching
 /// predicate); `OVERLAPS`; and `UNIQUE`.
@@ -666,12 +667,12 @@ pub(crate) const SQLITE_SQL92_JOIN_OPERATORS: u32 = SQL_SRJO_CROSS_JOIN
     | SQL_SRJO_NATURAL_JOIN
     | SQL_SRJO_RIGHT_OUTER_JOIN;
 
-/// `SQL_SQL92_VALUE_EXPRESSIONS` — all four present.
+/// `SQL_SQL92_VALUE_EXPRESSIONS`: all four present.
 /// <https://sqlite.org/lang_expr.html>
 pub(crate) const SQLITE_SQL92_VALUE_EXPRESSIONS: u32 =
     SQL_SVE_CASE | SQL_SVE_CAST | SQL_SVE_COALESCE | SQL_SVE_NULLIF;
 
-/// `SQL_NUMERIC_FUNCTIONS` — only three.
+/// `SQL_NUMERIC_FUNCTIONS`: only three.
 ///
 /// `rusqlite`'s `bundled` feature does **not** define
 /// `SQLITE_ENABLE_MATH_FUNCTIONS`, so the entire trig/log/power/sqrt set is
@@ -683,19 +684,19 @@ pub(crate) const SQLITE_SQL92_VALUE_EXPRESSIONS: u32 =
 /// assumption that "math functions are off" implies no `sign()`.
 ///
 /// Deliberately absent despite near-misses: `MOD` (`%` is an operator, not a
-/// function, and is integer-only -- `7.5 % 2` yields `1`) and `RAND`
+/// function, and is integer-only, so `7.5 % 2` yields `1`) and `RAND`
 /// (`random()` returns a signed 64-bit integer, not ODBC's float in `[0,1)`,
 /// and takes no seed).
 /// <https://sqlite.org/lang_corefunc.html>
 pub(crate) const SQLITE_NUMERIC_FUNCTIONS: u32 =
     SQL_FN_NUM_ABS | SQL_FN_NUM_SIGN | SQL_FN_NUM_ROUND;
 
-/// `SQL_STRING_FUNCTIONS` — SQLite equivalents, several under other names:
+/// `SQL_STRING_FUNCTIONS`: SQLite equivalents, several under other names:
 /// `LCASE` is `lower()`, `UCASE` is `upper()`, `SUBSTRING` is `substr()`,
 /// `ASCII` is `unicode()`, `CHAR` is `char()`.
 ///
 /// `SOUNDEX` is claimed because this build enables `SQLITE_SOUNDEX`, which is
-/// **not** the SQLite default -- verified by probe (`soundex('Robert')` gives
+/// **not** the SQLite default, verified by probe (`soundex('Robert')` gives
 /// `R163`). A future `rusqlite` bump could silently drop it, which is why
 /// `tests::live_sqlite_supports_sign_soundex_and_octet_length` opens a real
 /// in-memory connection and calls it (along with `sign()` and
@@ -704,7 +705,7 @@ pub(crate) const SQLITE_NUMERIC_FUNCTIONS: u32 =
 /// definition.
 ///
 /// Deliberately absent: `LOCATE` and `LOCATE_2`, because `instr(haystack,
-/// needle)` reverses ODBC's `LOCATE(needle, haystack)` -- claiming it would
+/// needle)` reverses ODBC's `LOCATE(needle, haystack)`; claiming it would
 /// produce silently wrong answers rather than a clean failure. Also absent:
 /// `LEFT`/`RIGHT`/`SPACE`/`INSERT`/`REPEAT`/`DIFFERENCE` (no such function)
 /// and the `CHAR_LENGTH`/`CHARACTER_LENGTH`/`BIT_LENGTH`/`POSITION` family,
@@ -723,7 +724,7 @@ pub(crate) const SQLITE_STRING_FUNCTIONS: u32 = SQL_FN_STR_CONCAT
     | SQL_FN_STR_SOUNDEX
     | SQL_FN_STR_OCTET_LENGTH;
 
-/// `SQL_SYSTEM_FUNCTIONS` — only `IFNULL`, which SQLite spells the same way.
+/// `SQL_SYSTEM_FUNCTIONS`: only `IFNULL`, which SQLite spells the same way.
 ///
 /// SQLite has no user concept, so no `USERNAME`; and no scalar
 /// database-name function, only the `pragma_database_list` table-valued
@@ -731,14 +732,14 @@ pub(crate) const SQLITE_STRING_FUNCTIONS: u32 = SQL_FN_STR_CONCAT
 /// <https://sqlite.org/lang_corefunc.html>
 pub(crate) const SQLITE_SYSTEM_FUNCTIONS: u32 = SQL_FN_SYS_IFNULL;
 
-/// `SQL_TIMEDATE_FUNCTIONS` — only the current-date/time family.
+/// `SQL_TIMEDATE_FUNCTIONS`: only the current-date/time family.
 ///
 /// `date()`, `time()` and `datetime()` take no arguments and return the
 /// current value, so they are genuine equivalents of `CURDATE`, `CURTIME` and
 /// `NOW`, and the three `CURRENT_*` keywords work directly.
 ///
 /// Everything else is deliberately absent. SQLite has no `year()`,
-/// `month()`, `day()`, `quarter()` or `extract()` -- only `strftime()` with a
+/// `month()`, `day()`, `quarter()` or `extract()`, only `strftime()` with a
 /// format string, which requires the application to write the format itself
 /// and returns a zero-padded *string* rather than an integer. `timediff()`
 /// exists but returns a formatted delta string, not a count in a caller-chosen
@@ -767,7 +768,7 @@ pub(crate) const SQLITE_TIMEDATE_FUNCTIONS: u32 = SQL_FN_TD_NOW
 /// changes. Same reason the `ALTER TABLE` and outer-join bitmaps are probed.
 ///
 /// Cached behind a `OnceLock` because core recomputes `SQL_KEYWORDS` on every
-/// call — it cannot cache a value that is generic over the backend — and
+/// call (it cannot cache a value that is generic over the backend), and
 /// walking SQLite's keyword table each time would be wasteful. The table is
 /// fixed at link time, so one walk is enough.
 pub(crate) fn sqlite_keywords() -> &'static [std::borrow::Cow<'static, str>] {
@@ -791,7 +792,7 @@ pub(crate) fn sqlite_keywords() -> &'static [std::borrow::Cow<'static, str>] {
                 if rc != rusqlite::ffi::SQLITE_OK || ptr.is_null() || len <= 0 {
                     continue;
                 }
-                // SAFETY: as above -- `ptr`/`len` describe a live, static, ASCII
+                // SAFETY: as above. `ptr`/`len` describe a live, static, ASCII
                 // keyword that SQLite never mutates or frees.
                 let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
                 if let Ok(name) = std::str::from_utf8(bytes) {
@@ -822,7 +823,7 @@ pub(super) fn get_info_raw(
     // support in the naive sense: `SQLExecDirectW`
     // / `SQLPrepareW` do translate `{fn NAME(...)}` escapes
     // (`stackable_odbc_core::escape::translate_escapes`, driven by
-    // `SqliteBackend::escape_dialect()` -- see `crate::escape_dialect`), so
+    // `SqliteBackend::escape_dialect()`; see `crate::escape_dialect`), so
     // `{fn ABS(x)}` becomes `ABS(x)` and succeeds, and the "under other
     // names" entries documented above are remapped (`UCASE`->`upper`,
     // `LCASE`->`lower`, `SUBSTRING`->`substr`, `ASCII`->`unicode`, plus
@@ -830,11 +831,11 @@ pub(super) fn get_info_raw(
     // `SQL_TIMEDATE_FUNCTIONS` bitmap below). Names SQLite spells identically
     // to ODBC (`ABS`, `ROUND`, `CONCAT`, `LENGTH`, `IFNULL`, `CHAR`, ...) pass
     // through unchanged and already worked. Still deliberately untranslated:
-    // `CURRENT_DATE`/`CURRENT_TIME`/`CURRENT_TIMESTAMP` -- SQLite treats these
+    // `CURRENT_DATE`/`CURRENT_TIME`/`CURRENT_TIMESTAMP`. SQLite treats these
     // as bare keywords (`SELECT CURRENT_DATE();` is a syntax error), and a
     // name-only remap cannot drop the trailing `()` the `{fn ...()}` escape
     // always includes; see the `crate::escape_dialect` module doc comment.
-    // None of this is version-gated -- SQLite's version is fixed at compile
+    // None of this is version-gated: SQLite's version is fixed at compile
     // time by the `bundled` feature.
     match info_type {
         SQL_AGGREGATE_FUNCTIONS => Some(Ok(InfoValue::U32(SQLITE_AGGREGATE_FUNCTIONS))),
@@ -855,7 +856,7 @@ pub(super) fn get_info_raw(
     }
 }
 
-/// Every ODBC function this driver supports — which is exactly the set
+/// Every ODBC function this driver supports, which is exactly the set
 /// `forward_ffi!` generates a C entry point for.
 ///
 /// Derived from core rather than hand-listed. `SQLGetFunctions` is what the
@@ -984,7 +985,7 @@ mod tests {
                 expected,
                 "{} (DATA_TYPE {:?}): COLUMN_SIZE is {} but the \
                  backend-independent appendix formula for that DATA_TYPE \
-                 gives {} — the row is built from a different SqlDataType \
+                 gives {}; the row is built from a different SqlDataType \
                  than it reports",
                 row.type_name(),
                 row.data_type(),
@@ -1029,7 +1030,7 @@ mod tests {
     /// The hooks take a connection because `SQLGetInfo` is a per-connection
     /// call and a data source's capabilities can differ by server. Every one
     /// this driver declares is a property of the linked SQLite library rather
-    /// than of the file opened, so any connection answers the same — but the
+    /// than of the file opened, so any connection answers the same. The
     /// answers must still be read through one, which is what an application
     /// has.
     fn test_connection() -> SqliteConnection {
@@ -1102,11 +1103,11 @@ mod tests {
         (InfoType::ActiveEnvironments,            Expected::U16(0)),
         (InfoType::MaxIdentifierLen,              Expected::U16(DEFAULT_IDENTIFIER_LEN)),
         (InfoType::CatalogLocation,               Expected::U16(0)),
-        // TransactionCapable is SQLUSMALLINT per spec, not SQLUINTEGER -- see
+        // TransactionCapable is SQLUSMALLINT per spec, not SQLUINTEGER. See
         // the matching comment on its arm in sqlite_get_info.
         (InfoType::TransactionCapable,            Expected::U16(SQL_TC_DML as u16)),
         // --- U32 values ---
-        // CursorSensitivity is SQLUINTEGER per spec, not SQLUSMALLINT -- see
+        // CursorSensitivity is SQLUINTEGER per spec, not SQLUSMALLINT. See
         // the matching comment in stackable-odbc-core's default_get_info.
         //
         // SQL_UNSPECIFIED, not SQL_INSENSITIVE. This describes core's fetch
@@ -1185,7 +1186,7 @@ mod tests {
     }
 
     /// `SQL_DBMS_VER` is a per-connection `Backend` hook now, so it is read
-    /// through a connection rather than off the pre-connect path — which
+    /// through a connection rather than off the pre-connect path, which
     /// cannot answer it, having no data source to name the version of.
     #[test]
     fn dbms_ver_is_well_formed() {
@@ -1265,8 +1266,8 @@ mod tests {
     ///
     /// The negative half is the point, and is the same lesson
     /// `alter_table_capabilities_are_each_live_probed` records: a list that is
-    /// only extended when someone notices can understate forever. `""` — core's
-    /// old default, inherited rather than chosen — was exactly that, and had an
+    /// only extended when someone notices can understate forever. `""` (core's
+    /// old default, inherited rather than chosen) was exactly that, and had an
     /// application quoting `a$b`, a name SQLite parses bare.
     ///
     /// "Accepted" means more than "the CREATE parsed": the name must also come
@@ -1345,12 +1346,12 @@ mod tests {
     /// style tests in this module do that for COLUMN_SIZE; this test is the
     /// one that exercises these live):
     ///
-    /// - `sign()` -- survives `SQLITE_ENABLE_MATH_FUNCTIONS` being compiled
+    /// - `sign()`: survives `SQLITE_ENABLE_MATH_FUNCTIONS` being compiled
     ///   out of the `bundled` feature because it lives on the *core*
     ///   functions page, not the math one.
-    /// - `soundex()` -- exists only because this build enables the
+    /// - `soundex()`: exists only because this build enables the
     ///   non-default `SQLITE_SOUNDEX` compile flag.
-    /// - `octet_length()` -- claimed as the `SQL_FN_STR_OCTET_LENGTH`
+    /// - `octet_length()`: claimed as the `SQL_FN_STR_OCTET_LENGTH`
     ///   equivalent.
     ///
     /// If a future `rusqlite`/`libsqlite3-sys` bump silently drops one of
@@ -1366,7 +1367,7 @@ mod tests {
     /// the bundled library's `SQLITE_DEFAULT_FOREIGN_KEYS`.
     ///
     /// This goes through `connect` rather than opening a `rusqlite` connection
-    /// directly, because `connect` is where the guarantee lives — a raw
+    /// directly, because `connect` is where the guarantee lives. A raw
     /// connection would only re-test the dependency's build configuration,
     /// which is exactly what the driver stopped depending on.
     #[test]
@@ -1443,7 +1444,7 @@ mod tests {
             match get_info(&sqlite_conn, info_type) {
                 Ok(InfoValue::U16(v)) => assert!(
                     v > 0,
-                    "{info_type:?} reported 0 -- the connection limit was not read"
+                    "{info_type:?} reported 0; the connection limit was not read"
                 ),
                 other => panic!("{info_type:?} unexpected: {other:?}"),
             }
@@ -1524,7 +1525,7 @@ mod tests {
     }
 
     /// Every `SQL_SUBQUERIES` bit this driver claims, proved by preparing the
-    /// subquery form it describes — and the one it does not claim, proved by
+    /// subquery form it describes, and the one it does not claim, proved by
     /// the bundled library rejecting it.
     ///
     /// `SQL_SQ_QUANTIFIED` is the point. Core's default claimed it while this
@@ -1586,8 +1587,8 @@ mod tests {
     ///
     /// Both halves are asserted, because each can fail independently: a raw
     /// list missing SQLite's own words, or a wiring mistake that leaves core
-    /// filtering something else. Properties rather than a fixed string — a
-    /// `rusqlite` bump may legitimately add a keyword, and pinning the value
+    /// filtering something else. Properties rather than a fixed string, since
+    /// a `rusqlite` bump may legitimately add a keyword, and pinning the value
     /// would turn that into a failure.
     #[test]
     fn keywords_hook_feeds_sql_keywords_with_odbc_words_removed() {
@@ -1789,7 +1790,7 @@ mod tests {
     }
 
     /// Every `SQL_AT_*` bit this driver claims, proved by running the
-    /// `ALTER TABLE` it describes — and every bit it does *not* claim, proved
+    /// `ALTER TABLE` it describes, and every bit it does *not* claim, proved
     /// by the bundled library rejecting that syntax.
     ///
     /// The negative half is the point. A bitmap that only checks what it claims
@@ -1877,7 +1878,7 @@ mod tests {
             );
             assert!(
                 conn.execute_batch(sql).is_err(),
-                "SQL_AT bit {bit:#x} is not claimed, but SQLite accepted it -- \
+                "SQL_AT bit {bit:#x} is not claimed, but SQLite accepted it; \
                  SQLITE_ALTER_TABLE now understates and should be widened\n  {sql}"
             );
         }
@@ -1925,7 +1926,7 @@ mod tests {
         )
         .unwrap();
 
-        // SQL_OJ_LEFT / SQL_OJ_RIGHT / SQL_OJ_FULL — the three join forms.
+        // SQL_OJ_LEFT / SQL_OJ_RIGHT / SQL_OJ_FULL: the three join forms.
         for (bit, sql) in [
             (
                 SQL_OJ_LEFT,
@@ -1948,7 +1949,7 @@ mod tests {
             assert!(n > 0, "SQL_OJ bit {bit:#x}: {sql} returned no rows");
         }
 
-        // SQL_OJ_NESTED — an outer join whose operand is itself an outer join.
+        // SQL_OJ_NESTED: an outer join whose operand is itself an outer join.
         let nested: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM (l LEFT OUTER JOIN r ON l.id = r.id) \
@@ -1959,7 +1960,7 @@ mod tests {
             .expect("SQL_OJ_NESTED claimed but a nested outer join failed");
         assert!(nested > 0, "SQL_OJ_NESTED probe returned no rows");
 
-        // SQL_OJ_NOT_ORDERED — the ON-clause column order need not follow the
+        // SQL_OJ_NOT_ORDERED: the ON-clause column order need not follow the
         // table order in the FROM clause.
         let not_ordered: i64 = conn
             .query_row(
@@ -1970,7 +1971,7 @@ mod tests {
             .expect("SQL_OJ_NOT_ORDERED claimed but a reversed ON clause failed");
         assert!(not_ordered > 0, "SQL_OJ_NOT_ORDERED probe returned no rows");
 
-        // SQL_OJ_INNER — the inner table of an outer join may also be used in
+        // SQL_OJ_INNER: the inner table of an outer join may also be used in
         // an inner join.
         let inner: i64 = conn
             .query_row(
@@ -1982,7 +1983,7 @@ mod tests {
             .expect("SQL_OJ_INNER claimed but mixing an inner join in failed");
         assert!(inner > 0, "SQL_OJ_INNER probe returned no rows");
 
-        // SQL_OJ_ALL_COMPARISON_OPS — the ON clause takes any comparison
+        // SQL_OJ_ALL_COMPARISON_OPS: the ON clause takes any comparison
         // operator, not just equality.
         let any_op: i64 = conn
             .query_row(
@@ -2136,7 +2137,7 @@ mod tests {
                 produced,
                 row.type_name(),
                 "SQLITE_TYPE_INFO row {:?} (DATA_TYPE={:?}) is not reachable via \
-                 sqlite_bare_type_name (got {produced:?} instead) — no real column can \
+                 sqlite_bare_type_name (got {produced:?} instead); no real column can \
                  ever be reported under this TYPE_NAME",
                 row.type_name(),
                 row.data_type()
@@ -2168,7 +2169,7 @@ mod tests {
         // This assertion is not masking a real possible divergence: both
         // sides of the TIME/TIMESTAMP comparison below
         // read the exact same `MAX_FRACTIONAL_SECONDS_PRECISION` constant,
-        // by design (see that constant's doc comment) -- SQLite has no
+        // by design (see that constant's doc comment): SQLite has no
         // schema-declarable temporal scale for a column to differ by, so
         // "the data source's maximum" and "an undeclared column's default"
         // are the same number *by construction*, not by coincidence. This
@@ -2219,7 +2220,7 @@ mod tests {
         // 23 = 20 + 3 per the ODBC "Column Size" appendix's TIME/TIMESTAMP
         // formulas, evaluated at SQLite's documented 3-fractional-digit
         // ISO-8601 format (`YYYY-MM-DD HH:MM:SS.SSS`, format 4/7 at
-        // <https://www.sqlite.org/lang_datefunc.html>) -- see
+        // <https://www.sqlite.org/lang_datefunc.html>). See
         // `MAX_FRACTIONAL_SECONDS_PRECISION`'s doc comment in
         // `type_conversion.rs`.
         assert_eq!(
@@ -2273,7 +2274,7 @@ mod tests {
     /// The macro's three components are cross-checked against the *full*
     /// `CARGO_PKG_VERSION` string rather than against the same three
     /// `CARGO_PKG_VERSION_*` variables the macro reads. Restating the macro's
-    /// own expansion would assert nothing -- it would pass even if the macro
+    /// own expansion would assert nothing: it would pass even if the macro
     /// wired PATCH where MINOR belongs, because both sides would carry the
     /// same mistake. Going through the combined string catches exactly that.
     #[test]
@@ -2334,7 +2335,7 @@ mod tests {
     }
 
     /// RIGHT and FULL OUTER JOIN arrived in SQLite 3.39.0 and this build is
-    /// 3.53.2, so both are claimed -- verified by live probe, not assumed.
+    /// 3.53.2, so both are claimed, verified by live probe rather than assumed.
     #[test]
     fn sql92_join_operators_includes_right_and_full_outer() {
         assert_eq!(
@@ -2365,7 +2366,7 @@ mod tests {
 
     /// The bundled build compiles out SQLITE_ENABLE_MATH_FUNCTIONS, so the
     /// whole trig/log/power set is gone. `sign()` survives because it is a
-    /// *core* function, not a math one -- the one flag that would be wrong if
+    /// *core* function, not a math one, the one flag that would be wrong if
     /// inferred from "math functions are off".
     #[test]
     fn numeric_functions_is_only_the_core_three() {
@@ -2432,7 +2433,7 @@ mod tests {
         assert_eq!(SQLITE_SYSTEM_FUNCTIONS, SQL_FN_SYS_IFNULL);
     }
 
-    /// SQLite has no year()/month()/day() -- only strftime() with a format
+    /// SQLite has no year()/month()/day(), only strftime() with a format
     /// string, which is not an equivalent function. Only the current-date and
     /// current-time family is claimed.
     #[test]
@@ -2473,7 +2474,7 @@ mod tests {
     ///
     /// The check that matters is this direction. `SQLGetFunctions` is what the
     /// Windows Driver Manager builds its dispatch table from, so claiming a
-    /// function core does not export hands it a null pointer to call — whereas
+    /// function core does not export hands it a null pointer to call, whereas
     /// staying silent about one merely means the DM does not use it.
     ///
     /// `SUPPORTED_FUNCTIONS` is the hand-written list `get_functions` used to

@@ -32,10 +32,10 @@ use stackable_odbc_core::types::{ColumnValue, SqlDataType, column_size};
 /// `column_value_to_rusqlite`'s current 9-digit-nanosecond rendering) still
 /// round-trips as data: SQLite text storage is unbounded, so the extra
 /// digits are neither rejected nor truncated in storage, only
-/// under-reported by `SQL_DESC_DISPLAY_SIZE`/`COLUMN_SIZE` -- the same kind
-/// of "declared vs. actual" gap every other undeclared-length default in
+/// under-reported by `SQL_DESC_DISPLAY_SIZE`/`COLUMN_SIZE`. That is the same
+/// kind of "declared vs. actual" gap every other undeclared-length default in
 /// `default_precision_for_type` already carries, for the same reason (no
-/// real schema constraint to consult). That is an accepted, general
+/// real schema constraint to consult). It is an accepted, general
 /// limitation of describing a dynamically typed column ahead of fetching
 /// it, not something this specific constant introduces.
 pub(crate) const MAX_FRACTIONAL_SECONDS_PRECISION: i16 = 3;
@@ -54,8 +54,8 @@ pub(crate) const MAX_FRACTIONAL_SECONDS_PRECISION: i16 = 3;
 // is already handled generically by `stackable-odbc-core` (`ColumnValue::String` converts
 // to any C datetime type per the ODBC conversion matrix); the two numeric
 // encodings are a SQLite-specific convention, so they are decoded here, at
-// fetch time, where the column's declared type is known -- `stackable-odbc-core` must
-// not carry this backend-specific knowledge (see its `write_column_value`
+// fetch time, where the column's declared type is known. `stackable-odbc-core`
+// must not carry this backend-specific knowledge (see its `write_column_value`
 // doc comment).
 
 /// Convert a [`ColumnValue`] (from ODBC parameter binding) to a [`rusqlite::types::Value`]
@@ -123,7 +123,7 @@ pub fn column_value_to_rusqlite(value: &ColumnValue) -> Value {
         // text correctly in arithmetic contexts).
         ColumnValue::Decimal(s) => Value::Text(s.clone()),
         // New ColumnValue variants are not natively representable in SQLite.
-        // TODO(spec): HYC00 — optional feature not implemented; cannot store complex types in SQLite.
+        // TODO(spec): HYC00 (optional feature not implemented); cannot store complex types in SQLite.
         _ => {
             tracing::warn!(
                 value = ?value,
@@ -146,7 +146,7 @@ pub fn column_value_to_rusqlite(value: &ColumnValue) -> Value {
 /// A column declared `DATE`/`TIME`/`DATETIME`/`TIMESTAMP` is described to the
 /// application as the corresponding ODBC datetime SQL type, but SQLite may
 /// still have stored the value as `INTEGER` (epoch seconds) or `REAL` (Julian
-/// day) rather than text -- see the module-level doc comment above. Those two
+/// day) rather than text (see the module-level doc comment above). Those two
 /// cases are decoded here into a proper `ColumnValue::Date`/`Time`/`Timestamp`
 /// so `stackable-odbc-core`, which holds no SQLite-specific knowledge, only ever sees a
 /// correctly typed value.
@@ -201,8 +201,8 @@ struct DecodedDateTime {
 impl DecodedDateTime {
     /// Narrow to whichever `ColumnValue` variant `sql_type` calls for.
     ///
-    /// `sql_type` is always one of `DATE`/`TIME`/`TIMESTAMP` here -- the only
-    /// values the caller matches on before reaching this point -- so the
+    /// `sql_type` is always one of `DATE`/`TIME`/`TIMESTAMP` here (the only
+    /// values the caller matches on before reaching this point), so the
     /// fallback arm is unreachable in practice; it maps to `Timestamp` rather
     /// than panicking, since `SqlDataType` is not our enum to exhaustively
     /// match without a wildcard.
@@ -220,7 +220,7 @@ impl DecodedDateTime {
                 // `decode_epoch_seconds` always passes 0 nanos (an INTEGER
                 // epoch-seconds value has no sub-second part), but
                 // `decode_julian_day`'s REAL encoding can carry a genuine
-                // fraction -- `self.fraction` is real data, not a placeholder.
+                // fraction, so `self.fraction` is real data, not a placeholder.
                 fraction: self.fraction,
             },
             _ => ColumnValue::Timestamp {
@@ -263,7 +263,7 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 /// already isolated by the caller, into a [`DecodedDateTime`].
 ///
 /// Returns `None` if the resulting year does not fit `SQL_TIMESTAMP_STRUCT.year`
-/// (`i16`) -- see [`decode_epoch_seconds`] for how callers handle that.
+/// (`i16`). See [`decode_epoch_seconds`] for how callers handle that.
 fn timestamp_from_epoch_seconds(total_seconds: i64, nanos: u32) -> Option<DecodedDateTime> {
     let days = total_seconds.div_euclid(86_400);
     let secs_of_day = total_seconds.rem_euclid(86_400);
@@ -296,7 +296,7 @@ fn decode_epoch_seconds(epoch_seconds: i64, sql_type: SqlDataType) -> Option<Col
 }
 
 /// Decode a SQLite `REAL` datetime column (Julian day number, days since noon
-/// on proleptic-Gregorian -4713-11-24 -- the convention SQLite's own
+/// on proleptic-Gregorian -4713-11-24, the convention SQLite's own
 /// `julianday()` function uses) into the [`ColumnValue`] variant `sql_type`
 /// calls for.
 ///
@@ -611,7 +611,7 @@ mod tests {
         // 2451545.0 is 2000-01-01 12:00:00 UTC exactly (see
         // julian_day_real_decodes_to_timestamp below); adding a quarter of a
         // second's worth of days exercises the fractional-seconds path that
-        // only the REAL (Julian day) encoding can produce for TIME --
+        // only the REAL (Julian day) encoding can produce for TIME.
         // `decode_epoch_seconds` (INTEGER) never has a nonzero fraction to
         // decode, so `DecodedDateTime::fraction` must be threaded through
         // rather than dropped.

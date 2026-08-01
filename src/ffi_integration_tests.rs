@@ -83,7 +83,7 @@ unsafe fn exec_direct(stmt: *mut c_void, sql: &str) -> SqlReturn {
 ///
 /// These tests used to reach into `ConnectionHandle` for the underlying
 /// `rusqlite::Connection` and call `execute_batch` on it. Core's `handles`
-/// module is `pub(crate)` now, so that route is gone — and driving setup
+/// module is `pub(crate)` now, so that route is gone, and driving setup
 /// through the same entry points under test is the better answer anyway: a
 /// setup that silently stopped working fails here instead of leaving the test
 /// asserting against an empty table.
@@ -93,8 +93,8 @@ unsafe fn exec_direct(stmt: *mut c_void, sql: &str) -> SqlReturn {
 /// string literal, which is what makes a plain split exact here.
 /// Both this and [`query_scalar_i64`] allocate their own statement handle
 /// rather than borrowing the caller's. The statement the test is asserting
-/// about usually holds live state — a cursor, a prepared statement, bound
-/// parameters — and running setup or a read-back over it would destroy exactly
+/// about usually holds live state (a cursor, a prepared statement, bound
+/// parameters), and running setup or a read-back over it would destroy exactly
 /// what the test is there to check.
 unsafe fn setup_sql(conn: *mut c_void, sql: &str) {
     unsafe {
@@ -205,7 +205,7 @@ fn exec_direct_on_connected_handle_succeeds() {
 fn exec_direct_not_connected_returns_error() {
     unsafe {
         let (env, conn, stmt) = alloc_handles();
-        // Don't connect — should fail.
+        // Don't connect: should fail.
         let ret = exec_direct(stmt, "SELECT 1");
         assert_eq!(ret, SqlReturn::ERROR);
         cleanup(env, conn, stmt);
@@ -372,7 +372,7 @@ fn get_data_datetime_column_handles_integer_and_real_storage() {
         // Row 2: dt stored as REAL Julian day 2451545.5 == 2000-01-02
         // 00:00:00 UTC (verified against SQLite's own
         // `julianday('2000-01-02 00:00:00')`, which returns exactly this
-        // value — chosen because the Unix-epoch offset it implies,
+        // value, chosen because the Unix-epoch offset it implies,
         // 10958.0 days, multiplies back to a whole number of seconds with
         // no floating point rounding loss).
         assert_eq!(
@@ -422,7 +422,7 @@ fn get_data_col_zero_returns_error() {
         let mut ind: isize = 0;
         let ret = ffi::fetch::sql_get_data::<SqliteBackend>(
             stmt,
-            0, // bookmark column — not supported
+            0, // bookmark column, not supported
             CDataType::SBigInt as i16,
             &mut buf as *mut i64 as *mut c_void,
             8,
@@ -475,7 +475,7 @@ fn close_cursor_then_fetch_returns_no_data() {
             SqlReturn::SUCCESS
         );
 
-        // Close cursor — discards the result set entirely.
+        // Close cursor: discards the result set entirely.
         assert_eq!(
             ffi::cursor::sql_close_cursor::<SqliteBackend>(stmt),
             SqlReturn::SUCCESS
@@ -649,7 +649,7 @@ unsafe fn assert_get_info_str(conn: *mut c_void, info_type: InfoType, expected: 
 /// that produces a real value for them is `common_get_info_raw`, reached
 /// through the `get_info_raw` fallback in `sql_get_info_w`. The quoted case is
 /// core answering from `Backend::quoted_identifier_case`, so this pins the
-/// value an application sees no matter which layer produced it — see
+/// value an application sees no matter which layer produced it. See
 /// `quoted_identifiers_are_not_case_sensitive` for why it is `SQL_IC_MIXED`.
 ///
 /// The ten capability bitmaps below (`AggregateFunctions`, `Sql92Predicates`,
@@ -674,7 +674,7 @@ fn get_info_named_but_unhandled_types_fall_back_to_get_info_raw() {
 
         // SQL_MULTIPLE_ACTIVE_TXN has no `odbc_sys::InfoType` variant at all,
         // so this raw path is the only way to reach it and the only place its
-        // value can be pinned -- `get_info_snapshot` iterates named types.
+        // value can be pinned; `get_info_snapshot` iterates named types.
         // "Y": each connection is its own rusqlite::Connection with its own
         // SQLite handle, so two can have transactions open at once. See
         // SqliteBackend::multiple_active_txn.
@@ -697,7 +697,7 @@ fn get_info_named_but_unhandled_types_fall_back_to_get_info_raw() {
         }
 
         // SQLite capability bitmaps computed by SqliteBackend::get_info_raw
-        // (backend/info.rs) -- reference the same constants that function
+        // (backend/info.rs) reference the same constants that function
         // returns, rather than restating their numeric values here.
         assert_get_info_u32(
             conn,
@@ -932,7 +932,7 @@ fn sql_tables_w_returns_tables_and_views() {
 }
 
 /// `SQL_ALL_CATALOGS`, `SQL_ALL_SCHEMAS` and `SQL_ALL_TABLE_TYPES` are all the
-/// same sentinel — `"%"` — distinguished by which argument carries it while
+/// same sentinel, `"%"`, distinguished by which argument carries it while
 /// the other two are *empty strings*. Core detects and serves all three; this
 /// pins what an application actually receives from this driver.
 const SQL_ALL_SENTINEL: &str = "%";
@@ -1021,7 +1021,7 @@ fn sql_tables_w_all_table_types_lists_table_and_view() {
 /// `SQL_ALL_CATALOGS` and `SQL_ALL_SCHEMAS` are empty result sets.
 ///
 /// Core answers both without consulting the backend, because
-/// `supports_catalogs` and `supports_schemas` already say SQLite has neither —
+/// `supports_catalogs` and `supports_schemas` already say SQLite has neither,
 /// which is why this driver implements neither `catalogs` nor `schemas`.
 #[test]
 fn sql_tables_w_all_catalogs_and_all_schemas_are_empty() {
@@ -1039,7 +1039,7 @@ fn sql_tables_w_all_catalogs_and_all_schemas_are_empty() {
 }
 
 /// `"%"` in every argument is an ordinary match-everything query, not an
-/// enumeration — the sentinel only triggers when the *other* arguments are
+/// enumeration: the sentinel only triggers when the *other* arguments are
 /// empty strings. A detector keyed on `"%"` alone would answer this with a
 /// catalog list instead of the data source's tables.
 #[test]
@@ -1291,7 +1291,7 @@ fn sql_col_attribute_w_count() {
             SqlReturn::SUCCESS
         );
 
-        // Get SQL_DESC_COUNT (1001) — column_number is ignored
+        // Get SQL_DESC_COUNT (1001); column_number is ignored
         let mut num_attr: isize = 0;
         let ret = ffi::metadata::sql_col_attribute_w::<SqliteBackend>(
             stmt,
@@ -1332,7 +1332,7 @@ fn sql_columns_w_returns_column_metadata() {
         );
         assert_eq!(ret, SqlReturn::SUCCESS);
 
-        // Count rows — should be 3 columns (id, name, score)
+        // Count rows: should be 3 columns (id, name, score)
         let mut count = 0;
         loop {
             let ret = ffi::fetch::sql_fetch::<SqliteBackend>(stmt);
@@ -1355,10 +1355,10 @@ fn sql_columns_w_result_set_reports_wvarchar_identifiers_and_narrow_data_type() 
     // rather than a hand-built literal. Two properties matter enough to
     // assert at the ABI level via SQLDescribeColW:
     //   - TABLE_NAME (and every identifier column) is SQL_WVARCHAR at width
-    //     128, not the old SQL_VARCHAR/255 -- the switch the Windows Driver
+    //     128, not the old SQL_VARCHAR/255. That is the switch the Windows Driver
     //     Manager is strict about.
     //   - DATA_TYPE (a SQL_SMALLINT column) has precision 5, not the old 50
-    //     -- a SMALLINT cannot have 50 digits of precision.
+    //     (a SMALLINT cannot have 50 digits of precision).
     // A regression that reintroduces the old literals in
     // src/backend/metadata.rs would only be caught
     // by the Python integration suite without this test.
@@ -1390,7 +1390,7 @@ fn sql_columns_w_result_set_reports_wvarchar_identifiers_and_narrow_data_type() 
         let mut decimal: i16 = 0;
         let mut nullable: i16 = 0;
 
-        // Column 3: TABLE_NAME -- an identifier column.
+        // Column 3: TABLE_NAME, an identifier column.
         let ret = ffi::metadata::sql_describe_col_w::<SqliteBackend>(
             stmt,
             stackable_odbc_core::types::ColumnsResultCol::TableName.pos(),
@@ -1406,7 +1406,7 @@ fn sql_columns_w_result_set_reports_wvarchar_identifiers_and_narrow_data_type() 
         assert_eq!(data_type, SqlDataType::EXT_W_VARCHAR.0);
         assert_eq!(size, 128);
 
-        // Column 5: DATA_TYPE -- a SQL_SMALLINT column.
+        // Column 5: DATA_TYPE, a SQL_SMALLINT column.
         let ret = ffi::metadata::sql_describe_col_w::<SqliteBackend>(
             stmt,
             stackable_odbc_core::types::ColumnsResultCol::DataType.pos(),
@@ -1459,7 +1459,7 @@ fn exec_direct_insert_then_select_roundtrip() {
         // Set up the table via raw rusqlite so we don't burn statement state.
         setup_sql(conn, "CREATE TABLE t (id INTEGER, name TEXT)");
 
-        // INSERT through ODBC — row count must be 1.
+        // INSERT through ODBC: row count must be 1.
         assert_eq!(
             exec_direct(stmt, "INSERT INTO t VALUES (42, 'hello')"),
             SqlReturn::SUCCESS
@@ -1474,7 +1474,7 @@ fn exec_direct_insert_then_select_roundtrip() {
         // No SQLCloseCursor here: an INSERT produces no result set, so no
         // cursor is open and the SELECT can reuse this handle directly.
 
-        // SELECT — verify the inserted row is readable.
+        // SELECT: verify the inserted row is readable.
         assert_eq!(
             exec_direct(stmt, "SELECT id, name FROM t"),
             SqlReturn::SUCCESS
@@ -1927,7 +1927,7 @@ fn end_tran_begin_commit_roundtrip() {
 
 #[test]
 fn end_tran_begin_rollback_discards_row() {
-    // Begin a transaction, insert a row, rollback via SQLEndTran — table must be empty.
+    // Begin a transaction, insert a row, rollback via SQLEndTran. The table must be empty.
     unsafe {
         let (env, conn, stmt) = alloc_handles();
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
@@ -2024,7 +2024,7 @@ fn fetch_scroll_next_advances_cursor() {
 
 #[test]
 fn fetch_scroll_non_next_returns_error() {
-    // SQL_FETCH_FIRST (2) is not supported — must return ERROR (HY106).
+    // SQL_FETCH_FIRST (2) is not supported, so it must return ERROR (HY106).
     unsafe {
         let (env, conn, stmt) = alloc_handles();
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
@@ -2193,7 +2193,7 @@ fn sql_primary_keys_w_no_table_filter_returns_all() {
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
         setup_pk_fk_schema(conn);
 
-        // No table filter — should return PKs from both tables.
+        // No table filter, so PKs from both tables must come back.
         let ret = ffi::metadata::sql_primary_keys_w::<SqliteBackend>(
             stmt,
             std::ptr::null(),
@@ -2547,7 +2547,7 @@ fn sql_cancel_with_open_cursor_does_not_close_it() {
             SqlReturn::SUCCESS
         );
 
-        // Cancel — no-op, cursor stays open.
+        // Cancel: a no-op, cursor stays open.
         assert_eq!(
             ffi::cursor::sql_cancel::<SqliteBackend>(stmt),
             SqlReturn::SUCCESS
@@ -2564,12 +2564,12 @@ fn sql_cancel_with_open_cursor_does_not_close_it() {
 }
 
 /// A statement handle carried to another thread so `SQLCancel` can be called
-/// on it while the first thread executes — the cross-thread case the spec
+/// on it while the first thread executes: the cross-thread case the spec
 /// singles out, and the only one where cancellation has anything to do.
 ///
 /// Sound because nothing here dereferences the pointer: it is the opaque token
 /// an application holds, which every core entry point validates through its
-/// own registry. Core is built for exactly this — `sql_cancel` clones the
+/// own registry. Core is built for exactly this: `sql_cancel` clones the
 /// backend's token out of the registry before touching anything else, so the
 /// handle staying valid is core's problem, not this test's.
 struct SendStmt(*mut c_void);
@@ -2597,8 +2597,8 @@ fn sql_cancel_from_another_thread_stops_a_running_statement() {
         let stop = Arc::new(AtomicBool::new(false));
         // Held across each `SQLCancel` so the main thread can be sure no cancel
         // is in flight before it reads the diagnostic. It matters because
-        // `SQLCancel`'s *idle* branch clears the statement's diagnostic queue —
-        // correctly, since a cancelled statement may be re-executed — so a
+        // `SQLCancel`'s *idle* branch clears the statement's diagnostic queue,
+        // correctly, since a cancelled statement may be re-executed, so a
         // cancel landing after `SQLExecDirectW` returned would wipe the very
         // `HY008` this test is looking for.
         let gate = Arc::new(Mutex::new(()));
@@ -2712,7 +2712,7 @@ fn sql_statistics_w_returns_table_stat_row() {
 /// Sorting moved to core, which orders by NON_UNIQUE, TYPE, INDEX_QUALIFIER,
 /// INDEX_NAME, ORDINAL_POSITION. The table-stat row leads only because its
 /// NON_UNIQUE is NULL and this driver reports `SQL_NC_LOW` for
-/// `SQL_NULL_COLLATION` — core takes NULL placement from that hook rather than
+/// `SQL_NULL_COLLATION`. Core takes NULL placement from that hook rather than
 /// choosing for itself, so this is the test that ties the two together. It has
 /// to run through the FFI: the backend now returns rows unsorted.
 #[test]
@@ -2789,7 +2789,7 @@ fn sql_statistics_w_orders_table_stat_row_first_then_unique_before_non_unique() 
 ///
 /// `SQLStatistics` is one of only two catalog functions whose "the *TableName*
 /// argument was a null pointer" clause carries no **(DM)** marker, so the
-/// driver owns it rather than the Driver Manager — and a table this function
+/// driver owns it rather than the Driver Manager, and a table this function
 /// describes indexes of is not optional. This previously returned
 /// `SQL_SUCCESS` with no rows, which an application reads as "that table has
 /// no indexes".
@@ -3005,7 +3005,7 @@ fn get_data_truncates_string_returns_success_with_info() {
 #[test]
 fn fetch_after_no_data_returns_no_data_again() {
     // After a result set is exhausted (SQLFetch returns NO_DATA), subsequent
-    // SQLFetch calls must also return NO_DATA — not ERROR or panic.
+    // SQLFetch calls must also return NO_DATA, not ERROR or panic.
     unsafe {
         let (env, conn, stmt) = alloc_handles();
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
@@ -3052,10 +3052,10 @@ fn exec_direct_reuse_after_error() {
         let (env, conn, stmt) = alloc_handles();
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
 
-        // Invalid SQL — must fail.
+        // Invalid SQL: must fail.
         assert_eq!(exec_direct(stmt, "NOT VALID SQL AT ALL"), SqlReturn::ERROR);
 
-        // Valid query on the same handle — must succeed.
+        // Valid query on the same handle: must succeed.
         assert_eq!(exec_direct(stmt, "SELECT 1"), SqlReturn::SUCCESS);
         assert_eq!(
             ffi::fetch::sql_fetch::<SqliteBackend>(stmt),
@@ -3081,7 +3081,7 @@ fn exec_direct_reuse_after_error() {
 }
 
 // ---------------------------------------------------------------------------
-// P2: SQLColAttributeW — nullable, precision, octet_length via FFI
+// P2: SQLColAttributeW (nullable, precision, octet_length via FFI)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -3096,7 +3096,7 @@ fn sql_col_attribute_w_reports_each_columns_real_nullability() {
     //
     // The third is the one worth stating. `sqlite3_table_column_metadata`
     // answers nothing for a computed column, so the driver genuinely cannot
-    // determine it — and the spec has a value for exactly that, rather than
+    // determine it, and the spec has a value for exactly that, rather than
     // requiring a guess. This driver used to report SQL_NULLABLE for all
     // three.
     unsafe {
@@ -3209,7 +3209,7 @@ fn sql_col_attribute_w_returns_octet_length_for_integer() {
 
 #[test]
 fn close_cursor_twice_returns_error() {
-    // The second SQLCloseCursor call must return ERROR (SQLSTATE 24000 — invalid
+    // The second SQLCloseCursor call must return ERROR (SQLSTATE 24000, invalid
     // cursor state) because there is no open cursor after the first close.
     unsafe {
         let (env, conn, stmt) = alloc_handles();
@@ -3225,12 +3225,12 @@ fn close_cursor_twice_returns_error() {
             SqlReturn::SUCCESS
         );
 
-        // First close — cursor is open, must succeed.
+        // First close: cursor is open, must succeed.
         assert_eq!(
             ffi::cursor::sql_close_cursor::<SqliteBackend>(stmt),
             SqlReturn::SUCCESS
         );
-        // Second close — no cursor open, must return ERROR (24000).
+        // Second close: no cursor open, must return ERROR (24000).
         assert_eq!(
             ffi::cursor::sql_close_cursor::<SqliteBackend>(stmt),
             SqlReturn::ERROR
@@ -3271,7 +3271,7 @@ fn num_result_cols_after_prepare_before_execute() {
 }
 
 // ---------------------------------------------------------------------------
-// P3: SQLGetDiagFieldW — field-by-field after an error
+// P3: SQLGetDiagFieldW (field-by-field after an error)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -3456,7 +3456,7 @@ fn get_diag_field_message_text_long_message_does_not_panic() {
 }
 
 // ---------------------------------------------------------------------------
-// P3: SQLGetEnvAttrW — ODBC version roundtrip
+// P3: SQLGetEnvAttrW (ODBC version roundtrip)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -3856,7 +3856,7 @@ fn exec_direct_sends_bound_parameters() {
         assert_eq!(
             ffi::fetch::sql_fetch::<SqliteBackend>(stmt),
             SqlReturn::SUCCESS,
-            "no row returned — the bound parameter was not sent"
+            "no row returned; the bound parameter was not sent"
         );
         let mut out: i64 = 0;
         let mut ind: isize = 0;
@@ -4135,7 +4135,7 @@ fn data_at_execution_insert() {
             SqlReturn::SUCCESS
         );
 
-        // SQLParamData: no more pending params — should execute the INSERT and return SUCCESS.
+        // SQLParamData: no more pending params, so it should execute the INSERT and return SUCCESS.
         let mut value_ptr2: *mut c_void = std::ptr::null_mut();
         assert_eq!(
             ffi::params::sql_param_data::<SqliteBackend>(stmt, &mut value_ptr2),
@@ -4322,7 +4322,7 @@ fn txn_isolation_accepts_only_the_level_sqlite_implements() {
     // The spec assigns this check to the driver: the Driver Manager validates
     // only attributes "that accept a discrete set of values". An application
     // that asked for READ COMMITTED previously got SQL_SUCCESS and serializable
-    // behaviour anyway -- it had no way to find out it had not been honoured.
+    // behaviour anyway; it had no way to find out it had not been honoured.
     unsafe {
         let (env, conn, stmt) = alloc_handles();
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
@@ -4719,11 +4719,11 @@ fn timestamp_column_stored_as_text_read_as_type_timestamp() {
 // a string (or vice versa), and conversion bitmaps that returned 0 (which
 // makes the Windows DM block SQLGetData with HYC00). Line coverage stayed
 // green throughout, because the code path that produced the wrong answer
-// ran constantly -- nobody had asserted what it returned for every info
+// ran constantly, and nobody had asserted what it returned for every info
 // type, just the ones a test happened to name.
 //
 // These two tests close that gap by iterating every `InfoType` odbc-sys
-// compiles (derived from `info_type_from_raw`, not a hand-copied list -- see
+// compiles (derived from `info_type_from_raw`, not a hand-copied list; see
 // `stackable_odbc_core::conformance`) through the real `sql_get_info_w` FFI entry
 // point, against the real `SqliteBackend`, connected and pre-connect.
 
@@ -4769,7 +4769,7 @@ fn get_info_every_named_info_type_has_the_declared_shape_connected() {
 /// info types (e.g. `SQL_DRIVER_ODBC_VER`) before `SQLDriverConnectW`, which
 /// routes through `SqliteBackend::get_info_pre_connect` instead of
 /// `get_info`. `sqlite_get_info` backs both, so this is expected to match
-/// the connected test above for every info type -- asserted separately
+/// the connected test above for every info type, asserted separately
 /// because the two call sites in `sql_get_info_w` are independent code
 /// paths that could regress independently.
 #[test]
@@ -4801,7 +4801,7 @@ fn get_info_every_named_info_type_has_the_declared_shape_pre_connect() {
 }
 
 /// Property 2: no genuine `SQL_CONVERT_*` code ever returns 0 through
-/// `SqliteBackend` -- per `AGENTS.md`, a `0` conversion bitmap is what makes
+/// `SqliteBackend`. Per `AGENTS.md`, a `0` conversion bitmap is what makes
 /// the Windows Driver Manager block `SQLGetData` with `HYC00`.
 #[test]
 fn get_info_no_genuine_convert_info_type_ever_returns_zero() {
@@ -4818,7 +4818,7 @@ fn get_info_no_genuine_convert_info_type_ever_returns_zero() {
             );
             assert_ne!(
                 value, 0,
-                "raw SQL_CONVERT_* info type {info_type} returned 0 -- this is the \
+                "raw SQL_CONVERT_* info type {info_type} returned 0; this is the \
                  exact shape that makes the Windows Driver Manager block SQLGetData \
                  with HYC00 (AGENTS.md)"
             );
@@ -4942,7 +4942,7 @@ fn escape_fn_curdate_executes_as_sqlite_date() {
 /// use. `EscapeDialect::rewrite_scalar_fn` replaces the whole escape, which is
 /// what emitting a bare keyword requires.
 ///
-/// Only the shape is asserted -- these are clock values.
+/// Only the shape is asserted, these being clock values.
 #[test]
 fn escape_bare_keyword_datetime_fns_execute() {
     unsafe {
@@ -4962,7 +4962,7 @@ fn escape_bare_keyword_datetime_fns_execute() {
             assert_eq!(
                 exec_direct(stmt, sql),
                 SqlReturn::SUCCESS,
-                "{sql} failed to translate -- the escape's trailing () most \
+                "{sql} failed to translate; the escape's trailing () most \
                  likely reached SQLite"
             );
             assert_eq!(
@@ -5059,7 +5059,7 @@ fn escape_fn_now_executes_as_sqlite_datetime() {
 /// eagerly; see `SqliteBackend::cursor_commit_behavior` for why that, and not
 /// SQLite's own semantics, decides the answer. SQLite would abort a pending
 /// read on ROLLBACK (`SQLITE_ABORT`, >= 3.7.11), which would be
-/// `SQL_CB_CLOSE` — but this driver never has one pending.
+/// `SQL_CB_CLOSE`, but this driver never has one pending.
 #[test]
 fn end_tran_cursor_behaviour_is_preserve_for_commit_and_rollback() {
     use stackable_odbc_core::types::{SQL_CB_PRESERVE, SQL_CURSOR_ROLLBACK_BEHAVIOR};
@@ -5123,7 +5123,7 @@ fn close_cursor_after_dml_returns_no_cursor_open() {
             SqlReturn::ERROR
         );
 
-        // The handle is still usable — the rejected close changed nothing.
+        // The handle is still usable: the rejected close changed nothing.
         assert_eq!(
             exec_direct(stmt, "SELECT v FROM dml_cc"),
             SqlReturn::SUCCESS

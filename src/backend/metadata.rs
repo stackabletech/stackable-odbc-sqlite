@@ -228,7 +228,7 @@ fn tables_to_inspect(
 /// this list must name exactly the values [`tables`] can put in `TABLE_TYPE`.
 ///
 /// Upper case per the spec, which has applications specify table types in
-/// upper case and the driver map them to whatever the data source needs --
+/// upper case and the driver map them to whatever the data source needs.
 /// SQLite spells its own lower case, and [`tables`] does that mapping.
 pub(super) fn table_types() -> Vec<std::borrow::Cow<'static, str>> {
     vec![
@@ -255,11 +255,11 @@ pub(super) fn tables(
 ) -> Result<Vec<TableRow>, SqliteError> {
     // ODBC spec: empty string is a valid (but useless for SQLite) filter; treat
     // as no-filter. Treat "%" (match-all wildcard) as no-filter too, to avoid
-    // LIKE '%' overhead -- an ordinary query is all that can arrive now.
+    // LIKE '%' overhead. An ordinary query is all that can arrive now.
     let table = query.table().filter(|s| !s.is_empty() && *s != "%");
 
     // `TableType` is a value list, not a pattern, and core has already split it
-    // on commas and stripped the optional single quotes -- so what arrives is
+    // on commas and stripped the optional single quotes, so what arrives is
     // the parsed values, with empty ones already dropped. A lone "%" still
     // reaches here: the `SQL_ALL_TABLE_TYPES` enumeration core answers itself
     // additionally requires the other three arguments to be empty strings, so
@@ -505,7 +505,7 @@ pub(super) fn foreign_keys(
             // NULL", which `ForeignKeyRow` enforces. `PRAGMA foreign_key_list`
             // leaves `to` NULL for an implicit reference (`REFERENCES parent`
             // with no column list), which SQLite defines as referencing the
-            // parent's PRIMARY KEY -- so the name is recoverable, and is
+            // parent's PRIMARY KEY, so the name is recoverable, and is
             // resolved rather than reported as a NULL the column cannot hold.
             let pk_column_name = match to_col {
                 Some(c) => c,
@@ -577,7 +577,7 @@ fn parent_pk_column(
 /// Rows are returned unsorted. Core orders them per spec by NON_UNIQUE, TYPE,
 /// INDEX_QUALIFIER, INDEX_NAME, ORDINAL_POSITION, and the table-stat row still
 /// comes first because its NON_UNIQUE is NULL and this driver reports
-/// `SQL_NC_LOW` for `SQL_NULL_COLLATION` -- core's sorter takes NULL placement
+/// `SQL_NC_LOW` for `SQL_NULL_COLLATION`. Core's sorter takes NULL placement
 /// from that hook rather than choosing for itself.
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlstatistics-function>
@@ -921,7 +921,7 @@ mod tests {
 
     /// These tests assert what the backend now owns: which rows exist and what
     /// each column holds. Column *order* and row *order* moved to core, which
-    /// converts these structs to the spec's layout and sorts them — so an
+    /// converts these structs to the spec's layout and sorts them, so an
     /// ordering assertion belongs at the FFI level, where core's sort has
     /// actually run, not here. See `ffi_integration_tests.rs`.
     fn setup_test_db() -> SqliteConnection {
@@ -1029,7 +1029,7 @@ mod tests {
     #[test]
     fn tables_table_type_percent_with_table_wildcard_lists_tables() {
         let conn = setup_test_db();
-        // TableType="%" with TableName="%" is not an enumeration — core only
+        // TableType="%" with TableName="%" is not an enumeration. Core only
         // treats "%" as `SQL_ALL_TABLE_TYPES` when the other three arguments
         // are empty strings, so this reaches the backend as an ordinary query
         // and must list actual tables and views.
@@ -1210,7 +1210,7 @@ mod tests {
     /// `PKCOLUMN_NAME` is one of the columns the spec marks "not NULL", and
     /// `ForeignKeyRow` enforces that. `REFERENCES parent` with no column list
     /// leaves `PRAGMA foreign_key_list`'s `to` NULL, which this driver used to
-    /// report as a NULL `PKCOLUMN_NAME` — a value the column cannot hold.
+    /// report as a NULL `PKCOLUMN_NAME`, a value the column cannot hold.
     /// SQLite defines the implicit target as the parent's primary key, so the
     /// name is recovered rather than dropped.
     #[test]

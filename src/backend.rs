@@ -47,7 +47,7 @@ pub struct SqliteConnection {
     /// [`Backend::cancel_token`] cannot fail and cannot block: reaching through
     /// the `Mutex` would mean either waiting on whatever thread is executing or
     /// inventing an answer for a poisoned lock. Capturing it once at connect
-    /// time is also what core's `cancel_token` doc asks for — assemble the
+    /// time is also what core's `cancel_token` doc asks for: assemble the
     /// token with the connection in hand, never lazily inside `cancel`.
     pub(crate) interrupt: Arc<rusqlite::InterruptHandle>,
     /// True while the application has turned autocommit off. `end_tran` reads
@@ -83,7 +83,7 @@ impl SqliteStatement {
     }
 
     /// Create a new SqliteStatement representing a completed statement that
-    /// produced no result set — DML, DDL, transaction control or a PRAGMA.
+    /// produced no result set: DML, DDL, transaction control or a PRAGMA.
     ///
     /// `affected_rows` is `Some` only for a searched INSERT / UPDATE / DELETE,
     /// carrying the count reported by rusqlite's `execute()`; everything else
@@ -118,7 +118,7 @@ pub enum SqliteError {
     /// `Backend::Error` is bounded by `From<OdbcError>` so that a defaulted
     /// trait body can construct an error and still name `Self::Error`. This
     /// variant is how such an error travels back to core with its SQLSTATE,
-    /// native error code and causal chain intact — classifying it a second
+    /// native error code and causal chain intact. Classifying it a second
     /// time would flatten all three.
     #[snafu(display("{source}"))]
     Odbc { source: OdbcError },
@@ -142,7 +142,7 @@ pub enum SqliteError {
     //
     // The field is named `cause`, not `source`, because `snafu` special-cases
     // a field called `source` and requires it to implement `std::error::Error`
-    // directly — which `Option<rusqlite::Error>` does not.
+    // directly, which `Option<rusqlite::Error>` does not.
     #[snafu(display("unable to open database: {message}"))]
     ConnectionFailed {
         message: String,
@@ -193,7 +193,7 @@ pub enum SqliteError {
     },
 }
 
-/// Operation canceled — `HY008`.
+/// Operation canceled (`HY008`).
 ///
 /// The SQLSTATE the spec lists for every function that can be stopped by
 /// `SQLCancel` (`SQLExecDirect`, `SQLExecute`, `SQLFetch`, the catalog
@@ -280,7 +280,7 @@ pub(crate) fn map_sqlite_error(e: rusqlite::Error) -> SqliteError {
                 _ => SqliteError::Rusqlite { source: e },
             }
         }
-        // Errors rusqlite raises itself, without a SQLite result code — so
+        // Errors rusqlite raises itself, without a SQLite result code, so
         // there is no extended code to carry, but the error itself is still
         // worth preserving as the cause.
         rusqlite::Error::InvalidColumnName(ref name) => {
@@ -389,7 +389,7 @@ impl Backend for SqliteBackend {
     /// because SQLite documents `sqlite3_interrupt` as safe to call from a
     /// thread other than the one running the query.
     ///
-    /// The `Arc` is the requirement core states for an aliasing token — it has
+    /// The `Arc` is the requirement core states for an aliasing token: it has
     /// to survive a concurrent `SQLDisconnect`, because core clones the token
     /// out before doing anything else. `rusqlite`'s `InterruptHandle` already
     /// satisfies the underlying rule ("it is not safe to call this routine with
@@ -407,7 +407,7 @@ impl Backend for SqliteBackend {
 
     /// Hand out the connection's interrupt handle. Infallible and lock-free:
     /// the handle was captured in [`SqliteBackend::connect`], so this only
-    /// bumps a refcount — see `SqliteConnection::interrupt`. Not an intra-doc
+    /// bumps a refcount (see `SqliteConnection::interrupt`). Not an intra-doc
     /// link: that field is `pub(crate)`, and rustdoc rejects a public item
     /// linking to a private one.
     fn cancel_token(conn: &SqliteConnection) -> Arc<rusqlite::InterruptHandle> {
@@ -419,12 +419,12 @@ impl Backend for SqliteBackend {
     /// `sqlite3_interrupt` makes the in-flight `sqlite3_step` return
     /// `SQLITE_INTERRUPT`, which surfaces from
     /// [`stackable_odbc_core::backend::Backend::exec_direct`] and friends as
-    /// `HY008` ("operation canceled") via `map_sqlite_error` — the SQLSTATE the
+    /// `HY008` ("operation canceled") via `map_sqlite_error`, the SQLSTATE the
     /// spec defines for a statement stopped by `SQLCancel`.
     ///
     /// Safe on both of `SQLCancel`'s paths. It never blocks on this
-    /// connection's own `Mutex`, so the idle path — where core holds the
-    /// connection's group lock across this call — cannot deadlock; the only
+    /// connection's own `Mutex`, so the idle path, where core holds the
+    /// connection's group lock across this call, cannot deadlock; the only
     /// lock taken is `rusqlite`'s short-lived interrupt lock, which no ODBC
     /// entry point holds. It is also a no-op rather than an error when nothing
     /// is running, which is exactly what the spec asks of `SQLCancel` in that
@@ -444,7 +444,7 @@ impl Backend for SqliteBackend {
         //
         // SQLite defaults this off for backward compatibility. The bundled
         // library happens to be compiled with `SQLITE_DEFAULT_FOREIGN_KEYS`,
-        // so it was already on — but that is a property of one dependency's
+        // so it was already on, but that is a property of one dependency's
         // build, not of SQLite, and dropping `rusqlite`'s `bundled` feature
         // for a system library would silently turn referential integrity off
         // while the driver went on advertising it.
@@ -452,7 +452,7 @@ impl Backend for SqliteBackend {
         // The pragma is per-connection and a no-op inside a transaction; here
         // there is not one yet. `PRAGMA foreign_keys` is also a no-op rather
         // than an error on a build compiled with `SQLITE_OMIT_FOREIGN_KEY`,
-        // which is why `Backend::connect` cannot treat success as proof —
+        // which is why `Backend::connect` cannot treat success as proof.
         // `integrity_enhancement_facility_is_actually_enforced` reads the
         // value back through this function.
         conn.execute_batch("PRAGMA foreign_keys = ON")
@@ -539,7 +539,7 @@ impl Backend for SqliteBackend {
     /// `SQL_CB_CLOSE`. The value below is a property of this driver's
     /// architecture, not of SQLite.
     ///
-    /// If result sets ever become lazily streamed, revisit both hooks — and
+    /// If result sets ever become lazily streamed, revisit both hooks, and
     /// note that `SQL_CB_CLOSE` would then also require a real
     /// [`stackable_odbc_core::backend::StatementBackend::close_cursor`].
     ///
@@ -548,7 +548,7 @@ impl Backend for SqliteBackend {
         CursorBehavior::Preserve
     }
 
-    /// See [`SqliteBackend::cursor_commit_behavior`] — same reasoning, same
+    /// See [`SqliteBackend::cursor_commit_behavior`]: same reasoning, same
     /// value.
     fn cursor_rollback_behavior() -> CursorBehavior {
         CursorBehavior::Preserve
@@ -557,8 +557,8 @@ impl Backend for SqliteBackend {
     /// `SQL_IC_MIXED`: SQLite stores an unquoted identifier with the case it
     /// was written in, and matches it case-insensitively.
     ///
-    /// `SQL_IC_MIXED` is the spec's value for exactly that pair — "stored in
-    /// mixed case and case-insensitive" — as opposed to `SQL_IC_UPPER` /
+    /// `SQL_IC_MIXED` is the spec's value for exactly that pair ("stored in
+    /// mixed case and case-insensitive"), as opposed to `SQL_IC_UPPER` /
     /// `SQL_IC_LOWER`, which fold the stored name, and `SQL_IC_SENSITIVE`,
     /// which would make `SELECT * FROM T` and `SELECT * FROM t` name different
     /// tables. They do not.
@@ -568,7 +568,7 @@ impl Backend for SqliteBackend {
     /// for "case-insensitive for some characters".
     ///
     /// Distinct from [`SqliteBackend::quoted_identifier_case`], which describes
-    /// *quoted* identifiers — and which answers the same here, for the reason
+    /// *quoted* identifiers, and which answers the same here, for the reason
     /// given there.
     ///
     /// <https://sqlite.org/lang_keywords.html>
@@ -584,7 +584,7 @@ impl Backend for SqliteBackend {
     /// *delimiter* here, not a case-sensitivity switch: they let a keyword or a
     /// name with punctuation be used as an identifier, and nothing more. A
     /// table created as `"MixedCase"` is still found by `"mixedcase"`, and the
-    /// catalog stores the name with the case it was written in — which is
+    /// catalog stores the name with the case it was written in, which is
     /// precisely `SQL_IC_MIXED`.
     ///
     /// `quoted_identifiers_are_not_case_sensitive` probes this against the
@@ -601,9 +601,9 @@ impl Backend for SqliteBackend {
     /// NULL for every row, and a `catalog = "%"` enumeration returns an empty
     /// result set.
     ///
-    /// Core derives the whole catalog group from this — `SQL_CATALOG_NAME`,
+    /// Core derives the whole catalog group from this (`SQL_CATALOG_NAME`,
     /// `SQL_CATALOG_TERM`, `SQL_CATALOG_NAME_SEPARATOR`,
-    /// `SQL_CATALOG_LOCATION` and `SQL_CATALOG_USAGE` — so this driver answers
+    /// `SQL_CATALOG_LOCATION` and `SQL_CATALOG_USAGE`), so this driver answers
     /// none of them itself. Before the hook existed it answered three and let
     /// the other two inherit defaults that named a catalog, telling an
     /// application catalogs do not exist and giving their name in the same
@@ -648,9 +648,9 @@ impl Backend for SqliteBackend {
     /// The only level reachable from this driver.
     ///
     /// READ COMMITTED and REPEATABLE READ are not SQLite concepts. READ
-    /// UNCOMMITTED needs shared-cache mode — "the only way that one database
+    /// UNCOMMITTED needs shared-cache mode ("the only way that one database
     /// connection can see uncommitted changes on a different database
-    /// connection" — and [`SqliteBackend::connect`] opens with a plain
+    /// connection"), and [`SqliteBackend::connect`] opens with a plain
     /// `rusqlite::Connection::open`, so it is unreachable.
     ///
     /// Returning a single level also means core's default
@@ -662,7 +662,7 @@ impl Backend for SqliteBackend {
     }
 
     /// `SQL_TC_DML`: SQLite runs DML inside a transaction, and a DDL statement
-    /// inside one causes neither a commit nor an error — SQLite's DDL is
+    /// inside one causes neither a commit nor an error. SQLite's DDL is
     /// transactional, so `CREATE TABLE` simply participates.
     ///
     /// `SQL_TC_ALL` would be the stronger claim and is tempting for that
@@ -678,9 +678,9 @@ impl Backend for SqliteBackend {
     /// level and then reporting no transaction support is the
     /// self-contradiction that pairing exists to catch.
     ///
-    /// `SQL_TC_DML` is a small fixed constant, so the narrowing `as u16` — the
-    /// `SQL_TC_*` constants are typed `u32` for bitmask use, while the info
-    /// type is `SQLUSMALLINT` — cannot lose information.
+    /// `SQL_TC_DML` is a small fixed constant, so the narrowing `as u16`
+    /// cannot lose information. (The `SQL_TC_*` constants are typed `u32` for
+    /// bitmask use, while the info type is `SQLUSMALLINT`.)
     fn txn_capable(_conn: &SqliteConnection) -> u16 {
         SQL_TC_DML as u16
     }
@@ -691,7 +691,7 @@ impl Backend for SqliteBackend {
     ///
     /// The spec asks about the *driver*, not about one connection: "`"Y"` if
     /// the driver supports more than one active transaction at the same time".
-    /// Nothing here serialises across connections — `SqliteBackend::connect`
+    /// Nothing here serialises across connections: `SqliteBackend::connect`
     /// opens a fresh handle per call and shares no state between them. What
     /// SQLite does when those transactions contend for the same file is a
     /// locking question (`SQLITE_BUSY`), not a question of how many can be
@@ -700,9 +700,9 @@ impl Backend for SqliteBackend {
         true
     }
 
-    /// `true`: SQLite implements the whole Integrity Enhancement Facility —
-    /// `PRIMARY KEY`, `UNIQUE`, `NOT NULL`, `CHECK`, `DEFAULT` and `FOREIGN
-    /// KEY` with referential actions — and this build enforces all of it.
+    /// `true`: SQLite implements the whole Integrity Enhancement Facility
+    /// (`PRIMARY KEY`, `UNIQUE`, `NOT NULL`, `CHECK`, `DEFAULT` and `FOREIGN
+    /// KEY` with referential actions), and this build enforces all of it.
     ///
     /// Referential integrity in particular is enforced by construction, not by
     /// chance: [`SqliteBackend::connect`] issues `PRAGMA foreign_keys = ON`,
@@ -730,7 +730,7 @@ impl Backend for SqliteBackend {
         SQL_GB_NO_RELATION
     }
 
-    /// `SQL_NC_LOW`: SQLite sorts NULLs at the low end — first ascending, last
+    /// `SQL_NC_LOW`: SQLite sorts NULLs at the low end, first ascending, last
     /// descending.
     fn null_collation(_conn: &SqliteConnection) -> u16 {
         SQL_NC_LOW
@@ -761,7 +761,7 @@ impl Backend for SqliteBackend {
     /// driver will always return the SQL_GB_GROUP_BY_EQUALS_SELECT option as
     /// supported", "will always return SQL_CN_ANY", and "will return
     /// SQL_NNC_NON_NULL". This driver matches the last two and cannot match the
-    /// first — SQLite's `GROUP BY` is deliberately unrelated to the select list
+    /// first: SQLite's `GROUP BY` is deliberately unrelated to the select list
     /// (see [`SqliteBackend::group_by`]), which is a permissive extension, not
     /// entry-level behaviour.
     ///
@@ -797,18 +797,18 @@ impl Backend for SqliteBackend {
         true
     }
 
-    /// `SQL_CB_NULL`: concatenating a NULL yields NULL — `'a' || NULL` is
+    /// `SQL_CB_NULL`: concatenating a NULL yields NULL. `'a' || NULL` is
     /// NULL, not `'a'`.
     fn concat_null_behavior(_conn: &SqliteConnection) -> u16 {
         SQL_CB_NULL
     }
 
-    /// See `info::SQLITE_UNION` — both `UNION` and `UNION ALL`.
+    /// See `info::SQLITE_UNION`: both `UNION` and `UNION ALL`.
     fn union_support(_conn: &SqliteConnection) -> u32 {
         info::SQLITE_UNION
     }
 
-    /// See `info::SQLITE_CONVERT_FUNCTIONS` — `CAST` only.
+    /// See `info::SQLITE_CONVERT_FUNCTIONS`: `CAST` only.
     fn convert_functions(_conn: &SqliteConnection) -> u32 {
         info::SQLITE_CONVERT_FUNCTIONS
     }
@@ -837,7 +837,7 @@ impl Backend for SqliteBackend {
     /// The counterpart of [`SqliteBackend::accessible_tables`], and the
     /// opposite answer for a different reason. That one is `true` because every
     /// table SQLTables returns is reachable; this is `false` because
-    /// `SQLProcedures` returns nothing to be reachable in the first place —
+    /// `SQLProcedures` returns nothing to be reachable in the first place:
     /// this driver leaves `Backend::procedures` defaulted to no rows, and
     /// reports `SQL_PROCEDURES = "N"` through core.
     fn accessible_procedures(_conn: &SqliteConnection) -> bool {
@@ -848,7 +848,7 @@ impl Backend for SqliteBackend {
     ///
     /// This describes the driver's own behaviour, not the file. A database on
     /// read-only media, or one whose file permissions deny writes, still
-    /// reports `false` here and fails the write itself — which is what the
+    /// reports `false` here and fails the write itself, which is what the
     /// spec's "data source is set to READ ONLY mode" means.
     fn data_source_read_only(_conn: &SqliteConnection) -> bool {
         false
@@ -864,14 +864,14 @@ impl Backend for SqliteBackend {
         Cow::Borrowed(info::sqlite_keywords())
     }
 
-    /// `"$"` — the one character beyond `a`–`z`, `A`–`Z`, `0`–`9` and `_` that
+    /// `"$"`, the one character beyond `a`–`z`, `A`–`Z`, `0`–`9` and `_` that
     /// SQLite accepts in an undelimited identifier.
     ///
     /// SQLite's tokenizer treats `$` as an identifier character, so
     /// `CREATE TABLE a$b (...)` parses and the name round-trips through
     /// `sqlite_master` unchanged. An application reads this info type to decide
-    /// when it must quote, so the previous `""` — core's old default, not a
-    /// claim this driver ever made — told it to quote a name that needs no
+    /// when it must quote, so the previous `""` (core's old default, not a
+    /// claim this driver ever made) told it to quote a name that needs no
     /// quoting.
     ///
     /// Every candidate is executed against the bundled library in
@@ -927,8 +927,8 @@ impl Backend for SqliteBackend {
     ///
     /// The spec permits appending the data source's own version string after
     /// the fixed-width prefix, which keeps the familiar `3.53.2` visible to
-    /// anyone reading the value by eye. Read from `rusqlite::version()` — the
-    /// library actually linked — rather than written down, for the reason
+    /// anyone reading the value by eye. Read from `rusqlite::version()`, the
+    /// library actually linked, rather than written down, for the reason
     /// AGENTS.md gives about the system `sqlite3` binary being a different
     /// version.
     fn dbms_version(_conn: &SqliteConnection) -> Cow<'static, str> {
@@ -1012,7 +1012,7 @@ impl Backend for SqliteBackend {
         metadata::tables(conn, query)
     }
 
-    /// `TABLE` and `VIEW` — the two values `metadata::tables` can put in
+    /// `TABLE` and `VIEW`, the two values `metadata::tables` can put in
     /// `TABLE_TYPE`. See `metadata::table_types`.
     fn table_types(_conn: &SqliteConnection) -> Vec<Cow<'static, str>> {
         metadata::table_types()

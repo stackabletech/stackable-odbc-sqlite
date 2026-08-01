@@ -53,7 +53,7 @@ Requires `unixODBC` (`unixodbc` package) and root privileges for
 sudo ./install.sh
 ```
 
-Verify with `odbcinst -q -d` — the output should include
+Verify with `odbcinst -q -d`; the output should include
 `[stackable_odbc_sqlite]`.
 
 To uninstall:
@@ -74,7 +74,7 @@ install.bat
 ```
 
 Verify with the ODBC Data Source Administrator
-(`%SystemRoot%\System32\odbcad32.exe`) — the Drivers tab should list
+(`%SystemRoot%\System32\odbcad32.exe`); the Drivers tab should list
 `stackable_odbc_sqlite`.
 
 To uninstall:
@@ -93,7 +93,7 @@ reg delete "HKCU\SOFTWARE\ODBC\ODBC.INI\ODBC Data Sources" /v "YourDsnName" /f
 ## Create a DSN (optional)
 
 A DSN stores connection parameters so that users don't need the full
-connection string each time. This step is optional — DSN-less connection
+connection string each time. This step is optional, since DSN-less connection
 strings (shown below) work without it.
 
 On Windows (`cmd.exe`):
@@ -107,8 +107,14 @@ odbcconf.exe /A {CONFIGDSN "stackable_odbc_sqlite" "DSN=SQLite Test|Database=C:\
 > `odbcconf.exe /A '{CONFIGDSN ...}'`.
 
 The DSN will appear under the **User DSN** tab in ODBC Data Source
-Administrator. Note: the driver has no GUI dialog, so DSNs must be
-created via `odbcconf` or the registry, not the "Add" button.
+Administrator.
+
+> **Note:** the driver registers itself as its own `Setup` library and
+> implements `ConfigDSNW`, but headlessly: it never displays a dialog. The
+> **Add** button therefore does not fail, it silently writes a data source
+> from whatever attributes the Driver Manager passed it, which will not
+> include `Database`. Create DSNs with `odbcconf` or the registry so that
+> every key is set.
 
 On Linux, add a section to `/etc/odbc.ini` (or `~/.odbc.ini` for a
 per-user DSN):

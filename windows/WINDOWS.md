@@ -38,7 +38,7 @@ uv run --with pywinrm python3 test/windows_test.py --help
 
 The VM lifecycle section below uses QEMU/KVM via libvirt, and the test script
 auto-discovers the VM IP from libvirt DHCP leases. If you are running Windows
-in a different hypervisor, the test script still works — just pass the VM's IP
+in a different hypervisor, the test script still works; just pass the VM's IP
 directly with `--host`:
 
 ```bash
@@ -51,7 +51,7 @@ they differ from the defaults.
 
 ### OpenSSL legacy provider
 
-WinRM uses NTLM authentication, which requires MD4 — disabled by default in
+WinRM uses NTLM authentication, which requires MD4, disabled by default in
 modern OpenSSL. The test script automatically sets `OPENSSL_CONF` to point at
 `windows/openssl_legacy.cnf`, which enables the legacy provider.
 
@@ -62,7 +62,7 @@ that you haven't overridden `OPENSSL_CONF` in your environment.
 
 ### Prerequisites
 
-QEMU/KVM and libvirt must be installed and working as system services —
+QEMU/KVM and libvirt must be installed and working as system services:
 `nix-shell` only provides Ansible and the Python bindings, not the
 virtualisation stack itself. Verify with:
 
@@ -97,7 +97,7 @@ pipx install uv
 ### Creating the VM
 
 ```bash
-# Set once — point to your Windows Server 2022 evaluation ISO.
+# Set once, pointing at your Windows Server 2022 evaluation ISO.
 # Download from: https://www.microsoft.com/en-us/evalcenter/evaluate-windows-server-2022
 export WINDOWS_ISO=~/Downloads/SERVER_EVAL_x64FRE_en-us.iso
 
@@ -123,7 +123,7 @@ virt-viewer --connect qemu:///system stackable-odbc-test
 virsh --connect qemu:///system shutdown stackable-odbc-test
 ```
 
-The VM definition and disk persist — next `start` is fast.
+The VM definition and disk persist, so the next `start` is fast.
 
 ### Tearing down completely
 
@@ -174,7 +174,7 @@ needed.
 odbcconf.exe /A {INSTALLDRIVER "stackable_odbc_sqlite|Driver=C:\Users\Administrator\Downloads\stackable_odbc_sqlite.dll|Setup=C:\Users\Administrator\Downloads\stackable_odbc_sqlite.dll|"}
 ```
 
-Both `Driver=` and `Setup=` must point to the same DLL — it exports both the
+Both `Driver=` and `Setup=` must point to the same DLL, which exports both the
 ODBC API functions and the `ConfigDSNW` setup entry point.
 
 ### Creating a DSN
@@ -199,7 +199,7 @@ Open `%SystemRoot%\System32\odbcad32.exe` (64-bit) and confirm:
 
 - **Drivers tab**: `stackable_odbc_sqlite` is listed
 - **User DSN tab**: `MySQLite` (or whatever DSN name you chose) is listed
-- Selecting the driver under "Add" should produce no error (but also no dialog — this is expected for a headless driver)
+- Selecting the driver under "Add" should produce no error (but also no dialog, which is expected for a headless driver)
 
 ### Unregistering
 
@@ -221,7 +221,7 @@ reg delete "HKLM\SOFTWARE\ODBC\ODBCINST.INI\ODBC Drivers" /v "stackable_odbc_sql
 
 ### PowerShell smoke test
 
-PowerShell's `System.Data.Odbc` is built into .NET — no extra tools needed.
+PowerShell's `System.Data.Odbc` is built into .NET, so no extra tools are needed.
 This example is self-contained: it creates its own table, queries it, and
 cleans up. The driver must be registered first (done automatically by the
 test script).
