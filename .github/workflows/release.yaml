@@ -68,8 +68,8 @@ jobs:
 
       - name: Run SQLite integration tests
         run: |
-          ./test/setup.sh
-          ./test/run-tests.sh
+          ./integration-tests/setup.sh
+          ./integration-tests/run-tests.sh
 
   build-and-package:
     name: Build and package SQLite release archives

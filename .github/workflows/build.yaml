@@ -101,9 +101,9 @@ jobs:
 
       - name: Run SQLite integration tests
         run: |
-          ./test/setup.sh
+          ./integration-tests/setup.sh
           # --skip-cargo-test: the pre-commit job above already ran it.
-          ./test/run-tests.sh --skip-cargo-test
+          ./integration-tests/run-tests.sh --skip-cargo-test
 
   windows-cross-compile:
     name: Cross-compile Windows DLL

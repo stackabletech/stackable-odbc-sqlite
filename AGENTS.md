@@ -33,8 +33,8 @@ cargo test                                   # unit + FFI tests; needs no server
 cargo clippy --all-targets -- -D warnings
 pre-commit run --all-files                   # the gate; run before every commit
 
-./test/setup.sh                              # build driver, create test.db, write ODBC config
-./test/run-tests.sh                          # run the integration suite
+./integration-tests/setup.sh                 # build driver, create the DB, write ODBC config
+./integration-tests/run-tests.sh             # run the integration suite
 ```
 
 ## Relationship to stackable-odbc-core
@@ -534,21 +534,24 @@ with no data source open.
 ### Integration tests
 
 ```bash
-./test/setup.sh          # build, create test/test.db, write odbc.ini/odbcinst.ini
-./test/run-tests.sh      # pyodbc suite through real unixODBC, then cargo test
-./test/run-tests.sh --windows          # also run the Windows VM suite
-./test/run-tests.sh --skip-cargo-test  # pyodbc only; what CI passes
+./integration-tests/setup.sh          # build, create the database, write the ODBC config
+./integration-tests/run-tests.sh      # pyodbc suite through real unixODBC, then cargo test
+./integration-tests/run-tests.sh --windows          # also run the Windows VM suite
+./integration-tests/run-tests.sh --skip-cargo-test  # pyodbc only; what CI passes
 ```
 
-`test/setup.sh` and `test/run-tests.sh` regenerate `test/odbc.ini`,
-`test/odbcinst.ini` and `test/test.db`; all three are gitignored because they
-hold absolute paths.
+Both are wrappers; the logic is in `integration-tests/scripts/`, with the paths
+and helpers they share in `scripts/lib.sh`. Everything `setup.sh` writes lands
+in `integration-tests/generated/`, which is gitignored wholesale because all of
+it embeds absolute paths. See
+[integration-tests/README.md](integration-tests/README.md) for the layout and
+why the pyodbc suite is run twice.
 
 ### Windows VM tests
 
-See [windows/WINDOWS.md](windows/WINDOWS.md). Requires a provisioned libvirt VM;
-`test/windows_test.py` runs the same pyodbc suite over WinRM, DSN-less and then
-via DSN.
+See [integration-tests/windows/WINDOWS.md](integration-tests/windows/WINDOWS.md).
+Requires a provisioned libvirt VM; `integration-tests/windows/windows_test.py`
+runs the same pyodbc suite over WinRM, DSN-less and then via DSN.
 
 ### Benchmarks
 

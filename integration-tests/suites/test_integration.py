@@ -7,8 +7,8 @@ using pyodbc. Tests DDL, DML, queries, aggregation, joins, and parameterised
 statements.
 
 Usage:
-    python3 test/test_integration.py "Driver=/path/to/driver.so;Database=/path/to/test.db"
-    python3 test/test_integration.py "Driver=C:\\path\\to\\driver.dll;Database=C:\\test.db"
+    python3 integration-tests/suites/test_integration.py "Driver=/path/to/driver.so;Database=/path/to/test.db"
+    python3 integration-tests/suites/test_integration.py "Driver=C:\\path\\to\\driver.dll;Database=C:\\test.db"
 
 Requires: pip install pyodbc
 """

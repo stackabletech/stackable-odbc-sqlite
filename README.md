@@ -226,13 +226,15 @@ The integration suite goes one layer further out and runs through real
 unixODBC, using Python's `pyodbc` exactly like a normal application would:
 
 ```bash
-./test/setup.sh          # build the driver, create test/test.db, write the ODBC config
-./test/run-tests.sh      # run the pyodbc suite, then cargo test
+./integration-tests/setup.sh       # build the driver, create the database, write the ODBC config
+./integration-tests/run-tests.sh   # run the pyodbc suite, then cargo test
 ```
 
-Both are run on every pull request. `./test/run-tests.sh --windows` additionally
-runs the same suite inside a Windows VM; see
-[windows/WINDOWS.md](windows/WINDOWS.md) for how to provision one.
+Both are run on every pull request. `run-tests.sh --windows` additionally runs
+the same suite inside a Windows VM; see
+[integration-tests/README.md](integration-tests/README.md) for what is covered
+and [integration-tests/windows/WINDOWS.md](integration-tests/windows/WINDOWS.md)
+for how to provision one.
 
 For the architecture, the conventions and the full testing reference, see
 [AGENTS.md](AGENTS.md).

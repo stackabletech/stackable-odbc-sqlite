@@ -6,9 +6,9 @@ Builds the ODBC driver DLL, discovers the VM, deploys everything, registers
 the driver, and runs test_integration.py through the Windows Driver Manager.
 
 Usage:
-    uv run --with pywinrm python3 test/windows_test.py
-    uv run --with pywinrm python3 test/windows_test.py --skip-build
-    uv run --with pywinrm python3 test/windows_test.py --host 192.168.197.138
+    uv run --with pywinrm python3 integration-tests/windows/windows_test.py
+    uv run --with pywinrm python3 integration-tests/windows/windows_test.py --skip-build
+    uv run --with pywinrm python3 integration-tests/windows/windows_test.py --host 192.168.197.138
 
 Requires: pywinrm (pip install pywinrm)
 """
@@ -25,9 +25,11 @@ import sys
 import threading
 from pathlib import Path
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_DIR = (SCRIPT_DIR / "..").resolve()
-OPENSSL_CNF = PROJECT_DIR / "windows" / "openssl_legacy.cnf"
+WINDOWS_DIR = Path(__file__).resolve().parent
+TEST_DIR = WINDOWS_DIR.parent
+PROJECT_DIR = TEST_DIR.parent
+SUITES_DIR = TEST_DIR / "suites"
+OPENSSL_CNF = WINDOWS_DIR / "openssl_legacy.cnf"
 
 REMOTE_DIR = r"C:\odbc_test"
 REMOTE_DLL = rf"{REMOTE_DIR}\stackable_odbc_sqlite.dll"
@@ -57,7 +59,7 @@ def main():
         build_dll(args.target)
 
     dll_path = resolve_dll_path(args.target)
-    test_path = SCRIPT_DIR / "test_integration.py"
+    test_path = SUITES_DIR / "test_integration.py"
 
     host = args.host or discover_vm_ip(args.vm_network)
 
@@ -185,7 +187,7 @@ def setup_openssl():
         print(
             f"WARNING: {OPENSSL_CNF} not found. WinRM NTLM auth may fail\n"
             "if your OpenSSL does not have the legacy provider enabled.\n"
-            "See windows/WINDOWS.md for details.",
+            "See integration-tests/windows/WINDOWS.md for details.",
             file=sys.stderr,
         )
 
@@ -260,7 +262,7 @@ def discover_vm_ip(network: str) -> str:
     except subprocess.CalledProcessError as e:
         print(
             f"ERROR: could not query DHCP leases for network '{network}'.\n"
-            "Is the VM running? See windows/WINDOWS.md for setup.\n"
+            "Is the VM running? See integration-tests/windows/WINDOWS.md for setup.\n"
             f"virsh output: {e.stderr}",
             file=sys.stderr,
         )
@@ -271,7 +273,7 @@ def discover_vm_ip(network: str) -> str:
     if not ips:
         print(
             f"ERROR: no DHCP leases found on network '{network}'.\n"
-            "Is the VM running? See windows/WINDOWS.md for setup.",
+            "Is the VM running? See integration-tests/windows/WINDOWS.md for setup.",
             file=sys.stderr,
         )
         sys.exit(1)
