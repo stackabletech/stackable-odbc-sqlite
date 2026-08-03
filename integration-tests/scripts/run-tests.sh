@@ -96,6 +96,13 @@ python3 "$SUITES_DIR/test_c_abi.py" "Driver=$DRIVER_PATH;Database=$DB_PATH"
 echo "=== Running type-transform fuzz (no Driver Manager) ==="
 python3 "$SUITES_DIR/test_type_matrix.py" "Driver=$DRIVER_PATH;Database=$DB_PATH"
 
+# Against its own database, for the reason lib.sh gives. Once, because the
+# scenarios are about result-set size rather than about how the connection was
+# opened.
+echo "=== Running BI stress tests ==="
+uv run --with pyodbc python3 "$PERF_DIR/test_stress.py" \
+    "Driver=$DRIVER_PATH;Database=$STRESS_DB_PATH"
+
 # Run by default so that a developer invoking this script gets the whole suite
 # in one command. CI passes --skip-cargo-test, because its pre-commit job has
 # already run exactly this via the cargo-test hook, and repeating it there means

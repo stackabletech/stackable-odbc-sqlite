@@ -10,6 +10,7 @@ TEST_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROJECT_DIR="$(cd "$TEST_DIR/.." && pwd)"
 
 SUITES_DIR="$TEST_DIR/suites"
+PERF_DIR="$TEST_DIR/perf"
 WINDOWS_DIR="$TEST_DIR/windows"
 
 # Everything setup.sh writes lands here, and the whole directory is gitignored.
@@ -17,6 +18,10 @@ WINDOWS_DIR="$TEST_DIR/windows"
 # absolute path, so neither survives being moved to another checkout.
 GENERATED="$TEST_DIR/generated"
 DB_PATH="$GENERATED/test.db"
+# The stress suite generates 50k rows. It gets a database of its own so the
+# shared one keeps the size the other suites expect, and so a stress run left
+# half-finished cannot affect them. SQLite creates the file on first connect.
+STRESS_DB_PATH="$GENERATED/stress.db"
 ODBC_INI="$GENERATED/odbc.ini"
 ODBCINST_INI="$GENERATED/odbcinst.ini"
 

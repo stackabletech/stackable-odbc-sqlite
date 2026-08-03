@@ -31,6 +31,7 @@ Both take `--help`.
 | `suites/test_sql_surface.py` | The SQL a BI tool emits, the ODBC escapes and the catalog functions, run once per connection style |
 | `suites/test_c_abi.py` | The C ABI pen test, run once |
 | `suites/test_type_matrix.py` | Type-transform fuzz and column description, run once |
+| `perf/test_stress.py` | BI query patterns over a generated star schema, run once |
 | `generated/` | Everything `setup.sh` writes. Gitignored |
 | `windows/` | The VM suite, its libvirt definitions, and [WINDOWS.md](windows/WINDOWS.md) |
 
@@ -88,6 +89,20 @@ transcription. It then checks what `SQLDescribeCol` *says* each column is, which
 is a separate question from what `SQLGetData` will hand over: SQLite gives a
 computed column no declared type, so the driver answers from the storage class
 of the values, and a tool decides from that whether a column can be summed.
+
+Last, `perf/test_stress.py`, which asks the same shapes of SQL at size:
+multi-table joins over a generated star schema, 50,000-row fetches, wide rows
+and a prepared statement re-executed two hundred times. That matters more here
+than for a client-server driver, because `exec_direct` materialises every row
+before returning, so a large result set is where that decision is felt. It
+builds its fixture with recursive CTEs and works in a database of its own,
+`generated/stress.db`, so the shared one keeps the size the other suites
+expect.
+
+There is no counterpart to the Trino driver's `perf/parse_profile.py` and
+`perf/profile_stress.sh`. Those split a query's time between the coordinator
+and the client, and SQLite has no server-side half to attribute anything to.
+`cargo bench` measures fetch throughput instead.
 
 It then runs `cargo test`, so that one command gives a developer the whole
 suite. CI passes `--skip-cargo-test`, since its pre-commit job has already run
