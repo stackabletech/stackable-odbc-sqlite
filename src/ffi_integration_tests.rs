@@ -3055,6 +3055,82 @@ fn get_data_truncates_string_returns_success_with_info() {
 }
 
 // ---------------------------------------------------------------------------
+// P1: SQLGetData column ordinal past the last column
+// ---------------------------------------------------------------------------
+
+/// Spec (`SQLGetData`, Diagnostics): `07009` "Invalid descriptor index" for a
+/// column number "greater than the number of columns in the result set". That
+/// clause carries no **(DM)** marker, so the Driver Manager does not supply it
+/// and the driver has to.
+///
+/// Core does not range-check the ordinal itself — it asks the backend and
+/// reports whatever SQLSTATE comes back — so this is `SqliteStatement::get_data`
+/// being asserted through the entry point an application actually calls. It
+/// answered `HY000` until the ordinal check was given its own SQLSTATE, which
+/// told an application only that *something* went wrong.
+///
+/// Both ends of the range are probed. One past the last column is the case that
+/// regressed; `u16::MAX` is the same condition reached by a wildly wrong
+/// ordinal, and asserting only the first would pass for an implementation that
+/// special-cased `count + 1`.
+#[test]
+fn get_data_column_past_the_last_is_invalid_descriptor_index() {
+    unsafe {
+        let (env, conn, stmt) = alloc_handles();
+        assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
+
+        assert_eq!(exec_direct(stmt, "SELECT 1, 2"), SqlReturn::SUCCESS);
+        assert_eq!(
+            ffi::fetch::sql_fetch::<SqliteBackend>(stmt),
+            SqlReturn::SUCCESS
+        );
+
+        for col in [3u16, u16::MAX] {
+            let mut value: i64 = 0;
+            let mut ind: isize = 0;
+            let ret = ffi::fetch::sql_get_data::<SqliteBackend>(
+                stmt,
+                col,
+                CDataType::SBigInt as i16,
+                &raw mut value as *mut c_void,
+                8,
+                &mut ind,
+            );
+            assert_eq!(
+                ret,
+                SqlReturn::ERROR,
+                "column {col} does not exist, so the call must fail"
+            );
+            assert_eq!(
+                last_sqlstate(stmt),
+                "07009",
+                "column {col} is past the last column, which the spec's \
+                 SQLGetData diagnostics table calls 07009"
+            );
+        }
+
+        // The last real column still reads, so the check above cannot be
+        // satisfied by refusing every ordinal.
+        let mut value: i64 = 0;
+        let mut ind: isize = 0;
+        assert_eq!(
+            ffi::fetch::sql_get_data::<SqliteBackend>(
+                stmt,
+                2,
+                CDataType::SBigInt as i16,
+                &raw mut value as *mut c_void,
+                8,
+                &mut ind,
+            ),
+            SqlReturn::SUCCESS
+        );
+        assert_eq!(value, 2);
+
+        cleanup(env, conn, stmt);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // P1: Fetch after NO_DATA returns NO_DATA again (not ERROR)
 // ---------------------------------------------------------------------------
 

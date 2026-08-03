@@ -392,6 +392,17 @@ impl StatementBackend for SqliteStatement {
         }
     }
 
+    /// Spec (`SQLGetData`, Diagnostics): a column number "greater than the
+    /// number of columns in the result set" is `07009`, and that clause of the
+    /// row carries no **(DM)** marker, so it is this driver's to return.
+    ///
+    /// Core reaches the backend for the range check rather than doing it
+    /// itself, so `SqlState::general_error()` here was what an application
+    /// actually saw for an out-of-range ordinal: `HY000`, which says nothing
+    /// about which argument was wrong. The column-0 arm is unreachable through
+    /// `SQLGetData` — core rejects the bookmark ordinal before calling — but it
+    /// answers `07009` too, so the two ways of naming a column that does not
+    /// exist cannot disagree depending on which layer caught it.
     fn get_data(
         &mut self,
         col: u16,
@@ -402,7 +413,10 @@ impl StatementBackend for SqliteStatement {
             return Err(OdbcError::NoResultSet.into());
         }
         let col_idx = (col as usize).checked_sub(1).ok_or_else(|| {
-            OdbcError::general("Column index must be >= 1", SqlState::general_error())
+            OdbcError::general(
+                "Column index must be >= 1",
+                SqlState::invalid_descriptor_index(),
+            )
         })?;
         let row = &self.rows[self.cursor as usize];
         row.get(col_idx)
@@ -414,7 +428,7 @@ impl StatementBackend for SqliteStatement {
                         col,
                         row.len()
                     ),
-                    SqlState::general_error(),
+                    SqlState::invalid_descriptor_index(),
                 )
                 .into()
             })
