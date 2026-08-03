@@ -63,6 +63,11 @@ describes what was linked, including the bundled SQLite.
 - SQLite has no catalogs and no schemas, so the driver reports none rather than
   inventing a one-level hierarchy.
 - SQLite has no stored procedures, so those lookups return no rows.
+- `SQL_C_NUMERIC` cannot be used to *retrieve* a value. A `DECIMAL` column is
+  described as `SQL_DECIMAL` and reads correctly as `SQL_C_CHAR` or
+  `SQL_C_DOUBLE`, but `SQLGetData` and a column bound to `SQL_C_NUMERIC` both
+  report `07006`. It works as a parameter type, so the restriction is on the
+  retrieval side only.
 - Rows are fetched one at a time. `SQL_ATTR_ROW_ARRAY_SIZE` and
   `SQL_ATTR_PARAMSET_SIZE` are both pinned at 1, so there are no block cursors
   and no parameter arrays.

@@ -18,8 +18,9 @@ with a comment naming the (DM) diagnostic they do not demand.
 Covers: handle lifecycle and parentage, invalid and stale handles, double free,
 use after free, connection state, cursor state, prepare / execute / re-execute,
 SQLFreeStmt options, statement and connection attribute round-trips, the
-enforced query timeout, transactions including DDL, and the catalog functions
-SQLite answers with no rows.
+enforced query timeout, transactions including DDL, the catalog functions
+SQLite answers with no rows, and the SQLGetData buffer contract — truncation,
+the zero-length length probe, chunked retrieval, and the ordinal range check.
 
 Usage:
     python3 integration-tests/suites/test_c_abi.py \
@@ -98,6 +99,7 @@ SQL_TXN_CAPABLE = 46
 SQL_TC_ALL = 2
 
 SQL_C_CHAR = 1
+SQL_C_WCHAR = -8
 SQL_C_SBIGINT = -25
 SQL_BIGINT = -5
 
@@ -862,6 +864,165 @@ def main():
     )
     lib.SQLCloseCursor(param_stmt)
     lib.SQLFreeHandle(SQL_HANDLE_STMT, param_stmt)
+
+    # ---------------------------------------------------------------
+    print("\n--- SQLGetData buffer semantics ---")
+    # The buffer contract is the part of SQLGetData an application cannot avoid
+    # and a Driver Manager does not implement: how much is written, what the
+    # indicator counts, and whether a second call continues or restarts. A
+    # driver that restarts turns the documented drain loop into an infinite one,
+    # which no amount of correct data can compensate for.
+    #
+    # `get_stmt` is its own handle rather than the shared `stmt`, which is
+    # carrying cursor state the sections above still assert on.
+    get_stmt = P()
+    lib.SQLAllocHandle(SQL_HANDLE_STMT, dbc, ctypes.byref(get_stmt))
+
+    ALPHABET = b"abcdefghijklmnopqrstuvwxyz"
+
+    def positioned(sql):
+        """`sql` executed and the cursor on its first row."""
+        lib.SQLCloseCursor(get_stmt)
+        text, _keep = w(sql)
+        lib.SQLExecDirectW(get_stmt, text, SQL_NTS)
+        lib.SQLFetch(get_stmt)
+
+    def get_char(nbytes, guard=0xAA):
+        """SQLGetData into a poisoned buffer: (rc, bytes, indicator).
+
+        The buffer is filled with `guard` first and is larger than `nbytes`, so
+        a write past the length the driver was given is visible rather than
+        landing in memory that happened to be zero.
+        """
+        buf = ctypes.create_string_buffer(max(nbytes, 1) + 32)
+        ctypes.memset(buf, guard, len(buf))
+        ind = ctypes.c_int64(-999)
+        r = lib.SQLGetData(
+            get_stmt, 1, SQL_C_CHAR, ctypes.cast(buf, P), nbytes, ctypes.byref(ind)
+        )
+        return r, bytes(buf), ind.value
+
+    positioned("SELECT 'hello'")
+    r, raw, ind = get_char(6)
+    check("a buffer that exactly fits is plain SUCCESS", r, SQL_SUCCESS)
+    check(
+        "the exactly-fitting buffer holds the value and its terminator",
+        SQL_SUCCESS if raw[:6] == b"hello\x00" else SQL_ERROR,
+        SQL_SUCCESS,
+        got_state=f"wrote {raw[:8]!r}",
+    )
+
+    positioned("SELECT 'hello'")
+    r, raw, ind = get_char(5)
+    check(
+        "one byte short truncates",
+        r,
+        SQL_SUCCESS_WITH_INFO,
+        state="01004",
+        got_state=sqlstate(lib, SQL_HANDLE_STMT, get_stmt),
+    )
+    check(
+        "the truncated buffer is still terminated",
+        SQL_SUCCESS if raw[:5] == b"hell\x00" else SQL_ERROR,
+        SQL_SUCCESS,
+        got_state=f"wrote {raw[:8]!r}",
+    )
+    check(
+        "the indicator reports the untruncated length",
+        SQL_SUCCESS if ind == 5 else SQL_ERROR,
+        SQL_SUCCESS,
+        got_state=f"indicator {ind}, expected 5",
+    )
+
+    positioned("SELECT 'hello'")
+    r, raw, ind = get_char(0)
+    # The documented probe-then-fetch idiom: size the buffer with a zero-length
+    # call, then allocate and read. A driver that treats this as a completed
+    # read leaves the second call with nothing to return.
+    check(
+        "a zero-length call reports the length",
+        SQL_SUCCESS if ind == 5 else SQL_ERROR,
+        SQL_SUCCESS,
+        got_state=f"indicator {ind}, expected 5",
+    )
+    check(
+        "a zero-length call writes nothing",
+        SQL_SUCCESS if raw[0] == 0xAA else SQL_ERROR,
+        SQL_SUCCESS,
+        got_state=f"first byte {raw[0]:#04x}, expected the untouched guard",
+    )
+
+    positioned("SELECT 'hello'")
+    r, _raw, _ind = get_char(-1)
+    check(
+        "a negative buffer length is refused",
+        r,
+        SQL_ERROR,
+        state="HY090",
+        got_state=sqlstate(lib, SQL_HANDLE_STMT, get_stmt),
+    )
+
+    # Chunked retrieval. Ten-byte buffers hold nine characters each, so 26
+    # characters take three calls and a fourth reports the column exhausted.
+    positioned(f"SELECT '{ALPHABET.decode()}'")
+    chunks, codes = [], []
+    for _ in range(8):
+        r, raw, ind = get_char(10)
+        codes.append(r)
+        if r not in (SQL_SUCCESS, SQL_SUCCESS_WITH_INFO):
+            break
+        chunks.append(raw[: raw.index(b"\x00")])
+    check(
+        "successive SQLGetData calls continue the value rather than restarting",
+        SQL_SUCCESS if b"".join(chunks) == ALPHABET else SQL_ERROR,
+        SQL_SUCCESS,
+        got_state=f"reassembled {b''.join(chunks)!r}",
+    )
+    check(
+        "the drain loop terminates with NO_DATA",
+        codes[-1] if codes else SQL_ERROR,
+        SQL_NO_DATA,
+    )
+
+    # A wide read counts its indicator in bytes, not characters. Getting this
+    # wrong halves or doubles every buffer an application sizes from it.
+    positioned("SELECT 'abcdefghij'")
+    wbuf_ = (ctypes.c_uint16 * 64)()
+    wind = ctypes.c_int64(-999)
+    r = lib.SQLGetData(
+        get_stmt, 1, SQL_C_WCHAR, ctypes.cast(wbuf_, P), 8, ctypes.byref(wind)
+    )
+    check(
+        "a wide indicator is counted in bytes",
+        SQL_SUCCESS if wind.value == 20 else SQL_ERROR,
+        SQL_SUCCESS,
+        got_state=f"indicator {wind.value}, expected 20 for 10 characters",
+    )
+
+    # Spec (SQLGetData, Diagnostics), 07009: "the value specified for the
+    # argument Col_or_Param_Num was greater than the number of columns in the
+    # result set". That clause carries no (DM) marker, so it is the driver's.
+    positioned("SELECT 1, 2")
+    over = ctypes.c_int64(0)
+    oind = ctypes.c_int64(0)
+    r = lib.SQLGetData(
+        get_stmt,
+        3,
+        SQL_C_SBIGINT,
+        ctypes.cast(ctypes.byref(over), P),
+        8,
+        ctypes.byref(oind),
+    )
+    check(
+        "a column past the last is an invalid descriptor index",
+        r,
+        SQL_ERROR,
+        state="07009",
+        got_state=sqlstate(lib, SQL_HANDLE_STMT, get_stmt),
+    )
+
+    lib.SQLCloseCursor(get_stmt)
+    lib.SQLFreeHandle(SQL_HANDLE_STMT, get_stmt)
 
     # ---------------------------------------------------------------
     print("\n--- cancel and teardown ---")

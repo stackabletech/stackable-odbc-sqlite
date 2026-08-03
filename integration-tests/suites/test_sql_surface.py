@@ -17,7 +17,17 @@ Two things this covers that the Trino driver's equivalent cannot:
     `{oj ...}` are translated by `escape_dialect.rs` into what SQLite spells
     them as, and three of them (`CURRENT_DATE`, `CURRENT_TIME`,
     `CURRENT_TIMESTAMP`) are bare keywords that a name swap alone cannot
-    produce. Nothing else in the suite exercises that module.
+    produce. Nothing else in the suite exercises that module. Both directions
+    are asserted: that the rewriter fires, and that it stops at string
+    literals, comments and all three identifier-quoting styles, which is the
+    half that corrupts data rather than merely failing.
+  - **The scalar-function bitmaps as a contract.** Every bit set in
+    `SQL_STRING_FUNCTIONS` and its three siblings is read back from
+    `SQLGetInfo` and the matching `{fn NAME(...)}` executed, which is the only
+    thing tying `info.rs`'s bitmaps to `escape_dialect.rs`'s remap table.
+  - **Catalog arguments as untrusted input.** The catalog functions are the
+    only path in the driver that builds SQL out of a caller-supplied argument,
+    and for a BI tool that argument often came from a filter box.
   - **Keys and indexes that are really there.** Trino publishes no primary key,
     foreign key or index metadata, so its suite can only assert that those
     calls return an empty set without erroring. SQLite has all three, so the
@@ -51,6 +61,12 @@ QUERY_TIMEOUT_SECONDS = 60
 PARENT = "sqlsurf_parent"
 CHILD = "sqlsurf_child"
 
+# A table whose name carries the character that ends a SQL string literal. The
+# catalog functions take it as a *value*, so it can only work if they bind their
+# arguments; a driver that interpolates them into the query text produces a
+# syntax error here, or worse, runs whatever follows the quote.
+QUOTED = "sqlsurf_quo'te"
+
 
 def make_fixture(cur):
     """Two related tables, so the key and index calls have something to find.
@@ -58,9 +74,14 @@ def make_fixture(cur):
     Dropped in reverse order: `sqlsurf_child` holds the foreign key, and the
     driver turns foreign-key enforcement on for every connection, so dropping
     the parent first would be refused.
+
+    `QUOTED` stands apart from the pair: it takes part in no relationship and
+    exists only so the catalog probes have a hostile name to look up.
     """
     cur.execute(f"DROP TABLE IF EXISTS {CHILD}")
     cur.execute(f"DROP TABLE IF EXISTS {PARENT}")
+    cur.execute(f'DROP TABLE IF EXISTS "{QUOTED}"')
+    cur.execute(f'CREATE TABLE "{QUOTED}" (id INTEGER PRIMARY KEY, label TEXT)')
     cur.execute(f"CREATE TABLE {PARENT} (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
     cur.execute(
         f"CREATE TABLE {CHILD} ("
@@ -78,6 +99,7 @@ def drop_fixture(cur):
     try:
         cur.execute(f"DROP TABLE IF EXISTS {CHILD}")
         cur.execute(f"DROP TABLE IF EXISTS {PARENT}")
+        cur.execute(f'DROP TABLE IF EXISTS "{QUOTED}"')
     except Exception:  # noqa: BLE001
         pass
 
@@ -315,6 +337,150 @@ def main():
             "SELECT count(*) FROM {oj a LEFT OUTER JOIN b ON a.x = b.y}", 3))
 
         # --------------------------------------------------------------
+        print("\n--- what escape translation must NOT touch ---")
+        # The section above proves the rewriter fires. These prove it stops at
+        # the boundaries, which is the half that corrupts data rather than
+        # merely failing: a rewrite inside a string literal changes the value a
+        # query returns, silently and with no error anywhere. Each of these
+        # asserts the braces survive verbatim.
+        R.run("a {fn ...} inside a string literal is data, not an escape",
+              lambda: scalar("SELECT '{fn UCASE(x)}'", "{fn UCASE(x)}"))
+        R.run("a doubled quote keeps the literal open", lambda: scalar(
+            "SELECT 'it''s {fn UCASE(x)}'", "it's {fn UCASE(x)}"))
+        R.run("a lone brace inside a literal opens nothing",
+              lambda: scalar("SELECT 'a{b'", "a{b"))
+        R.run("a closing brace inside a literal closes nothing",
+              lambda: scalar("SELECT 'c}d'", "c}d"))
+        # All three of SQLite's identifier-quoting styles are declared by the
+        # dialect, so all three have to be honoured as quoting.
+        R.run('a "double-quoted" identifier is not rewritten', lambda: scalar(
+            'SELECT "{fn UCASE(x)}" FROM (SELECT 1 AS "{fn UCASE(x)}")', 1))
+        R.run("a [bracketed] identifier is not rewritten", lambda: scalar(
+            "SELECT [{fn UCASE(x)}] FROM (SELECT 1 AS [{fn UCASE(x)}])", 1))
+        R.run("a `backticked` identifier is not rewritten", lambda: scalar(
+            "SELECT `{fn UCASE(x)}` FROM (SELECT 1 AS `{fn UCASE(x)}`)", 1))
+        # SQLite accepts both comment forms, and an escape inside one is text.
+        R.run("an escape inside a line comment is left alone", lambda: scalar(
+            "SELECT 'v' -- {fn UCASE(x)}\n", "v"))
+        R.run("an escape inside a block comment is left alone", lambda: scalar(
+            "SELECT /* {fn UCASE(x)} */ 'v'", "v"))
+        # Nesting is the case a single-pass rewriter gets wrong.
+        R.run("nested {fn ...} escapes both translate",
+              lambda: scalar("SELECT {fn UCASE({fn LCASE('AbC')})}", "ABC"))
+
+        # --------------------------------------------------------------
+        print("\n--- every advertised scalar function actually works ---")
+        # A SQL_*_FUNCTIONS bit is a promise: a BI tool emits {fn NAME(...)}
+        # only for the bits the driver sets. A set bit whose escape does not
+        # execute is a query the tool will build and the driver will reject,
+        # and nothing else in the suite ties `info.rs`'s bitmaps to
+        # `escape_dialect.rs`'s remap table. The calls use spec-shaped
+        # arguments, so a name that maps to a SQLite function with a different
+        # signature fails here rather than in a customer's dashboard.
+        SQL_NUMERIC_FUNCTIONS = 49
+        SQL_STRING_FUNCTIONS = 50
+        SQL_SYSTEM_FUNCTIONS = 51
+        SQL_TIMEDATE_FUNCTIONS = 52
+        ADVERTISED = [
+            ("string", SQL_STRING_FUNCTIONS, [
+                (0x00000001, "CONCAT", "{fn CONCAT('a','b')}"),
+                (0x00000002, "INSERT", "{fn INSERT('abcdef',2,3,'xyz')}"),
+                (0x00000004, "LEFT", "{fn LEFT('abcdef',2)}"),
+                (0x00000008, "LTRIM", "{fn LTRIM('  ab')}"),
+                (0x00000010, "LENGTH", "{fn LENGTH('abc')}"),
+                (0x00000020, "LOCATE", "{fn LOCATE('b','abc')}"),
+                (0x00000040, "LCASE", "{fn LCASE('AB')}"),
+                (0x00000080, "REPEAT", "{fn REPEAT('a',3)}"),
+                (0x00000100, "REPLACE", "{fn REPLACE('abc','b','x')}"),
+                (0x00000200, "RIGHT", "{fn RIGHT('abcdef',2)}"),
+                (0x00000400, "RTRIM", "{fn RTRIM('ab  ')}"),
+                (0x00000800, "SUBSTRING", "{fn SUBSTRING('abcdef',2,3)}"),
+                (0x00001000, "UCASE", "{fn UCASE('ab')}"),
+                (0x00002000, "ASCII", "{fn ASCII('a')}"),
+                (0x00004000, "CHAR", "{fn CHAR(65)}"),
+                (0x00008000, "DIFFERENCE", "{fn DIFFERENCE('a','b')}"),
+                (0x00010000, "LOCATE_2", "{fn LOCATE('b','abcb',3)}"),
+                (0x00020000, "SOUNDEX", "{fn SOUNDEX('Robert')}"),
+                (0x00040000, "SPACE", "{fn SPACE(3)}"),
+                (0x00080000, "BIT_LENGTH", "{fn BIT_LENGTH('abc')}"),
+                (0x00100000, "CHAR_LENGTH", "{fn CHAR_LENGTH('abc')}"),
+                (0x00200000, "CHARACTER_LENGTH", "{fn CHARACTER_LENGTH('abc')}"),
+                (0x00400000, "OCTET_LENGTH", "{fn OCTET_LENGTH('abc')}"),
+                (0x00800000, "POSITION", "{fn POSITION('b','abc')}"),
+            ]),
+            ("numeric", SQL_NUMERIC_FUNCTIONS, [
+                (0x00000001, "ABS", "{fn ABS(-1)}"),
+                (0x00000002, "ACOS", "{fn ACOS(0.5)}"),
+                (0x00000004, "ASIN", "{fn ASIN(0.5)}"),
+                (0x00000008, "ATAN", "{fn ATAN(0.5)}"),
+                (0x00000010, "ATAN2", "{fn ATAN2(1,1)}"),
+                (0x00000020, "CEILING", "{fn CEILING(1.2)}"),
+                (0x00000040, "COS", "{fn COS(1)}"),
+                (0x00000080, "COT", "{fn COT(1)}"),
+                (0x00000100, "EXP", "{fn EXP(1)}"),
+                (0x00000200, "FLOOR", "{fn FLOOR(1.7)}"),
+                (0x00000400, "LOG", "{fn LOG(2)}"),
+                (0x00000800, "MOD", "{fn MOD(7,2)}"),
+                (0x00001000, "SIGN", "{fn SIGN(-3)}"),
+                (0x00002000, "SIN", "{fn SIN(1)}"),
+                (0x00004000, "SQRT", "{fn SQRT(4)}"),
+                (0x00008000, "TAN", "{fn TAN(1)}"),
+                (0x00010000, "PI", "{fn PI()}"),
+                (0x00020000, "RAND", "{fn RAND()}"),
+                (0x00040000, "DEGREES", "{fn DEGREES(1)}"),
+                (0x00080000, "LOG10", "{fn LOG10(10)}"),
+                (0x00100000, "POWER", "{fn POWER(2,3)}"),
+                (0x00200000, "RADIANS", "{fn RADIANS(90)}"),
+                (0x00400000, "ROUND", "{fn ROUND(1.55,1)}"),
+                (0x00800000, "TRUNCATE", "{fn TRUNCATE(1.55,1)}"),
+            ]),
+            ("timedate", SQL_TIMEDATE_FUNCTIONS, [
+                (0x00000001, "NOW", "{fn NOW()}"),
+                (0x00000002, "CURDATE", "{fn CURDATE()}"),
+                (0x00000004, "DAYOFMONTH", "{fn DAYOFMONTH({d '2020-01-02'})}"),
+                (0x00000008, "DAYOFWEEK", "{fn DAYOFWEEK({d '2020-01-02'})}"),
+                (0x00000010, "DAYOFYEAR", "{fn DAYOFYEAR({d '2020-01-02'})}"),
+                (0x00000020, "MONTH", "{fn MONTH({d '2020-01-02'})}"),
+                (0x00000040, "QUARTER", "{fn QUARTER({d '2020-01-02'})}"),
+                (0x00000080, "WEEK", "{fn WEEK({d '2020-01-02'})}"),
+                (0x00000100, "YEAR", "{fn YEAR({d '2020-01-02'})}"),
+                (0x00000200, "CURTIME", "{fn CURTIME()}"),
+                (0x00000400, "HOUR", "{fn HOUR({t '10:00:00'})}"),
+                (0x00000800, "MINUTE", "{fn MINUTE({t '10:00:00'})}"),
+                (0x00001000, "SECOND", "{fn SECOND({t '10:00:00'})}"),
+                (0x00002000, "TIMESTAMPADD",
+                 "{fn TIMESTAMPADD(SQL_TSI_DAY,1,{d '2020-01-02'})}"),
+                (0x00004000, "TIMESTAMPDIFF",
+                 "{fn TIMESTAMPDIFF(SQL_TSI_DAY,{d '2020-01-02'},{d '2020-01-03'})}"),
+                (0x00008000, "DAYNAME", "{fn DAYNAME({d '2020-01-02'})}"),
+                (0x00010000, "MONTHNAME", "{fn MONTHNAME({d '2020-01-02'})}"),
+                (0x00020000, "CURRENT_DATE", "{fn CURRENT_DATE()}"),
+                (0x00040000, "CURRENT_TIME", "{fn CURRENT_TIME()}"),
+                (0x00080000, "CURRENT_TIMESTAMP", "{fn CURRENT_TIMESTAMP()}"),
+                (0x00100000, "EXTRACT", "{fn EXTRACT(YEAR FROM {d '2020-01-02'})}"),
+            ]),
+            ("system", SQL_SYSTEM_FUNCTIONS, [
+                (0x00000001, "USERNAME", "{fn USERNAME()}"),
+                (0x00000002, "DBNAME", "{fn DBNAME()}"),
+                (0x00000004, "IFNULL", "{fn IFNULL(NULL,1)}"),
+            ]),
+        ]
+
+        def executes(sql):
+            cur.execute(f"SELECT {sql}").fetchall()
+
+        for group, info_type, table in ADVERTISED:
+            bitmap = conn.getinfo(info_type)
+            claimed = [(n, s) for bit, n, s in table if bitmap & bit]
+            # An empty bitmap would make every assertion below vacuous, so the
+            # count is asserted rather than assumed.
+            R.check(f"SQL_{group.upper()}_FUNCTIONS advertises something",
+                    claimed, f"{bitmap:#010x} claims {len(claimed)}")
+            for name, sql in claimed:
+                R.run(f"advertised {group} {{fn {name}}} executes",
+                      lambda s=sql: executes(s))
+
+        # --------------------------------------------------------------
         print("\n--- ODBC catalog functions ---")
         R.run("SQLTables", lambda: (
             cur.tables(table=PARENT).fetchall()
@@ -381,6 +547,66 @@ def main():
         R.run("SQLProcedures (empty is correct)", lambda: cur.procedures().fetchall())
         R.run("SQLProcedureColumns (empty is correct)",
               lambda: cur.procedureColumns().fetchall())
+
+        # --------------------------------------------------------------
+        print("\n--- catalog arguments are values, not SQL ---")
+        # Every catalog function takes caller-supplied names and patterns and
+        # turns them into a query against SQLite's schema. Those arguments reach
+        # the driver from wherever the application got them, which for a BI tool
+        # is often a user-typed filter box, so they are untrusted input on the
+        # only path in the driver that builds SQL from an argument at all.
+
+        def quoted_table_is_found():
+            found = cur.tables(table=QUOTED).fetchall()
+            # TABLE_NAME is column 3 of the SQLTables result set.
+            names = [r[2] for r in found]
+            assert QUOTED in names, f"expected {QUOTED!r}, got {names!r}"
+
+        R.run("a table name containing a quote is matched", quoted_table_is_found)
+        R.run("SQLColumns on a quote-named table names its columns", lambda: (
+            {r[3] for r in cur.columns(table=QUOTED).fetchall()} == {"id", "label"}
+            or (_ for _ in ()).throw(AssertionError("columns not reported"))))
+        R.run("SQLPrimaryKeys on a quote-named table", lambda: (
+            cur.primaryKeys(table=QUOTED).fetchall()
+            or (_ for _ in ()).throw(AssertionError("no primary key reported"))))
+
+        # The payload closes a literal and then issues a statement. It must be
+        # treated as a name that matches nothing. Asserting only "no exception"
+        # would pass for a driver that ran it and reported success, so the
+        # fixture is re-counted afterwards: still standing is the real check.
+        INJECTIONS = [
+            "x'; DROP TABLE " + PARENT + "; --",
+            "'||(SELECT 1)||'",
+            'x"; DROP TABLE ' + PARENT + "; --",
+            "%'; DROP TABLE " + PARENT + "; --",
+        ]
+
+        def catalog_calls_survive(payload):
+            def go():
+                # Each of these builds its own schema query from the argument.
+                cur.tables(table=payload).fetchall()
+                cur.columns(table=payload).fetchall()
+                cur.primaryKeys(table=payload).fetchall()
+                cur.foreignKeys(foreignTable=payload).fetchall()
+                cur.statistics(table=payload).fetchall()
+                cur.rowIdColumns(table=payload).fetchall()
+                # The fixture must still be there. `scalar` would raise a
+                # pyodbc error rather than return if the table were gone.
+                scalar(f"SELECT count(*) FROM {PARENT}", 2)
+            return go
+
+        for payload in INJECTIONS:
+            R.run(f"catalog functions treat {payload!r} as a name",
+                  catalog_calls_survive(payload))
+
+        # The pattern metacharacters have to keep working as patterns, or the
+        # check above could be satisfied by escaping everything indiscriminately.
+        R.run("'%' still matches every table", lambda: (
+            len(cur.tables(table="%").fetchall()) >= 3
+            or (_ for _ in ()).throw(AssertionError("'%' matched almost nothing"))))
+        R.run("'_' still matches a single character", lambda: (
+            {r[2] for r in cur.tables(table="sqlsurf_paren_").fetchall()} == {PARENT}
+            or (_ for _ in ()).throw(AssertionError("'_' did not match"))))
 
         # --------------------------------------------------------------
         print("\n--- ordering, distinct, and null handling ---")

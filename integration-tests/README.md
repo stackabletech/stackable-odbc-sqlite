@@ -69,14 +69,40 @@ swapped. Where the Trino driver can only check that a key or index lookup
 returns nothing without erroring, this one asserts the rows, because SQLite
 publishes all three.
 
+It also asserts the two things that translation getting *too* eager would
+break. First, the boundaries: a `{fn ...}` inside a string literal, a comment,
+or any of SQLite's three identifier-quoting styles has to survive verbatim,
+because rewriting there changes the value a query returns with no error
+anywhere. Second, the bitmaps as a contract: every bit set in
+`SQL_STRING_FUNCTIONS` and its three siblings is read back from `SQLGetInfo`
+and the matching `{fn NAME(...)}` executed with spec-shaped arguments. A BI
+tool emits an escape only for the bits the driver sets, so a set bit that does
+not execute is a query the tool will build and the driver will reject, and
+nothing else ties `info.rs`'s bitmaps to `escape_dialect.rs`'s remap table.
+
+Last in that suite, the catalog functions are given hostile names. They are the
+only path in the driver that turns a caller-supplied argument into SQL, and for
+a BI tool that argument is often typed into a filter box. A table whose name
+contains a quote has to be found, payloads that close a literal and issue a
+`DROP` have to be treated as names that match nothing — asserted by re-counting
+the fixture afterwards, since "no exception" would also pass for a driver that
+ran them — and `%` and `_` have to keep working as patterns, which rules out
+escaping everything indiscriminately.
+
 Then `test_c_abi.py`, once. It loads the driver's `.so` with `ctypes` and calls
 the exported entry points with **no Driver Manager in the loop**, which is the
 point: unixODBC answers a large part of the ODBC state machine itself, so what
 the driver does with an out-of-order or malformed call is invisible to anything
 going through pyodbc. It covers handle lifecycle and parentage, stale handles
 and double frees, cursor state, attribute round-trips, the query timeout, and
-transactions. A DSN run would reach the same code by a longer route, so there
-is only one.
+transactions. It also covers the `SQLGetData` buffer contract, which is the
+part of that call an application cannot avoid and a Driver Manager does not
+implement: how much is written, what the indicator counts, that a zero-length
+call is the documented length probe rather than a completed read, that a
+second call continues the value instead of restarting it — a driver that
+restarts turns the documented drain loop into an infinite one — and that an
+ordinal past the last column is `07009` rather than a general error. A DSN run
+would reach the same code by a longer route, so there is only one.
 
 Because the spec's **(DM)** diagnostics come from the Driver Manager, that suite
 never demands one. Where a SQLSTATE is (DM)-annotated it asserts what the driver
