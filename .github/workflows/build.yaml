@@ -188,9 +188,43 @@ jobs:
       - name: Build Windows DLL
         run: cargo build --locked --target x86_64-pc-windows-gnu --release
 
+      # Graded on what the DLL actually exports, not on the last command in a
+      # pipeline. The previous form piped a symbol count into `xargs echo`, and
+      # the step's exit status was `xargs`'s, which is 0 whatever it echoes: a
+      # DLL exporting nothing at all printed "0 ODBC symbols exported" and
+      # passed. The named set catches the entry points an application reaches
+      # the driver through, and the floor catches a wholesale regression in
+      # core's `forward_ffi!` even if these particular names survive.
       - name: Verify DLL exports
         run: |
-          x86_64-w64-mingw32-objdump -p target/x86_64-pc-windows-gnu/release/stackable_odbc_sqlite.dll | grep -c "SQL" | xargs -I{} echo "SQLite DLL: {} ODBC symbols exported"
+          DLL=target/x86_64-pc-windows-gnu/release/stackable_odbc_sqlite.dll
+          EXPORTS=$(x86_64-w64-mingw32-objdump -p "$DLL" \
+            | awk '/Export Address Table/,/Ordinal base/' \
+            | grep -oE '\b(SQL|Config)[A-Za-z]+\b' | sort -u)
+          echo "$EXPORTS" | tr '\n' ' '; echo
+
+          missing=""
+          for sym in SQLAllocHandle SQLFreeHandle SQLDriverConnectW SQLConnectW \
+                     SQLBrowseConnectW SQLDisconnect SQLPrepareW SQLExecute \
+                     SQLExecDirectW SQLBindParameter SQLDescribeParam SQLFetch \
+                     SQLGetData SQLNumResultCols SQLDescribeColW SQLGetInfoW \
+                     SQLGetTypeInfoW SQLGetDiagRecW SQLTablesW SQLColumnsW \
+                     SQLEndTran SQLCancel ConfigDSNW; do
+            grep -qx "$sym" <<< "$EXPORTS" || missing="$missing $sym"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::the DLL does not export:$missing"
+            exit 1
+          fi
+
+          # The DLL exports 61 and the Linux .so 60, the difference being
+          # ConfigDSNW, which is `#[cfg(windows)]`.
+          count=$(echo "$EXPORTS" | grep -c .)
+          if [ "$count" -lt 55 ]; then
+            echo "::error::only $count ODBC symbols exported; expected at least 55"
+            exit 1
+          fi
+          echo "SQLite DLL: $count ODBC symbols exported, all required names present"
 
       # build.rs embeds this, and it is what stops the ODBC Data Source
       # Administrator listing the driver as "Not marked". A cross-build with no
