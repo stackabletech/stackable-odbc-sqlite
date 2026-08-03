@@ -1,13 +1,16 @@
 //! Core type definitions for the SQLite backend ([`SqliteBackend`],
-//! [`SqliteConnection`], [`SqliteStatement`]) plus `connect`, `disconnect`,
-//! `end_tran`, error mapping, and the thin [`Backend`] delegation layer.
-//! Statement execution, catalog metadata, `SQLGetInfo` and the DSN setup
-//! dialog live in the submodules.
+//! [`SqliteConnection`], [`SqliteStatement`], [`SqliteCancelToken`]) plus
+//! `connect`, `disconnect`, `end_tran`, error mapping, and the thin
+//! [`Backend`] delegation layer. Statement execution, catalog metadata,
+//! `SQLGetInfo` and the DSN setup dialog live in the submodules.
 
 use std::{
     borrow::Cow,
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use snafu::Snafu;
@@ -17,9 +20,9 @@ use stackable_odbc_core::{
     setup::{ConfigRequest, SetupError},
     types::{
         ColumnDescriptor, ColumnRow, ColumnValue, ConnectParams, CursorBehavior, ExecuteOutcome,
-        ForeignKeyRow, InfoValue, PrimaryKeyRow, SQL_CB_NULL, SQL_CN_ANY, SQL_GB_NO_RELATION,
-        SQL_IC_MIXED, SQL_NC_LOW, SQL_NNC_NON_NULL, SQL_TC_ALL, SQL_TXN_SERIALIZABLE,
-        SpecialColumnRow, StatisticsRow, TableRow, TypeInfoRow,
+        ForeignKeyRow, InfoValue, PrimaryKeyRow, QueryTimeout, SQL_CB_NULL, SQL_CN_ANY,
+        SQL_GB_NO_RELATION, SQL_IC_MIXED, SQL_NC_LOW, SQL_NNC_NON_NULL, SQL_TC_ALL,
+        SQL_TXN_SERIALIZABLE, SpecialColumnRow, StatisticsRow, TableRow, TypeInfoRow,
     },
 };
 
@@ -62,6 +65,42 @@ pub struct SqliteConnection {
     /// True while the application has turned autocommit off. `end_tran` reads
     /// this to decide whether to open the next transaction after committing.
     pub(crate) manual_commit: std::sync::atomic::AtomicBool,
+}
+
+/// What [`SqliteBackend::cancel`] signals and [`SqliteBackend::is_cancelled`]
+/// observes.
+///
+/// Two halves, and they are scoped differently on purpose:
+///
+/// - `interrupt` is the connection's, cloned from
+///   [`SqliteBackend::connect`]. `sqlite3_interrupt` stops whatever is running
+///   on that connection, so there is nothing finer to hold.
+/// - `cancelled` is *this token's own*, minted fresh by
+///   [`SqliteBackend::cancel_token`]. It records that this particular token
+///   was signalled, which is what `is_cancelled` reports.
+///
+/// The freshness matters. Core mints a token per statement-producing call, and
+/// a flag shared across them would leave a cancelled statement permanently
+/// unusable: every later error on the connection would be reported as `HY008`,
+/// where the spec says "After the statement has been canceled, the application
+/// can call SQLExecute or SQLExecDirect again." A cancel that arrives for work
+/// already finished therefore marks only the token it named, which is the
+/// spec's own outcome: "a call to SQLCancel when no processing is being done
+/// on the statement ... has no effect at all."
+#[derive(Clone)]
+pub struct SqliteCancelToken {
+    interrupt: Arc<rusqlite::InterruptHandle>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for SqliteCancelToken {
+    /// `rusqlite::InterruptHandle` is not `Debug`, so this reports the only
+    /// part that has an observable value.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqliteCancelToken")
+            .field("cancelled", &self.cancelled.load(Ordering::SeqCst))
+            .finish_non_exhaustive()
+    }
 }
 
 pub struct SqliteStatement {
@@ -409,7 +448,7 @@ impl Backend for SqliteBackend {
     /// mutex*, so a racing `interrupt()` either runs against a live handle or
     /// sees null and does nothing. Wrapping it in this crate's own `Arc` is
     /// what makes the token cheap to clone per statement.
-    type CancelToken = Arc<rusqlite::InterruptHandle>;
+    type CancelToken = SqliteCancelToken;
     type Connection = SqliteConnection;
     type Error = SqliteError;
     type Statement = SqliteStatement;
@@ -428,13 +467,22 @@ impl Backend for SqliteBackend {
         setup::configure_dsn(hwnd_parent, request, attributes)
     }
 
-    /// Hand out the connection's interrupt handle. Infallible and lock-free:
-    /// the handle was captured in [`SqliteBackend::connect`], so this only
-    /// bumps a refcount (see `SqliteConnection::interrupt`). Not an intra-doc
-    /// link: that field is `pub(crate)`, and rustdoc rejects a public item
-    /// linking to a private one.
-    fn cancel_token(conn: &SqliteConnection) -> Arc<rusqlite::InterruptHandle> {
-        Arc::clone(&conn.interrupt)
+    /// Hand out the connection's interrupt handle, with a fresh signal flag.
+    /// Infallible and lock-free: the handle was captured in
+    /// [`SqliteBackend::connect`], so this only bumps a refcount (see
+    /// `SqliteConnection::interrupt`). Not an intra-doc link: that field is
+    /// `pub(crate)`, and rustdoc rejects a public item linking to a private
+    /// one.
+    ///
+    /// The flag is new on every call rather than shared with the connection.
+    /// See `SqliteCancelToken` for why a shared one would strand a cancelled
+    /// statement. Not an intra-doc link, for the same reason as above: the
+    /// type is not re-exported from the crate root.
+    fn cancel_token(conn: &SqliteConnection) -> SqliteCancelToken {
+        SqliteCancelToken {
+            interrupt: Arc::clone(&conn.interrupt),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     /// Interrupt whatever is running on the token's connection.
@@ -452,10 +500,69 @@ impl Backend for SqliteBackend {
     /// entry point holds. It is also a no-op rather than an error when nothing
     /// is running, which is exactly what the spec asks of `SQLCancel` in that
     /// case.
-    fn cancel(token: &Arc<rusqlite::InterruptHandle>) -> Result<(), SqliteError> {
+    /// The flag is set *before* the interrupt, so the racing thread can never
+    /// observe the resulting `SQLITE_INTERRUPT` while
+    /// [`SqliteBackend::is_cancelled`] still answers `false`. That ordering is
+    /// what stops a cancelled statement reporting its raw SQLite symptom
+    /// instead of `HY008`.
+    fn cancel(token: &SqliteCancelToken) -> Result<(), SqliteError> {
         tracing::debug!("SQLCancel: interrupting the SQLite connection");
-        token.interrupt();
+        token.cancelled.store(true, Ordering::SeqCst);
+        token.interrupt.interrupt();
         Ok(())
+    }
+
+    /// The other half of [`SqliteBackend::cancel`]: `cancel` signals the
+    /// token, this observes it, and core turns a `true` here into the `HY008`
+    /// the spec gives a function interrupted by `SQLCancel`.
+    ///
+    /// Core asks only after a backend call has already failed, so this never
+    /// turns a successful execution into an error. That matters because SQLite
+    /// may well finish the statement before `sqlite3_interrupt` lands, and the
+    /// spec allows exactly that: "it is possible for the execution to succeed
+    /// and return SQL_SUCCESS while the cancel is also successful."
+    ///
+    /// This is *not* what produces `HYT00` for an expired
+    /// `SQL_ATTR_QUERY_TIMEOUT`. Core marks its own cancel state timed-out
+    /// before it cancels, and relabels the failure ahead of the `HY008`
+    /// reclassification this feeds, so a deadline reports `HYT00` whatever
+    /// this answers. Implemented because
+    /// [`QueryTimeout::CoreCancels`] asks for the pairing, and because it
+    /// makes the `HY008` a property of the cancel rather than of whichever
+    /// `rusqlite` error happened to surface.
+    ///
+    /// Reads a flag and takes no lock, so it is safe on both of `SQLCancel`'s
+    /// paths for the same reason [`SqliteBackend::cancel`] is.
+    fn is_cancelled(token: &SqliteCancelToken) -> bool {
+        token.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// `SQL_ATTR_QUERY_TIMEOUT`, enforced by core's timer calling
+    /// [`SqliteBackend::cancel`].
+    ///
+    /// SQLite has no server-side statement deadline to set, so
+    /// [`QueryTimeout::DataSource`] is unavailable and
+    /// [`QueryTimeout::CoreCancels`] is the honest answer. It asserts that
+    /// `cancel` really cancels, which holds here: `sqlite3_interrupt` stops
+    /// the in-flight `sqlite3_step`, and
+    /// [`SqliteBackend::is_cancelled`] is implemented alongside, as the
+    /// variant requires.
+    ///
+    /// The deadline covers execution rather than fetching, which is where a
+    /// SQLite query spends its time: `exec_direct` materialises every row
+    /// before returning, so a slow `SELECT` is slow inside that call and
+    /// `SQLFetch` afterwards only walks a `Vec`.
+    ///
+    /// `seconds` is ignored rather than pushed anywhere. Core owns the timer
+    /// and the value, which also sidesteps the scope caveat on this hook: the
+    /// deadline never becomes connection-wide state here, so two statements on
+    /// one connection keep their own.
+    fn set_query_timeout(
+        _conn: &SqliteConnection,
+        seconds: usize,
+    ) -> Result<QueryTimeout, SqliteError> {
+        tracing::debug!(seconds, "SqliteBackend::set_query_timeout");
+        Ok(QueryTimeout::CoreCancels)
     }
 
     fn connect(params: &ConnectParams) -> Result<SqliteConnection, SqliteError> {
@@ -982,7 +1089,7 @@ impl Backend for SqliteBackend {
 
     fn exec_direct(
         conn: &SqliteConnection,
-        _cancel: &Arc<rusqlite::InterruptHandle>,
+        _cancel: &SqliteCancelToken,
         sql: &str,
     ) -> Result<SqliteStatement, SqliteError> {
         execute::exec_direct(conn, sql)
@@ -990,7 +1097,7 @@ impl Backend for SqliteBackend {
 
     fn prepare(
         conn: &SqliteConnection,
-        _cancel: &Arc<rusqlite::InterruptHandle>,
+        _cancel: &SqliteCancelToken,
         sql: &str,
     ) -> Result<SqliteStatement, SqliteError> {
         execute::prepare(conn, sql)
@@ -998,7 +1105,7 @@ impl Backend for SqliteBackend {
 
     fn execute(
         conn: &SqliteConnection,
-        _cancel: &Arc<rusqlite::InterruptHandle>,
+        _cancel: &SqliteCancelToken,
         stmt: &mut SqliteStatement,
         params: &[ColumnValue],
     ) -> Result<ExecuteOutcome, SqliteError> {
@@ -1035,7 +1142,7 @@ impl Backend for SqliteBackend {
 
     fn tables(
         conn: &SqliteConnection,
-        _cancel: &Arc<rusqlite::InterruptHandle>,
+        _cancel: &SqliteCancelToken,
         query: &stackable_odbc_core::types::TablesQuery<'_>,
     ) -> Result<Vec<TableRow>, SqliteError> {
         metadata::tables(conn, query)
@@ -1049,7 +1156,7 @@ impl Backend for SqliteBackend {
 
     fn columns(
         conn: &SqliteConnection,
-        _cancel: &Arc<rusqlite::InterruptHandle>,
+        _cancel: &SqliteCancelToken,
         query: &stackable_odbc_core::types::ColumnsQuery<'_>,
     ) -> Result<Vec<ColumnRow>, SqliteError> {
         metadata::columns(conn, query)
@@ -1057,7 +1164,7 @@ impl Backend for SqliteBackend {
 
     fn primary_keys(
         conn: &SqliteConnection,
-        _cancel: &Arc<rusqlite::InterruptHandle>,
+        _cancel: &SqliteCancelToken,
         query: &stackable_odbc_core::types::PrimaryKeysQuery<'_>,
     ) -> Result<Vec<PrimaryKeyRow>, SqliteError> {
         metadata::primary_keys(conn, query)
@@ -1065,7 +1172,7 @@ impl Backend for SqliteBackend {
 
     fn foreign_keys(
         conn: &SqliteConnection,
-        _cancel: &Arc<rusqlite::InterruptHandle>,
+        _cancel: &SqliteCancelToken,
         query: &stackable_odbc_core::types::ForeignKeysQuery<'_>,
     ) -> Result<Vec<ForeignKeyRow>, SqliteError> {
         metadata::foreign_keys(conn, query)
@@ -1073,7 +1180,7 @@ impl Backend for SqliteBackend {
 
     fn statistics(
         conn: &SqliteConnection,
-        _cancel: &Arc<rusqlite::InterruptHandle>,
+        _cancel: &SqliteCancelToken,
         query: &stackable_odbc_core::types::StatisticsQuery<'_>,
     ) -> Result<Vec<StatisticsRow>, SqliteError> {
         metadata::statistics(conn, query)
@@ -1081,7 +1188,7 @@ impl Backend for SqliteBackend {
 
     fn special_columns(
         conn: &SqliteConnection,
-        _cancel: &Arc<rusqlite::InterruptHandle>,
+        _cancel: &SqliteCancelToken,
         query: &stackable_odbc_core::types::SpecialColumnsQuery<'_>,
     ) -> Result<Vec<SpecialColumnRow>, SqliteError> {
         metadata::special_columns(conn, query)

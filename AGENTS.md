@@ -349,9 +349,17 @@ the hook happens at connect time, so an unsupported level fails the connect.
 
 ### Cancellation
 
-`SQLCancel` is real: `Backend::CancelToken` is `Arc<rusqlite::InterruptHandle>`
-and `cancel` calls `sqlite3_interrupt`, which stops the in-flight
-`sqlite3_step` on that connection.
+`SQLCancel` is real: `cancel` calls `sqlite3_interrupt`, which stops the
+in-flight `sqlite3_step` on that connection.
+
+`Backend::CancelToken` is `SqliteCancelToken`, and its two fields are scoped
+differently on purpose. The interrupt handle is the *connection's*, cloned from
+`connect`, because `sqlite3_interrupt` has nothing finer to aim at. The
+`cancelled` flag is the *token's own*, minted fresh by `cancel_token`. Core
+mints a token per statement-producing call, so a flag shared across them would
+leave a cancelled statement permanently unusable, with every later error on the
+connection reported as `HY008` — where the spec says "After the statement has
+been canceled, the application can call SQLExecute or SQLExecDirect again."
 
 This is the **aliasing** token shape of the two `Backend::CancelToken`'s doc
 comment describes (the token refers to the same connection the statement is
@@ -389,20 +397,36 @@ the return code. Note the gate it holds: `SQLCancel`'s idle branch clears the
 statement's diagnostic queue, so a cancel landing after `SQLExecDirectW`
 returns would wipe the `HY008` the test is reading.
 
-`SQL_ATTR_QUERY_TIMEOUT` is substituted with `0` and reported as `01S02`,
-because this driver does not override `Backend::set_query_timeout` and the
-default answers `NotImplemented`.
+`is_cancelled` is the other half: `cancel` signals the token's flag, this
+reads it, and core turns a `true` into `HY008`. Core asks only after a backend
+call has already failed, so a statement that finishes before the interrupt
+lands stays successful, which the spec explicitly permits.
 
-**This is a gap rather than an impossibility.** Core owns the timer
-(`query_timer.rs`), and `Ok(QueryTimeout::CoreCancels)` asks it to arm one and
-call `Backend::cancel` when the deadline passes. `cancel` is real here, which is
-exactly the precondition `CoreCancels` documents. Closing the gap means
-overriding `set_query_timeout` to return `CoreCancels`, and overriding
-`is_cancelled` alongside it, since that is what turns the interrupted
-statement's own symptom into the `HYT00` the application is waiting for rather
-than the `HY008` a user-initiated `SQLCancel` produces. `SQL_ATTR_QUERY_TIMEOUT`
-is a *statement* attribute while the hook receives only the connection, so read
-core's scope caveat on `set_query_timeout` before doing it.
+### Query timeout
+
+`SQL_ATTR_QUERY_TIMEOUT` is enforced. `set_query_timeout` answers
+`QueryTimeout::CoreCancels`, so core arms its own timer (`query_timer.rs`) and
+calls `Backend::cancel` when the deadline passes. SQLite has no server-side
+statement deadline, so `QueryTimeout::DataSource` is unavailable;
+`CoreCancels` asserts that `cancel` really cancels, which holds here.
+
+The deadline covers execution rather than fetching, which is where the time
+goes: `exec_direct` materialises every row before returning, so a slow `SELECT`
+is slow inside that call and `SQLFetch` afterwards only walks a `Vec`.
+
+**`HYT00` does not come from `is_cancelled`.** Core marks its own `CancelState`
+timed out before cancelling, and `QueryTimer::relabel` rewrites the failed
+call's SQLSTATE ahead of the `HY008` reclassification, so the more specific
+timeout wins over the cancel whatever the backend reports.
+`query_timeout_stops_a_long_running_statement` was verified by mutation in both
+directions: stubbing `is_cancelled` to `false` leaves it passing, while
+reverting `set_query_timeout` to the default fails it on the return code.
+
+Core's scope caveat on `set_query_timeout` does not bite here. It warns that
+the hook receives only the connection, so a backend applying the value
+session-wide gives every statement the most recent one. This driver applies it
+nowhere: `seconds` is ignored and core owns both the timer and the stored
+value, so two statements on one connection keep their own deadlines.
 
 ### `row_count` has three answers, not two
 

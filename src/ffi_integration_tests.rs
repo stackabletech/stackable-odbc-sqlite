@@ -1745,21 +1745,18 @@ fn get_cursor_type_default_is_forward_only() {
     }
 }
 
-/// `SQL_ATTR_QUERY_TIMEOUT`'s "no timeout" value, and the only one this driver
-/// can honour. Core has the same constant privately; this names the value the
-/// test asks about rather than passing a bare `0`.
-const SQL_QUERY_TIMEOUT_DEFAULT: usize = 0;
-
-/// A requested timeout other than "no timeout" is substituted, not stored.
+/// A requested timeout is accepted and stored, not substituted away.
 #[test]
-fn set_query_timeout_is_substituted_with_no_timeout() {
-    // `Backend` is synchronous and this driver implements no cancellation, so
-    // no deadline is ever applied to a running statement. `SQL_ATTR_QUERY_TIMEOUT`
-    // is on the spec's 01S02 substitution list for exactly this case: the value
-    // is replaced with `SQL_QUERY_TIMEOUT_DEFAULT` and reported as
-    // SQL_SUCCESS_WITH_INFO, so an application that asks for 30 seconds can see
-    // it did not get them by reading the attribute back. This previously
-    // returned SUCCESS and echoed 30, confirming a deadline nothing enforced.
+fn set_query_timeout_is_accepted_and_read_back() {
+    // `SqliteBackend::set_query_timeout` answers `QueryTimeout::CoreCancels`,
+    // so core arms its own timer and calls `Backend::cancel` when the deadline
+    // passes. That makes the value a real promise, and the spec's `01S02`
+    // substitution path no longer applies: an application asking for 30
+    // seconds gets SQL_SUCCESS and reads 30 back.
+    //
+    // Reading back what was asked for is the whole point. A driver that
+    // silently stores something else leaves the application believing in a
+    // deadline it will not get.
     unsafe {
         let (env, conn, stmt) = alloc_handles();
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
@@ -1772,12 +1769,8 @@ fn set_query_timeout_is_substituted_with_no_timeout() {
                 std::ptr::without_provenance_mut(REQUESTED_TIMEOUT_SECONDS),
                 0,
             ),
-            SqlReturn::SUCCESS_WITH_INFO,
-            "an unsupported query timeout is substituted, not refused"
-        );
-        assert_eq!(
-            last_sqlstate(stmt),
-            stackable_odbc_core::types::sql_state::OPTION_VALUE_CHANGED
+            SqlReturn::SUCCESS,
+            "a timeout this driver can honour is accepted outright"
         );
 
         // `SQL_ATTR_QUERY_TIMEOUT` is a SQLUINTEGER attribute, so the driver
@@ -1795,17 +1788,80 @@ fn set_query_timeout_is_substituted_with_no_timeout() {
             SqlReturn::SUCCESS
         );
         assert_eq!(
-            val as usize, SQL_QUERY_TIMEOUT_DEFAULT,
-            "the substituted value has to be what the application reads back"
+            val as usize, REQUESTED_TIMEOUT_SECONDS,
+            "the stored value has to be what the application reads back"
         );
 
         cleanup(env, conn, stmt);
     }
 }
 
-/// Asking for the value the driver can honour is a plain success.
+/// A query that outruns `SQL_ATTR_QUERY_TIMEOUT` is stopped, and says so.
+///
+/// End-to-end proof that `QueryTimeout::CoreCancels` is honoured: core arms
+/// the timer, the timer calls [`SqliteBackend::cancel`], `sqlite3_interrupt`
+/// stops the step loop, and the failed call is reported as `HYT00`.
+///
+/// The `HYT00` comes from core's own timer state, not from
+/// `SqliteBackend::is_cancelled`. Core marks its `CancelState` timed-out
+/// before cancelling and relabels the resulting failure ahead of the
+/// `HY008` reclassification, so the timeout wins over the cancel. Verified by
+/// mutation: stubbing `is_cancelled` to `false` leaves this test passing,
+/// while reverting `set_query_timeout` to the `NotImplemented` default fails
+/// it on the return code.
 #[test]
-fn set_query_timeout_to_no_timeout_succeeds_without_substitution() {
+fn query_timeout_stops_a_long_running_statement() {
+    unsafe {
+        let (env, conn, stmt) = alloc_handles();
+        assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
+
+        const TIMEOUT_SECONDS: usize = 1;
+        assert_eq!(
+            ffi::stmt_attr::sql_set_stmt_attr_w::<SqliteBackend>(
+                stmt,
+                StatementAttribute::QueryTimeout as i32,
+                std::ptr::without_provenance_mut(TIMEOUT_SECONDS),
+                0,
+            ),
+            SqlReturn::SUCCESS
+        );
+
+        // A recursive CTE that counts far enough to outlast the deadline
+        // comfortably, without allocating anything: the work is in SQLite's
+        // step loop, which is exactly where `sqlite3_interrupt` lands.
+        let rc = exec_direct(
+            stmt,
+            "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM c WHERE i < 900000000) \
+             SELECT count(*) FROM c",
+        );
+
+        assert_eq!(
+            rc,
+            SqlReturn::ERROR,
+            "the statement outran its timeout, so it must not report success"
+        );
+        assert_eq!(
+            last_sqlstate(stmt),
+            stackable_odbc_core::types::sql_state::TIMEOUT_EXPIRED,
+            "a statement stopped by the query timer reports HYT00, not HY008"
+        );
+
+        cleanup(env, conn, stmt);
+    }
+}
+
+/// `SQL_ATTR_QUERY_TIMEOUT`'s "no timeout" value. Core has the same constant
+/// privately; this names the value the test asks about rather than passing a
+/// bare `0`.
+const SQL_QUERY_TIMEOUT_DEFAULT: usize = 0;
+
+/// Turning the timeout off is a plain success and never reaches the backend.
+#[test]
+fn set_query_timeout_to_no_timeout_succeeds() {
+    // Core handles `0` without consulting `Backend::set_query_timeout` at all,
+    // because `0` means "no deadline" and there is nothing to arm. It is the
+    // default, so this also pins that clearing a timeout is not mistaken for
+    // requesting one.
     unsafe {
         let (env, conn, stmt) = alloc_handles();
         assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
@@ -1818,7 +1874,7 @@ fn set_query_timeout_to_no_timeout_succeeds_without_substitution() {
                 0,
             ),
             SqlReturn::SUCCESS,
-            "no timeout is what this driver does, so there is nothing to substitute"
+            "no timeout is always available, so there is nothing to substitute"
         );
 
         cleanup(env, conn, stmt);

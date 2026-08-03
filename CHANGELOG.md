@@ -38,10 +38,12 @@ you commit.
 most people who assume a `REFERENCES` clause is a rule the database keeps. The
 driver issues `PRAGMA foreign_keys = ON` for every connection.
 
-**Cancellation.** `SQLCancel` from another thread calls `sqlite3_interrupt` on
-the connection, so a runaway query stops instead of running to completion while
-the application believes it was cancelled. The statement reports `HY008` and
-can be run again.
+**Cancellation and timeouts.** `SQLCancel` from another thread calls
+`sqlite3_interrupt` on the connection, so a runaway query stops instead of
+running to completion while the application believes it was cancelled. The
+statement reports `HY008` and can be run again. `SQL_ATTR_QUERY_TIMEOUT` is
+enforced the same way, reporting `HYT00` when the deadline passes, and it
+covers execution, which is where a SQLite query spends its time.
 
 **Reported capabilities.** What a driver says about itself is how applications
 decide which SQL to send, so the values here are measured rather than
@@ -64,8 +66,6 @@ describes what was linked, including the bundled SQLite.
 - Rows are fetched one at a time. `SQL_ATTR_ROW_ARRAY_SIZE` and
   `SQL_ATTR_PARAMSET_SIZE` are both pinned at 1, so there are no block cursors
   and no parameter arrays.
-- `SQL_ATTR_QUERY_TIMEOUT` is reported as unsupported. A running statement can
-  still be cancelled from another thread.
 - Result sets are read into memory in full, which is what lets cursors survive
   a commit or rollback. A `SELECT` larger than available memory will not work.
 - Only the serializable isolation level is offered, because it is the only one

@@ -115,7 +115,8 @@ scripted alternatives.
 - **The stop button stops the query.** Cancelling from your tool calls SQLite's
   `sqlite3_interrupt` on the connection, so a runaway query really stops rather
   than running to the end while your tool reports it as cancelled. The
-  statement can be run again afterwards.
+  statement can be run again afterwards. Query timeouts work the same way, so
+  "give up after 30 seconds" is a promise the driver keeps.
 
 - **Real transactions.** Turn autocommit off and the driver opens a transaction
   for you, then commits or rolls back when you say so and immediately opens the
@@ -167,9 +168,6 @@ faked, so the tool can react instead of trusting a wrong answer.
 - **No stored procedures.** SQLite has none, so those lookups return nothing.
 - **Rows arrive one at a time.** There are no block cursors and no parameter
   arrays.
-- **No query timeout.** You can cancel a running statement from another thread,
-  but "give up after 30 seconds" is answered with a warning rather than a
-  promise that would never be kept.
 - **Result sets are read into memory in one go.** That is what lets cursors
   survive a commit or rollback, but a `SELECT` over a table larger than your
   RAM will not work.
