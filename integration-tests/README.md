@@ -27,6 +27,7 @@ Both take `--help`.
 | `suites/harness.py` | PASS/FAIL accounting and connection-string parsing, shared by the suites |
 | `suites/odbc_abi.py` | The raw ODBC C ABI declared for `ctypes`, for the suites that skip the Driver Manager |
 | `suites/test_integration.py` | The pyodbc suite, run once per connection style |
+| `suites/test_transactions.py` | Manual-commit transactions, run once per connection style |
 | `suites/test_c_abi.py` | The C ABI pen test, run once |
 | `generated/` | Everything `setup.sh` writes. Gitignored |
 | `windows/` | The VM suite, its libvirt definitions, and [WINDOWS.md](windows/WINDOWS.md) |
@@ -48,6 +49,13 @@ checkout, and a committed copy would be wrong for everyone but its author.
 They are separate runs because they fail separately. A driver that reads its
 parameters correctly can still be unreachable through a DSN, and that is a
 configuration most applications actually use.
+
+`test_transactions.py` runs the same two ways, because manual-commit mode is
+set on the connection. Three of its scenarios assert the *opposite* of the
+Trino driver's equivalents, which is why it could not simply be copied across:
+a failed statement leaves a SQLite transaction usable rather than aborting it,
+a commit preserves an open cursor rather than closing it, and serializable is
+the level that must be accepted rather than refused.
 
 Then `test_c_abi.py`, once. It loads the driver's `.so` with `ctypes` and calls
 the exported entry points with **no Driver Manager in the loop**, which is the

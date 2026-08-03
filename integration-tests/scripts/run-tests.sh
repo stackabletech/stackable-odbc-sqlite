@@ -71,6 +71,15 @@ uv run --with pyodbc python3 "$SUITES_DIR/test_integration.py" \
 echo "=== Running Linux pyodbc integration tests (DSN) ==="
 uv run --with pyodbc python3 "$SUITES_DIR/test_integration.py" "DSN=$DSN_NAME"
 
+# Both connection styles again: manual-commit mode is set on the connection, so
+# the DSN path is worth exercising even though the transaction logic is shared.
+echo "=== Running transaction tests (DSN-less) ==="
+uv run --with pyodbc python3 "$SUITES_DIR/test_transactions.py" \
+    "Driver=$DRIVER_PATH;Database=$DB_PATH"
+
+echo "=== Running transaction tests (DSN) ==="
+uv run --with pyodbc python3 "$SUITES_DIR/test_transactions.py" "DSN=$DSN_NAME"
+
 # Once, not per connection style: this suite loads the .so with ctypes and
 # never reaches a Driver Manager, so a DSN run would exercise the same code by
 # a longer route. Plain python3, because it needs no third-party package.
