@@ -184,7 +184,15 @@ def main():
     for suite in DIRECT_SUITES:
         run(suite, suite, direct)
 
-    run(STRESS_SUITE, STRESS_SUITE, f"Driver={REMOTE_DLL};Database={REMOTE_STRESS_DB}")
+    # Through the Driver Manager like the other pyodbc suites, so this names the
+    # *registered driver* rather than the DLL. Windows resolves `Driver=` as a
+    # name in ODBCINST.INI and answers IM002 for a path, where unixODBC accepts
+    # either.
+    run(
+        STRESS_SUITE,
+        STRESS_SUITE,
+        f"Driver={DRIVER_NAME};Database={REMOTE_STRESS_DB}",
+    )
 
     print()
     if failures:
