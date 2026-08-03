@@ -14,7 +14,8 @@ the C ABI entry points) lives in
 
 | Topic | When to Read |
 |-------|-------------|
-| [Relationship to core](#relationship-to-stackable-odbc-core) | Deciding where a change belongs |
+| [Architecture](#architecture-of-this-crate) | Finding the module a change belongs in |
+| [Relationship to core](#relationship-to-stackable-odbc-core) | Deciding whether a change belongs here at all |
 | [Conventions](#conventions) | Any code change |
 | [Backend error mapping](#backend-error-mapping) | Touching an error path |
 | [Declaring capabilities](#declaring-capabilities) | Adding or changing any `SQLGetInfo` value |
@@ -22,10 +23,9 @@ the C ABI entry points) lives in
 | [Cancellation](#cancellation) | Touching `SQLCancel` or `SQL_ATTR_QUERY_TIMEOUT` |
 | [`row_count` has three answers](#row_count-has-three-answers-not-two) | Touching `SQLRowCount` or the execute path |
 | [Catalog functions](#catalog-functions) | Touching anything in `metadata.rs` |
-| [Architecture](#architecture-of-this-crate) | Understanding the module layout |
 | [Connection string keys](#connection-string-keys) | Adding or changing a parameter |
 | [Testing](#testing) | Writing or running tests |
-| [Packaging](#packaging) | Cutting a release |
+| [Packaging and release](#packaging-and-release) | Cutting a release |
 
 ```bash
 cargo build                                  # needs unixodbc-dev
@@ -37,18 +37,44 @@ pre-commit run --all-files                   # the gate; run before every commit
 ./integration-tests/run-tests.sh             # run the integration suite
 ```
 
+## Architecture of this crate
+
+| Path | Responsibility |
+|------|----------------|
+| `src/lib.rs` | The `forward_ffi!` invocation, the crate docs, and the packaging consistency tests |
+| `src/backend.rs` | `SqliteBackend`, `SqliteConnection`, `SqliteStatement`, `SqliteError`, `map_sqlite_error` |
+| `src/backend/execute.rs` | `exec_direct`, `prepare`, `execute`, and the `StatementBackend` impl |
+| `src/backend/info.rs` | `SQLGetInfo` answers and the capability bitmaps, plus the snapshot test |
+| `src/backend/metadata.rs` | The catalog row producers: tables, columns, primary keys, statistics, special columns |
+| `src/backend/setup.rs` | `Backend::configure_dsn`, the Windows DSN setup dialog |
+| `src/backend/params.rs` | Deliberately empty. Parameter binding is inline in `execute.rs`; the entry points are core's |
+| `src/backend/types/connect_params.rs` | `SqliteConnectParams` |
+| `src/escape_dialect.rs` | ODBC escape-sequence translation for SQLite's dialect |
+| `src/type_conversion.rs` | SQLite storage classes and declared types → ODBC SQL types |
+| `src/ffi_integration_tests.rs` | Tests that drive the real C ABI entry points |
+| `build.rs` | Embeds the Windows version resource with `windres` |
+| `benches/fetch_sqlite.rs` | Criterion fetch-throughput benchmark through the full FFI path |
+
+### Result sets are materialised eagerly
+
+`SqliteStatement` holds `rows: Vec<Vec<ColumnValue>>` and `cursor: i64`, an
+index into an in-memory snapshot rather than a live SQLite cursor.
+`exec_direct` collects every row before returning, and the
+`rusqlite::Statement` is finalized at that point.
+
+This is load-bearing well beyond memory use. It is why the cursor-behaviour
+hooks report `Preserve`, why `SQLEndTran` cannot disturb a cursor, and why
+concurrency is a non-issue. Changing it is not a local optimisation. See
+[Transactions](#transactions).
+
 ## Relationship to stackable-odbc-core
 
-`stackable-odbc-core` is a path dependency on a sibling checkout until it is
-published:
-
-```toml
-stackable-odbc-core = { path = "../stackable-odbc-core" }
-```
-
-There is a matching `TODO` in `Cargo.toml`. Until it is resolved, CI cannot
-pass, because a path dependency does not resolve on a runner. This crate is not published to
-crates.io; releases are GitHub Release archives built by
+Core is a git dependency, pinned in `Cargo.toml`, and cargo fetches it for you.
+To build against a local checkout instead, add a `[patch]` to your own
+`.cargo/config.toml`; see
+[CONTRIBUTING.md](CONTRIBUTING.md#working-on-core-at-the-same-time) for the
+mechanics and the `Cargo.lock` caveat. This crate is not published to
+crates.io. Releases are GitHub Release archives built by
 `.github/workflows/release.yaml`.
 
 | Concern | Owner |
@@ -65,6 +91,7 @@ crates.io; releases are GitHub Release archives built by
 | Catalog column layout, sort order, the `SQL_ALL_*` enumerations | core |
 | Connection-string parsing | this crate |
 | ODBC escape-sequence translation | this crate |
+| All of `ConfigDSN`, apart from the dialog itself | core, see [The Windows setup dialog](#the-windows-setup-dialog) |
 
 `src/lib.rs` is the whole export surface:
 
@@ -130,10 +157,9 @@ re-exports. Do not add `odbc-sys` to `Cargo.toml`.
 Core also re-exports the crate wholesale as `stackable_odbc_core::odbc_sys`,
 so a type with no `types` re-export of its own is still reachable without a
 direct dependency. Reach for that rather than hand-rolling a `#[repr(C)]`
-mirror: `src/ffi_integration_tests.rs` used to carry a local `RawTimestamp`
-duplicating `SQL_TIMESTAMP_STRUCT`, and a mirror that drifts from the real
-struct is two different types to the compiler and one silent ABI mismatch to
-the application.
+mirror of a struct like `SQL_TIMESTAMP_STRUCT`: a mirror that drifts from the
+real struct is two different types to the compiler and one silent ABI mismatch
+to the application.
 
 ### Type cast safety
 
@@ -178,23 +204,27 @@ For this driver `connect` is where real I/O happens:
 `rusqlite::Connection::open` touches the filesystem, so a missing or unreadable
 database file is `08001`. Failures after that point are `08S01`.
 
+## ODBC behaviour and design rationale
+
+Everything in this section describes behaviour an application can observe, and
+each decision is anchored to a spec page or to measured SQLite behaviour. Read
+the relevant part before changing what the driver reports.
+
 ### Declaring capabilities
 
-`Backend` has around thirty **required** methods that state what SQLite can
+Most of `Backend` is **required** methods that state what SQLite can
 do: `alter_table_support`, `outer_join_capabilities`, `subqueries`,
 `sql_conformance`, `supports_catalogs`, `identifier_case`,
 `quoted_identifier_case`, `txn_capable`, `txn_isolation_options`, `integrity`,
 `multiple_active_txn`, `special_characters`, `accessible_procedures`,
 `dbms_name`, `dbms_version`, `table_types` and the rest. They are required,
 with no default, deliberately: a defaulted capability is a claim no backend
-ever made, and every one of them was a bug here before core made it a compile
-error. `table_types` is required for the same reason and one of its own: an
-empty table-type list is an *answer* ("this data source has no table types"),
-not "unknown", and unlike catalogs and schemas there is no `supports_*` method
-for core to derive it from. `special_characters` is required on that same
-principle: `""` asserts that nothing beyond the alphanumerics and underscore
-is legal unquoted, which is a claim, not an absence, and inheriting it as a
-default is how this driver came to under-report `$`.
+ever made. `table_types` is required for the same reason and one of its own,
+since an empty table-type list is an *answer* ("this data source has no table
+types") rather than "unknown", and unlike catalogs and schemas there is no
+`supports_*` method for core to derive it from. `special_characters` follows
+the same principle, because `""` asserts that nothing beyond the alphanumerics
+and underscore is legal unquoted, which is a claim rather than an absence.
 
 They all take `&Self::Connection`, because `SQLGetInfo` is a per-connection
 call and a data source's capabilities can differ by server. Every one this
@@ -202,13 +232,13 @@ driver declares is a property of the SQLite `rusqlite` links, not of the file
 opened, so each ignores the argument, but the answer must still be read
 through a connection, and the tests do that via `info::tests::test_connection`
 rather than calling the hook as a free function. `cursor_commit_behavior`,
-`cursor_rollback_behavior`, `catalog_result_column_widths`, `driver_name` and
-`driver_version` are the exceptions and take none: `SQLGetInfo` must answer the
-first three before a connection exists, and the Windows Driver Manager asks for
-driver identity before `SQLDriverConnectW`. Note the split within the identity
+`cursor_rollback_behavior`, `driver_name` and `driver_version` are the
+exceptions and take none: `SQLGetInfo` must answer the cursor-behaviour pair
+before a connection exists, and the Windows Driver Manager asks for driver
+identity before `SQLDriverConnectW`. Note the split within the identity
 group: `driver_name`/`driver_version` describe the driver and take no
 connection, while `dbms_name`/`dbms_version` describe what was connected to and
-take one.
+take one. (`catalog_result_column_widths` is core's, defaulted here.)
 
 The same split runs through `get_info`. `sqlite_get_info` takes
 `Option<&SqliteConnection>` (`None` on the pre-connect path) and hands it to
@@ -218,23 +248,23 @@ hook must therefore be guarded on the connection being present, which is why
 `SQL_MAX_CATALOG_NAME_LEN` and `SQL_MAX_SCHEMA_NAME_LEN` only report `0` once
 one is open.
 
-Four rules, all learned the hard way:
+Four rules:
 
 **Declare it once.** A capability with a hook is answered *only* through the
 hook, never also in `get_info_raw`. Core derives the info type from the hook,
 so a second answer is a value that can disagree with itself, and the one an
-application sees depends on which core consults first. `SQL_IDENTIFIER_CASE`
-was stated in both places; so was `SQL_GETDATA_EXTENSIONS`, which is not even a
-fact about SQLite: it describes core's own fetch path, and belongs to core for
-the same reason. The snapshot test (`get_info_snapshot`) pins the value an
-application sees regardless of who answers it, which is what makes moving an
-answer safe.
+application sees depends on which core consults first. `SQL_GETDATA_EXTENSIONS`
+belongs to core for a related reason: it describes core's own fetch path rather
+than any fact about SQLite. The snapshot test (`get_info_snapshot`) pins the
+value an application sees regardless of who answers it, which is what makes
+moving an answer safe.
 
 **Probe the bundled library, never the documentation or the system CLI.**
-`rusqlite` links its own SQLite (3.53.2 via the `bundled` feature); the
-`sqlite3` binary on a developer's machine is a different version. Writing the
-`ALTER TABLE` bitmap from the system CLI's behaviour got `ADD CONSTRAINT` and
-`DROP CONSTRAINT` wrong, because 3.51.3 rejects both and 3.53.2 accepts them.
+`rusqlite` links its own SQLite (3.53.2 via the `bundled` feature), and the
+`sqlite3` binary on a developer's machine is a different version. The
+difference is not academic: 3.51.3 rejects `ADD CONSTRAINT` and
+`DROP CONSTRAINT` where 3.53.2 accepts them, so an `ALTER TABLE` bitmap written
+from the system CLI's behaviour understates what the driver actually links.
 `alter_table_capabilities_are_each_live_probed`,
 `outer_join_capabilities_are_each_live_probed` and
 `subqueries_are_each_live_probed` all execute the syntax they describe.
@@ -242,20 +272,21 @@ answer safe.
 **Probe the bits you do not claim, too.** A test that only checks what a bitmap
 claims can overclaim forever, and a bitmap that only grows when someone notices
 can understate forever. The negative half of the `ALTER TABLE` probe is what
-caught the two bits above. `SQL_KEYWORDS` goes further and reads the list out
-of the library through `sqlite3_keyword_count` / `sqlite3_keyword_name`, so it
-needs no maintenance at all.
+catches a version difference like the one above. `SQL_KEYWORDS` goes further
+and reads the list out of the library through `sqlite3_keyword_count` /
+`sqlite3_keyword_name`, so it needs no maintenance at all.
 
-**Values must agree with each other.** Most defects found in this crate were
-one capability stated twice, in opposite directions:
+**Values must agree with each other.** The commonest defect in a capability
+table is one fact stated twice, in opposite directions. These pairs each
+describe the same thing and must be changed together:
 
-| Said one thing | Said the opposite |
+| Info type | Must agree with |
 |---|---|
-| `SQL_CATALOG_NAME = "N"` | `SQL_CATALOG_TERM = "catalog"` |
-| `SQL_OUTER_JOINS = "Y"` | `SQL_OUTER_JOIN_CAPABILITIES = 0` |
-| `SQL_SQL_CONFORMANCE = SQL_SC_SQL92_ENTRY` | `SQL_GROUP_BY = SQL_GB_NO_RELATION` |
-| `SQL_SQL92_PREDICATES` without `SQL_SP_QUANTIFIED_COMPARISON` | `SQL_SUBQUERIES` with `SQL_SQ_QUANTIFIED` |
-| `SQL_TXN_ISOLATION_OPTION` with four levels | nothing applying the level an application sets |
+| `SQL_CATALOG_NAME` | `SQL_CATALOG_TERM`, `SQL_CATALOG_LOCATION`, `SQL_CATALOG_USAGE`, `SQL_CATALOG_NAME_SEPARATOR` |
+| `SQL_OUTER_JOINS` | `SQL_OUTER_JOIN_CAPABILITIES` |
+| `SQL_SQL_CONFORMANCE` | `SQL_GROUP_BY`, `SQL_CONCAT_NULL_BEHAVIOR`, `SQL_NON_NULLABLE_COLUMNS` |
+| `SQL_SQL92_PREDICATES` (`SQL_SP_QUANTIFIED_COMPARISON`) | `SQL_SUBQUERIES` (`SQL_SQ_QUANTIFIED`) |
+| `SQL_TXN_ISOLATION_OPTION` | whatever actually applies the level an application sets |
 
 When adding or changing a capability, look for the other info type that talks
 about the same thing, and assert the relationship.
@@ -288,8 +319,8 @@ be `SQL_CB_CLOSE`, and a COMMIT with pending writes fails with `SQLITE_BUSY`.
 
 If result sets ever become lazily streamed, both hooks must be revisited, and
 `SQL_CB_CLOSE` would additionally require a real
-`StatementBackend::close_cursor`, which is fallible now (`Result<(),
-Self::Error>`), because under `SQL_CB_CLOSE` it is the only thing that closes
+`StatementBackend::close_cursor`. That method is fallible (`Result<(),
+Self::Error>`) because under `SQL_CB_CLOSE` it is the only thing that closes
 the cursor during `SQLEndTran`, and a failure has to reach the statement's
 diagnostic queue rather than be swallowed. Here it only resets an index into an
 already-materialised `Vec`, so it cannot fail.
@@ -346,47 +377,20 @@ the return code. Note the gate it holds: `SQLCancel`'s idle branch clears the
 statement's diagnostic queue, so a cancel landing after `SQLExecDirectW`
 returns would wipe the `HY008` the test is reading.
 
-`SQL_ATTR_QUERY_TIMEOUT` is still substituted with `0` and reported as `01S02`,
+`SQL_ATTR_QUERY_TIMEOUT` is substituted with `0` and reported as `01S02`,
 because this driver does not override `Backend::set_query_timeout` and the
 default answers `NotImplemented`.
 
-**That is now a gap rather than an impossibility.** The original reason (a
-synchronous execute path with no deadline to arm) no longer holds: core owns
-the timer (`query_timer.rs`), and `Ok(QueryTimeout::CoreCancels)` asks it to arm
-one and call `Backend::cancel` when the deadline passes. `cancel` is real here,
-which is exactly the precondition `CoreCancels` documents. Closing the gap means
+**This is a gap rather than an impossibility.** Core owns the timer
+(`query_timer.rs`), and `Ok(QueryTimeout::CoreCancels)` asks it to arm one and
+call `Backend::cancel` when the deadline passes. `cancel` is real here, which is
+exactly the precondition `CoreCancels` documents. Closing the gap means
 overriding `set_query_timeout` to return `CoreCancels`, and overriding
-`is_cancelled` alongside it, since that is what turns the interrupted statement's
-own symptom into the `HYT00` the application is waiting for rather than the
-`HY008` a user-initiated `SQLCancel` produces. `SQL_ATTR_QUERY_TIMEOUT` is a
-*statement* attribute while the hook receives only the connection, so read
+`is_cancelled` alongside it, since that is what turns the interrupted
+statement's own symptom into the `HYT00` the application is waiting for rather
+than the `HY008` a user-initiated `SQLCancel` produces. `SQL_ATTR_QUERY_TIMEOUT`
+is a *statement* attribute while the hook receives only the connection, so read
 core's scope caveat on `set_query_timeout` before doing it.
-
-## Architecture of this crate
-
-| Path | Responsibility |
-|------|----------------|
-| `src/lib.rs` | The `forward_ffi!` invocation and the crate docs |
-| `src/backend.rs` | `SqliteBackend`, `SqliteConnection`, `SqliteStatement`, `SqliteError`, `map_sqlite_error` |
-| `src/backend/execute.rs` | `exec_direct`, `prepare`, `execute`, and the `StatementBackend` impl |
-| `src/backend/info.rs` | `SQLGetInfo` answers and the capability bitmaps, plus the snapshot test |
-| `src/backend/metadata.rs` | The catalog row producers: tables, columns, primary keys, statistics, special columns |
-| `src/backend/params.rs` | Deliberately empty. Parameter binding is inline in `execute.rs`; the entry points are core's |
-| `src/backend/types/connect_params.rs` | `SqliteConnectParams` |
-| `src/escape_dialect.rs` | ODBC escape-sequence translation for SQLite's dialect |
-| `src/type_conversion.rs` | SQLite storage classes and declared types → ODBC SQL types |
-| `src/ffi_integration_tests.rs` | Tests that drive the real C ABI entry points |
-
-### Result sets are materialised eagerly
-
-`SqliteStatement` holds `rows: Vec<Vec<ColumnValue>>` and `cursor: i64`, an
-index into an in-memory snapshot, not a live SQLite cursor. `exec_direct`
-collects every row before returning and the `rusqlite::Statement` is finalized
-at that point.
-
-This is load-bearing well beyond memory use. It is why the cursor-behaviour
-hooks report `Preserve`, why `SQLEndTran` cannot disturb a cursor, and why
-concurrency is a non-issue. Changing it is not a local optimisation.
 
 ### `row_count` has three answers, not two
 
@@ -403,7 +407,7 @@ The distinction between the last two is not cosmetic. Core turns a statement
 with **zero columns** reporting **`Some(0)`** into `SQL_NO_DATA`, which is
 `SQLExecDirect`'s documented behaviour for "a searched update, insert, or
 delete statement that doesn't affect any rows". Answering `Some(0)` for DDL
-therefore made every `CREATE TABLE` return `SQL_NO_DATA`.
+would therefore make every `CREATE TABLE` return `SQL_NO_DATA`.
 
 SQLite offers no predicate for "is this DML" (`sqlite3_stmt_readonly` is false
 for DDL too), so `execute::is_searched_dml` decides it from the statement's
@@ -443,13 +447,13 @@ Both sides are core's types and both are sealed, which is what a change in
   crate-private fields, an accessor and a `with_*` setter per field, and a
   `new()` for the arguments that have no honest default (`StatisticsQuery`'s
   `unique_only`, `SpecialColumnsQuery`'s `identifier_type`/`scope`/`nullable`).
-- **Read the filters off the query, do not destructure it.** The run of
-  same-typed `Option<&str>` arguments these hooks used to take is exactly what
-  the query types exist to remove: `SQLForeignKeys` took six in a row, where
-  swapping a primary-key argument for its foreign-key counterpart compiled
-  without complaint. Unpacking a query back into positional arguments at the
-  trait boundary reintroduces that hazard one layer down, so the query travels
-  all the way into `metadata.rs`.
+- **Read the filters off the query, do not destructure it.** A run of
+  same-typed `Option<&str>` arguments is exactly what the query types exist to
+  remove: `SQLForeignKeys` takes six filters, where swapping a primary-key
+  argument for its foreign-key counterpart would compile without complaint.
+  Unpacking a query back into positional arguments at the trait boundary
+  reintroduces that hazard one layer down, so the query travels all the way
+  into `metadata.rs`.
 - **`TablesQuery::table_types()` is already parsed.** Core splits `TableType`
   on commas and strips the optional single quotes (it is a value list, not a
   pattern, and `SQL_ATTR_METADATA_ID` never applies to it), so a backend gets a
@@ -462,7 +466,7 @@ Three further consequences for anything changed in `metadata.rs`:
 
 - **Do not sort, and do not add an `ORDER BY` for ODBC's sake.** Core sorts,
   stably, on the spec's keys. A second ordering in the backend is one more
-  place for it to be wrong, and it silently overrides nothing: core re-sorts
+  place for it to be wrong, and it overrides nothing, because core re-sorts
   regardless. The one thing to keep in mind is that the sort takes NULL
   placement from `Backend::null_collation`, which is why `SQLStatistics`'
   table-stat row (NULL `NON_UNIQUE`) still comes first: this driver reports
@@ -475,15 +479,32 @@ Three further consequences for anything changed in `metadata.rs`:
   `catalogs` and `schemas` are left defaulted here because the first two hooks
   say SQLite has neither, so core never asks.
 - **A non-`Option` field is a column the spec marks "not NULL".** The types
-  enforce it, which is how `SQLForeignKeys`' `PKCOLUMN_NAME` stopped being
-  reported as NULL for a `REFERENCES parent` with no column list. SQLite
-  defines that as the parent's primary key, so `parent_pk_column` resolves the
-  name rather than dropping it.
+  enforce it, which is what keeps `SQLForeignKeys`' `PKCOLUMN_NAME` populated
+  for a `REFERENCES parent` with no column list. SQLite defines that as the
+  parent's primary key, so `parent_pk_column` resolves the name rather than
+  dropping it.
 
 Because ordering is core's, an ordering assertion belongs in
 `ffi_integration_tests.rs`, where core's sort has actually run. The unit tests
 in `metadata.rs` assert only which rows exist and what each field holds. See
 `sql_statistics_w_orders_table_stat_row_first_then_unique_before_non_unique`.
+
+### The Windows setup dialog
+
+`Backend::configure_dsn` (`src/backend/setup.rs`) supplies one thing: the
+dialog. Core owns the rest of `ConfigDSN`, meaning validation of *fRequest*,
+rejecting `DRIVER=`, merging the data source's stored keywords in, calling
+`SQLValidDSN` and writing through `SQLWriteDSNToIni`.
+
+The dialog itself is `packaging/windows/configure-dsn.ps1`, which also runs
+standalone for a scripted install (`-NoGui -Set @{...}`). `install.bat`
+installs it beside the DLL and refuses to register the driver without it.
+
+Nothing compiles the PowerShell, so `dsn_keys_match_the_connection_string_parser`
+in `src/lib.rs` reads both the parser's `PARAM_*` constants and the dialog's
+`$Fields` table out of the shipping files and asserts they offer the same keys
+in both directions. A keyword added to one side and not the other fails the
+build rather than surfacing as a box a user can fill in that the driver ignores.
 
 ## Connection string keys
 
@@ -494,10 +515,14 @@ Keys are matched case-insensitively and stored lowercase by core's
 |-----|----------|-------------|
 | `Database` | Yes | Path to the database file, or `:memory:` |
 
-Adding a key means adding a `PARAM_*` constant in
-`src/backend/types/connect_params.rs`, reading it in the `TryFrom` impl, and
-listing it in `Backend::browse_connect_attrs` if `SQLBrowseConnect` should
-prompt for it.
+Adding a key means four edits, and the build fails until the last two agree:
+
+1. A `PARAM_*` constant in `src/backend/types/connect_params.rs`, read in the
+   `TryFrom` impl.
+2. The table in [`README.md`](README.md), and the one in
+   [`packaging/README.md`](packaging/README.md) that ships in the archive.
+3. The `$Fields` table in `packaging/windows/configure-dsn.ps1`.
+4. `Backend::browse_connect_attrs`, if `SQLBrowseConnect` should prompt for it.
 
 ## Testing
 
@@ -520,7 +545,7 @@ otherwise ship inside the driver binary.
 
 **Set up test data through the FFI, not by reaching into the handle.** Core's
 `handles` module is `pub(crate)`, so `ConnectionHandle` and the
-`rusqlite::Connection` inside it are no longer reachable from here, so use the
+`rusqlite::Connection` inside it are not reachable from here. Use the
 `setup_sql`, `query_scalar_i64` and `query_row_two_strings` helpers, which go
 through `SQLExecDirect`/`SQLFetch`/`SQLGetData`. Each allocates its own
 statement handle rather than borrowing the caller's, because the statement a
@@ -542,8 +567,8 @@ with no data source open.
 
 Both are wrappers; the logic is in `integration-tests/scripts/`, with the paths
 and helpers they share in `scripts/lib.sh`. Everything `setup.sh` writes lands
-in `integration-tests/generated/`, which is gitignored wholesale because all of
-it embeds absolute paths. See
+in `integration-tests/generated/`, which is gitignored wholesale because the
+ODBC config there names absolute paths. See
 [integration-tests/README.md](integration-tests/README.md) for the layout and
 why the pyodbc suite is run twice.
 
@@ -565,19 +590,25 @@ the `SqliteBackend` → `ColumnValue` → `write_column_value` pipeline.
 
 ### What runs in core, not here
 
-Do not reintroduce these; they moved with the framework:
-
 - **Miri.** The driver crates link C libraries (bundled SQLite) that Miri cannot
   execute. Core is pure Rust and holds the raw-pointer marshalling.
 - **Fuzzing.** The `utf16` and `column_value` fuzz targets fuzz core's code.
 - **Generic FFI entry-point tests.** Handle tags, panic safety and diagnostics
   are core's.
 
-## Packaging
+## Packaging and release
 
 `packaging/build-archives.sh` assembles the Linux and Windows release archives
 from binaries already built by `cargo build --release`; see
 [packaging/README.md](packaging/README.md).
+
+Anything destined for an archive is built with `cargo auditable`, which embeds
+the dependency list `packaging/sbom.sh` generates the CycloneDX and SPDX
+documents from. `sbom.sh` refuses an artifact without it, and
+`packaging/test-sbom.sh` is that pipeline's own test suite. The bundled SQLite
+version is declared in `packaging/sbom-native.json` and pinned against the
+linked library by `the_declared_sqlite_version_is_the_one_linked` in
+`src/lib.rs`.
 
 ### Cutting a release
 

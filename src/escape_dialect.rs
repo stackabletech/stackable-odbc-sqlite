@@ -5,51 +5,13 @@
 //! the bundled 3.53.2 build spells differently from ODBC.
 //!
 //! The remap table is traceable to the `SQL_*_FUNCTIONS` bitmaps
-//! `src/backend/info.rs` advertises for SQLite.
-//! Every arm below corresponds to one advertised `SQL_FN_*`
-//! bit whose ODBC name SQLite spells differently *and* for which a bare name
-//! substitution (`stackable_odbc_core::escape` only ever swaps the identifier in front
-//! of the parentheses, it does not rewrite argument syntax or values) still
-//! produces valid, semantically equivalent SQLite SQL.
-//!
-//! - `SQL_FN_STR_UCASE` / `SQL_FN_STR_LCASE`: SQLite's `upper()` / `lower()`.
-//! - `SQL_FN_STR_SUBSTRING`: SQLite's `substr(string, start, length)` takes
-//!   the same argument order and 1-based indexing as ODBC's `SUBSTRING`, so
-//!   a bare name swap is exact.
-//! - `SQL_FN_STR_ASCII`: SQLite's `unicode(x)` returns the code point of the
-//!   first character of `x`, the same one-argument shape as ODBC's `ASCII`.
-//! - `SQL_FN_TD_NOW` / `SQL_FN_TD_CURDATE` / `SQL_FN_TD_CURTIME`: SQLite's
-//!   `datetime()` / `date()` / `time()` take no arguments and return the
-//!   current value (see the `SQL_TIMEDATE_FUNCTIONS` doc comment in
-//!   `backend/info.rs`). They are real callable functions, so `{fn NOW()}` /
-//!   `{fn CURDATE()}` / `{fn CURTIME()}`'s trailing `()` remains valid SQLite
-//!   syntax after the name swap.
-//!
-//! Advertised names that are NOT remapped here, and why:
-//!
-//! - `SQL_FN_STR_CONCAT`, `LTRIM`, `LENGTH`, `REPLACE`, `RTRIM`, `CHAR`,
-//!   `SOUNDEX`, `OCTET_LENGTH`; `SQL_FN_NUM_ABS`, `SIGN`, `ROUND`;
-//!   `SQL_FN_SYS_IFNULL`: SQLite spells every one of these identically to
-//!   ODBC (case-insensitively): `concat()`, `ltrim()`, `length()`,
-//!   `replace()`, `rtrim()`, `char()`, `soundex()`, `octet_length()`,
-//!   `abs()`, `sign()`, `round()`, `ifnull()`, so they pass through
-//!   unchanged (`None`). SQLite has `ifnull()` natively, so no substitution
-//!   is needed for `SQL_FN_SYS_IFNULL`.
-//!
-//! Names handled by [`rewrite_scalar_fn`] rather than the remap table:
-//!
-//! - `SQL_FN_TD_CURRENT_DATE` / `SQL_FN_TD_CURRENT_TIME` /
-//!   `SQL_FN_TD_CURRENT_TIMESTAMP`: SQLite's `CURRENT_DATE` / `CURRENT_TIME`
-//!   / `CURRENT_TIMESTAMP` are bare keywords, not callable functions.
-//!   `SELECT CURRENT_DATE();` is a syntax error (confirmed live: "near '(':
-//!   syntax error"). The ODBC escape always includes `()` (e.g.
-//!   `{fn CURRENT_DATE()}`), and a name-only rename appends whatever follows
-//!   the name verbatim, so it cannot drop that trailing `()`.
-//!
-//!   These three were advertised in `SQL_TIMEDATE_FUNCTIONS` while no
-//!   translation existed for them, so `{fn CURRENT_DATE()}` reached SQLite as
-//!   `CURRENT_DATE()` and failed to prepare. `rewrite_scalar_fn` replaces the
-//!   whole escape, which is what emitting a bare keyword requires.
+//! `src/backend/info.rs` advertises. A name belongs in [`remap_scalar_fn`]
+//! only if swapping the identifier alone still yields valid, semantically
+//! equivalent SQLite, because `stackable_odbc_core::escape` replaces the name
+//! in front of the parentheses and rewrites neither argument syntax nor
+//! values. Names SQLite spells the same way as ODBC pass through untouched.
+//! The three bare-keyword date/time forms need a whole-escape rewrite instead;
+//! see [`rewrite_scalar_fn`].
 use stackable_odbc_core::escape::EscapeDialect;
 
 /// Remap an ODBC `{fn NAME(...)}` scalar-function name to SQLite's spelling.

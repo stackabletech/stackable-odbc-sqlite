@@ -245,8 +245,8 @@ const TABLE_TYPE_VIEW: &str = "VIEW";
 /// Rows for `SQLTables`.
 ///
 /// The `SQL_ALL_CATALOGS` / `SQL_ALL_SCHEMAS` / `SQL_ALL_TABLE_TYPES`
-/// enumerations no longer reach here: core detects them from the raw arguments
-/// and answers them from `supports_catalogs`, `supports_schemas` and
+/// enumerations never reach here. Core detects them from the raw arguments and
+/// answers them from `supports_catalogs`, `supports_schemas` and
 /// [`table_types`]. Rows are returned unsorted; core orders them by
 /// TABLE_TYPE, TABLE_CAT, TABLE_SCHEM, TABLE_NAME.
 pub(super) fn tables(
@@ -1078,8 +1078,8 @@ mod tests {
     #[test]
     fn columns_column_name_is_a_like_pattern() {
         let conn = setup_test_db();
-        // types_test columns: id, val, label. "%l%" matches val and label.
-        // Under the old exact-match filter this returned zero rows.
+        // types_test columns: id, val, label. "%l%" matches val and label,
+        // which an exact-match filter would miss entirely.
         let rows = columns(
             &conn,
             &ColumnsQuery::default()
@@ -1209,10 +1209,9 @@ mod tests {
 
     /// `PKCOLUMN_NAME` is one of the columns the spec marks "not NULL", and
     /// `ForeignKeyRow` enforces that. `REFERENCES parent` with no column list
-    /// leaves `PRAGMA foreign_key_list`'s `to` NULL, which this driver used to
-    /// report as a NULL `PKCOLUMN_NAME`, a value the column cannot hold.
-    /// SQLite defines the implicit target as the parent's primary key, so the
-    /// name is recovered rather than dropped.
+    /// leaves `PRAGMA foreign_key_list`'s `to` NULL, which is not a value the
+    /// column can hold. SQLite defines the implicit target as the parent's
+    /// primary key, so the name is recovered rather than dropped.
     #[test]
     fn foreign_keys_implicit_reference_resolves_the_parent_primary_key() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();

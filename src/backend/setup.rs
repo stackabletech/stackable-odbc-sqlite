@@ -58,7 +58,7 @@ const EXIT_CANCELLED: i32 = 2;
 ///   owns, and removing the pointer does not remove the file.
 ///
 /// `Add` and `Config` prompt. Everything else passes the attributes through
-/// unchanged, which is exactly core's defaulted behaviour.
+/// unchanged, which is what core does on its own.
 fn dialog_needed(hwnd_is_null: bool, request: ConfigRequest) -> bool {
     if hwnd_is_null {
         return false;

@@ -12,9 +12,9 @@ PROJECT_DIR="$(cd "$TEST_DIR/.." && pwd)"
 SUITES_DIR="$TEST_DIR/suites"
 WINDOWS_DIR="$TEST_DIR/windows"
 
-# Everything setup.sh writes lands here, and the whole directory is gitignored:
-# all three files embed absolute paths, so none of them is portable between
-# checkouts.
+# Everything setup.sh writes lands here, and the whole directory is gitignored.
+# odbc.ini names the database and odbcinst.ini names the driver library, both by
+# absolute path, so neither survives being moved to another checkout.
 GENERATED="$TEST_DIR/generated"
 DB_PATH="$GENERATED/test.db"
 ODBC_INI="$GENERATED/odbc.ini"

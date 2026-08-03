@@ -17,7 +17,7 @@ tags
 # Release packaging output
 packaging/dist/
 
-# integration-tests/generated/ has its own .gitignore; everything setup.sh
+# integration-tests/generated/ has its own .gitignore; the ODBC config setup.sh
 # writes there embeds absolute paths.
 
 # Python bytecode from the test scripts

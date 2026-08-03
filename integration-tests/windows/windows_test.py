@@ -47,7 +47,7 @@ DSN_NAME = "test_sqlite"
 # path because WinRM sessions may not have an up-to-date PATH.
 REMOTE_PYTHON = r'"C:\Program Files\Python312\python.exe"'
 
-# The host-only network gateway (host side) — the VM can reach this IP to
+# The host-only network gateway (host side). The VM reaches this IP to
 # download files from our HTTP server. Override with --gateway or
 # ODBC_TEST_HOST_GATEWAY for non-default libvirt subnets.
 DEFAULT_HOST_GATEWAY = "192.168.197.1"
@@ -382,7 +382,7 @@ def register_driver(session):
     registered (it only increments UsageCount). Force-update via the registry
     to ensure the freshly deployed DLL is always used.
     """
-    # Must use run_cmd (cmd.exe), not run_ps — PowerShell mangles odbcconf arguments.
+    # Must use run_cmd (cmd.exe), not run_ps: PowerShell mangles odbcconf arguments.
     cmd = (
         f'odbcconf.exe /A {{INSTALLDRIVER '
         f'"{DRIVER_NAME}|Driver={REMOTE_DLL}|Setup={REMOTE_DLL}|"}}'

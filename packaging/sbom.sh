@@ -187,10 +187,10 @@ jq --slurpfile lut "$LOOKUP" '
 
 # --- augment ---------------------------------------------------------------
 # Components the toolchain contributes are invisible to cargo. `common` holds
-# the ones both artifacts carry -- SQLite itself, compiled in from the
-# amalgamation -- and the platform key holds the rest: the ELF object links
-# unixODBC at load time, while the Windows DLL imports only the operating
-# system's own libraries and instead carries the mingw runtime statically.
+# the ones both artifacts carry, meaning SQLite itself, compiled in from the
+# amalgamation. The platform key holds the rest: the ELF object links unixODBC
+# at load time, while the Windows DLL imports only the operating system's own
+# libraries and instead carries the mingw runtime statically.
 case "$BASENAME" in
   *.so) NATIVE_KEY="linux" ;;
   *.dll) NATIVE_KEY="windows" ;;

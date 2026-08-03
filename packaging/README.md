@@ -160,7 +160,37 @@ what SQLite does. A typo in the path therefore connects successfully and finds
 an empty database rather than failing, which is why the dialog's **Test
 connection** reports the table count.
 
+## Support
+
+- [Issues](https://github.com/stackabletech/stackable-odbc-sqlite/issues) for
+  bugs
+- [GitHub Discussions](https://github.com/orgs/stackabletech/discussions) for
+  questions
+- [Discord](https://discord.gg/7kZ3BNnCAF) to talk to us
+
+A driver log is the most useful thing to attach to a report. Set two
+environment variables before starting your application:
+
+```bash
+export ODBC_LOG_LEVEL=debug          # trace, debug, info, warn, error
+export ODBC_LOG_FILE=/tmp/sqlite-odbc.log
+```
+
+On Windows, set the same two through **System Properties → Environment
+Variables**. The log may contain your SQL, so check it before sharing.
+
+## The SBOM
+
+Each archive carries a CycloneDX software bill of materials next to the driver,
+and the release page publishes an SPDX document for every artifact as well.
+Both list what the binary actually links, the SQLite compiled inside it
+included, so a security advisory can be checked against the driver you
+installed rather than against whatever SQLite your system happens to have.
+
 ## Building the archives from source
+
+Everything below is for people building the driver themselves. If you
+installed from a release archive, you are done.
 
 From the **repository root**:
 
@@ -182,12 +212,12 @@ VERSION=0.0.1 ./packaging/build-archives.sh
 That writes both archives, four SBOMs and `sha256sums.txt` to
 `packaging/dist/`.
 
-### The SBOM
+### How the SBOM is generated
 
 `packaging/sbom.sh` produces one CycloneDX and one SPDX document per artifact.
 The component list comes from the `.dep-v0` section `cargo auditable` embeds,
-so it describes what was **linked** rather than what `Cargo.toml` asked for:
-dev-dependencies are excluded by construction, and a git dependency's purl
+so it describes what was **linked** rather than what `Cargo.toml` asked for.
+Dev-dependencies are excluded by construction, and a git dependency's purl
 names the resolved commit rather than a branch that moves.
 
 Two kinds of component are invisible to cargo and are declared by hand in
@@ -203,8 +233,4 @@ Two kinds of component are invisible to cargo and are declared by hand in
   statically. `./packaging/sbom.sh --check-native <artifact>` verifies both
   claims against the real binary, and CI runs it on every pull request.
 
-`./packaging/test-sbom.sh` is the pipeline's own test suite.
-
-## Support
-
-<https://github.com/stackabletech/stackable-odbc-sqlite>
+`./packaging/test-sbom.sh` is that pipeline's own test suite.

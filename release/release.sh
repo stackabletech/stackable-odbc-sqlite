@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# release.sh — convenience wrapper around cargo-release.
+# Convenience wrapper around cargo-release.
 #
 # Usage:
 #   release/release.sh patch              # dry-run a patch release
@@ -8,8 +8,8 @@
 #   release/release.sh minor --execute    # actually perform the release
 #
 # cargo-release is dry-run by default; --execute is required to mutate state.
-# See release.toml for what a release rewrites (CHANGELOG.md, packaging/README.md) and
-# for the `main`-only branch restriction.
+# See release.toml for what a release rewrites (CHANGELOG.md and
+# packaging/README.md) and for the `main`-only branch restriction.
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then

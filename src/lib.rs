@@ -103,8 +103,8 @@ mod packaging_tests {
     /// linked.
     ///
     /// SQLite is compiled into the driver from the amalgamation
-    /// `libsqlite3-sys` vendors, so cargo — and therefore `cargo auditable`,
-    /// syft and the SBOM — sees only the wrapper crate. The C library inside
+    /// `libsqlite3-sys` vendors, so cargo (and therefore `cargo auditable`,
+    /// syft and the SBOM) sees only the wrapper crate. The C library inside
     /// it is the component an advisory against SQLite would name, and the only
     /// place its version is written down is that fragment. A `libsqlite3-sys`
     /// bump changes the bundled version with nothing else to notice.

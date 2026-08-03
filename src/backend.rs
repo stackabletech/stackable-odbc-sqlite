@@ -1,3 +1,9 @@
+//! Core type definitions for the SQLite backend ([`SqliteBackend`],
+//! [`SqliteConnection`], [`SqliteStatement`]) plus `connect`, `disconnect`,
+//! `end_tran`, error mapping, and the thin [`Backend`] delegation layer.
+//! Statement execution, catalog metadata, `SQLGetInfo` and the DSN setup
+//! dialog live in the submodules.
+
 use std::{
     borrow::Cow,
     collections::HashMap,
@@ -670,10 +676,10 @@ impl Backend for SqliteBackend {
     /// connection"), and [`SqliteBackend::connect`] opens with a plain
     /// `rusqlite::Connection::open`, so it is unreachable.
     ///
-    /// Returning a single level also means core's default
-    /// [`Backend::set_txn_isolation`] is correct as-is: the one supported
-    /// level is always already in effect, and anything else is rejected with
-    /// `HY024` before it reaches the backend.
+    /// Returning a single level is also what lets core's default
+    /// [`Backend::set_txn_isolation`] stand: the one supported level is always
+    /// already in effect, and anything else is rejected with `HY024` before it
+    /// reaches the backend.
     fn txn_isolation_options(_conn: &SqliteConnection) -> u32 {
         SQL_TXN_SERIALIZABLE
     }
@@ -772,8 +778,7 @@ impl Backend for SqliteBackend {
 
     /// No SQL-92 conformance level is claimed.
     ///
-    /// The previous `SQL_SC_SQL92_ENTRY` came from a core default, not from any
-    /// assessment of SQLite, and it contradicted this driver's own answers. The
+    /// `SQL_SC_SQL92_ENTRY` would contradict this driver's own answers. The
     /// spec ties entry level to three values: "a SQL-92 Entry level-conformant
     /// driver will always return the SQL_GB_GROUP_BY_EQUALS_SELECT option as
     /// supported", "will always return SQL_CN_ANY", and "will return
@@ -782,9 +787,9 @@ impl Backend for SqliteBackend {
     /// (see [`SqliteBackend::group_by`]), which is a permissive extension, not
     /// entry-level behaviour.
     ///
-    /// `0` is the honest answer: it claims no level rather than asserting one
+    /// `0` is the honest answer, claiming no level rather than asserting one
     /// the driver demonstrably fails. Raising it later means auditing SQL-92
-    /// entry level properly, not restoring the value core used to invent.
+    /// entry level properly.
     fn sql_conformance(_conn: &SqliteConnection) -> u32 {
         0
     }
@@ -803,8 +808,8 @@ impl Backend for SqliteBackend {
     }
 
     /// See `info::SQLITE_SUBQUERIES`. Notably excludes `SQL_SQ_QUANTIFIED`,
-    /// which core's default claimed while this driver's
-    /// `SQL_SQL92_PREDICATES` denied it.
+    /// which must stay consistent with `SQL_SQL92_PREDICATES`, where
+    /// quantified comparison is likewise denied.
     fn subqueries(_conn: &SqliteConnection) -> u32 {
         info::SQLITE_SUBQUERIES
     }
@@ -887,9 +892,8 @@ impl Backend for SqliteBackend {
     /// SQLite's tokenizer treats `$` as an identifier character, so
     /// `CREATE TABLE a$b (...)` parses and the name round-trips through
     /// `sqlite_master` unchanged. An application reads this info type to decide
-    /// when it must quote, so the previous `""` (core's old default, not a
-    /// claim this driver ever made) told it to quote a name that needs no
-    /// quoting.
+    /// when it must quote, so omitting `$` would make it quote a name that
+    /// needs no quoting.
     ///
     /// Every candidate is executed against the bundled library in
     /// `special_characters_are_each_live_probed`, which checks the characters

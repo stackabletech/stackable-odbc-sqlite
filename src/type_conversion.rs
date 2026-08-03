@@ -58,8 +58,8 @@ pub(crate) const MAX_FRACTIONAL_SECONDS_PRECISION: i16 = 3;
 // must not carry this backend-specific knowledge (see its `write_column_value`
 // doc comment).
 
-/// Convert a [`ColumnValue`] (from ODBC parameter binding) to a [`rusqlite::types::Value`]
-/// so it can be passed to `params_from_iter` in parameterized queries.
+/// Convert a bound ODBC parameter into the [`rusqlite::types::Value`]
+/// `params_from_iter` takes.
 ///
 /// Date/Time/Timestamp values are formatted as ISO-8601 strings, which SQLite
 /// stores and compares correctly via its built-in date functions.

@@ -10,8 +10,9 @@
 #   ./integration-tests/run-tests.sh --skip-build      # reuse the driver already built
 #   ./integration-tests/run-tests.sh --skip-cargo-test # pyodbc only; what CI runs
 #
-# Any other argument is forwarded to windows_test.py (--host, --gateway, --user,
-# --password), and is therefore only accepted alongside --windows.
+# Any other argument is forwarded to windows_test.py (--target, --host,
+# --vm-network, --user, --password, --gateway), and is therefore only accepted
+# alongside --windows.
 set -euo pipefail
 
 # shellcheck source=integration-tests/scripts/lib.sh

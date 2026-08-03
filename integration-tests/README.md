@@ -28,10 +28,10 @@ Both take `--help`.
 | `generated/` | Everything `setup.sh` writes. Gitignored |
 | `windows/` | The VM suite, its libvirt definitions, and [WINDOWS.md](windows/WINDOWS.md) |
 
-`generated/` is ignored rather than committed because all three files it holds
-name absolute paths: the driver's `.so`, the database. None of them survives
-being moved to another checkout, so a committed copy would be wrong for
-everyone but its author.
+`generated/` is ignored rather than committed because the ODBC config it holds
+names absolute paths. `odbcinst.ini` points at the driver's `.so` and
+`odbc.ini` at the database, so neither survives being moved to another
+checkout, and a committed copy would be wrong for everyone but its author.
 
 ## What gets run
 
@@ -58,9 +58,10 @@ exactly that via the `cargo-test` hook.
 | `--skip-cargo-test` | Run the pyodbc suites only. What CI passes |
 | `--windows` | Additionally run the suite inside the Windows VM |
 
-Any other argument is forwarded to `windows_test.py` (`--host`, `--gateway`,
-`--user`, `--password`) and so is rejected without `--windows`: a flag
-forwarded to a script that never runs is a flag silently ignored.
+Any other argument is forwarded to `windows_test.py` (`--target`, `--host`,
+`--vm-network`, `--user`, `--password`, `--gateway`) and so is rejected without
+`--windows`, since a flag forwarded to a script that never runs would be
+silently ignored.
 
 ## Windows
 
@@ -74,11 +75,11 @@ See [windows/WINDOWS.md](windows/WINDOWS.md) for provisioning the VM.
 
 ## Interactively
 
-`setup.sh` prints these at the end:
+`setup.sh` prints these at the end, with absolute paths filled in:
 
 ```bash
-export ODBCSYSINI=integration-tests/generated
-export ODBCINI=integration-tests/generated/odbc.ini
+export ODBCSYSINI=$(pwd)/integration-tests/generated
+export ODBCINI=$(pwd)/integration-tests/generated/odbc.ini
 isql -3 test_sqlite -v
 ```
 

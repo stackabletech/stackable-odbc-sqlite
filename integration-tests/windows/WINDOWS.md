@@ -1,8 +1,22 @@
-# Windows Testing
+# Windows testing
 
-## Quick start: running tests
+`suites/test_integration.py`, driven through the Windows ODBC Driver Manager
+over WinRM. The Windows DM is far stricter than unixODBC and tends to fail
+silently, so this is measured rather than assumed. The target is a disposable
+Windows Server VM on a host-only libvirt network, created by the Ansible
+playbook in `vm/`.
 
-Start the VM and its networks first (skip if already running):
+The VM's credentials are `Administrator` / `Asdf1234`, the defaults in
+`windows_test.py`. They are not a secret: the machine is local, throwaway, and
+reachable only from the host that created it. Pass `--user` and `--password`
+for a VM built some other way.
+
+## Quick start: running the tests
+
+If the VM does not exist yet, build it first: [Prerequisites](#prerequisites),
+then [Creating the VM](#creating-the-vm).
+
+Start the VM and its networks (skip whatever is already running):
 
 ```bash
 virsh --connect qemu:///system net-start stackable-odbc-test-hostnet
@@ -10,60 +24,82 @@ virsh --connect qemu:///system net-start stackable-odbc-test-internet
 virsh --connect qemu:///system start stackable-odbc-test
 ```
 
-Then run from the Linux host (`pywinrm` is installed automatically by `uv`).
-This runs the full integration suite twice: DSN-less, then via DSN.
+Then run from the Linux host. `uv` installs `pywinrm` itself:
 
 ```bash
 uv run --with pywinrm python3 integration-tests/windows/windows_test.py
 ```
 
-Common options:
+The suite runs twice against the same database, DSN-less and then via a DSN,
+exactly as it does on Linux. Nothing needs to be running on the host: SQLite is
+compiled into the DLL, and the script copies a freshly built database to the VM.
 
-```bash
-# Skip the cargo build (use an already-built DLL)
-uv run --with pywinrm python3 integration-tests/windows/windows_test.py --skip-build
+**Do not diagnose a Windows failure without rebuilding the DLL first.**
+`--skip-build` reuses whatever sits in `target/x86_64-pc-windows-gnu/release/`,
+which can predate the feature under test by days.
 
-# Target a specific VM IP (skip DHCP lease discovery)
-uv run --with pywinrm python3 integration-tests/windows/windows_test.py --host 192.168.197.138
+### Options
 
-# Non-default libvirt subnet
-export ODBC_TEST_HOST_GATEWAY=10.0.0.1
-# or: --gateway 10.0.0.1
+`--help` lists them all. The ones that come up:
 
-# Full usage
-uv run --with pywinrm python3 integration-tests/windows/windows_test.py --help
+| Flag | Default | Effect |
+|---|---|---|
+| `--skip-build` | off | Use the DLL already in `target/`, rather than rebuilding. See the warning above |
+| `--target {gnu,msvc}` | `gnu` | Which Windows target to build and deploy. `msvc` needs an MSVC-capable linker on the host; see [Building the DLL](#building-the-dll) |
+| `--host <address>` | discovered from the libvirt DHCP leases | VM IP or hostname |
+| `--vm-network <name>` | `stackable-odbc-test-hostnet` | The libvirt network that discovery reads leases from |
+| `--user`, `--password` | `Administrator`, `Asdf1234` | WinRM credentials |
+| `--gateway <ip>` | `$ODBC_TEST_HOST_GATEWAY`, else `192.168.197.1` | The host-only gateway address the VM reaches the host on, to download the DLL and the test files from a short-lived HTTP server |
+
+### The setup dialog
+
+`windows_test.py` deploys `packaging/windows/configure-dsn.ps1` to
+`C:\odbc_test\` beside the DLL, which is where the driver looks for it, and
+registers the driver with `Setup=` pointing at the DLL. The suite itself
+creates its DSN with `odbcconf`, which passes a null *hwndParent*, so it takes
+the headless path and never displays anything.
+
+That means the dialog is deployed but not exercised automatically. To check it,
+open the Administrator in the VM by hand:
+
+```cmd
+%SystemRoot%\System32\odbcad32.exe
 ```
+
+**Add…** on `stackable_odbc_sqlite`, or **Configure…** on an existing data
+source, should display the dialog, and its **Test connection** button should
+report the SQLite version and a table count. The table count is the check worth
+having, because SQLite creates a missing file rather than refusing, so a typo
+in the path connects perfectly well and finds nothing.
 
 ### Using a different hypervisor (VirtualBox, Hyper-V, etc.)
 
 The VM lifecycle section below uses QEMU/KVM via libvirt, and the test script
-auto-discovers the VM IP from libvirt DHCP leases. If you are running Windows
-in a different hypervisor, the test script still works; just pass the VM's IP
-directly with `--host`:
+auto-discovers the VM IP from libvirt DHCP leases. A Windows guest in another
+hypervisor works too; pass its IP directly:
 
 ```bash
 uv run --with pywinrm python3 integration-tests/windows/windows_test.py --host <vm-ip>
 ```
 
-The VM must have WinRM enabled on port 5985 with NTLM auth, and Python 3 +
-pyodbc installed. Override credentials with `--user` and `--password` if
-they differ from the defaults.
+The VM must have WinRM enabled on port 5985 with NTLM auth, and Python 3 plus
+pyodbc installed.
 
 ### OpenSSL legacy provider
 
 WinRM uses NTLM authentication, which requires MD4, disabled by default in
-modern OpenSSL. The test script automatically sets `OPENSSL_CONF` to point at
+modern OpenSSL. The test script sets `OPENSSL_CONF` to point at
 `integration-tests/windows/openssl_legacy.cnf`, which enables the legacy
 provider.
 
-If you see `unsupported hash type md4` errors, check that the file exists and
-that you haven't overridden `OPENSSL_CONF` in your environment.
+An `unsupported hash type md4` error means that file is missing, or that
+`OPENSSL_CONF` is overridden in your environment.
 
 ## VM lifecycle
 
 ### Prerequisites
 
-QEMU/KVM and libvirt must be installed and working as system services:
+QEMU/KVM and libvirt must be installed and working as system services.
 `nix-shell` only provides Ansible and the Python bindings, not the
 virtualisation stack itself. Verify with:
 
@@ -71,18 +107,16 @@ virtualisation stack itself. Verify with:
 virsh --connect qemu:///system list --all
 ```
 
-If this fails, install and configure QEMU/KVM + libvirt for your distro.
-You will also need a `default` storage pool (`virsh pool-list`) and your
-user must be in the `libvirt` group.
+You also need a `default` storage pool (`virsh pool-list`), and your user must
+be in the `libvirt` group.
 
-**Note:** QEMU typically runs as a dedicated user (e.g. `libvirt-qemu`)
-that cannot read files under your home directory. If the playbook fails
-with a permission error on the ISO or virtio drivers, grant read access
-with ACLs (e.g. `setfacl -m u:libvirt-qemu:r /path/to/file.iso` and
+QEMU typically runs as a dedicated user (for example `libvirt-qemu`) that
+cannot read files under your home directory. If the playbook fails with a
+permission error on the ISO or the virtio drivers, grant read access with ACLs
+(`setfacl -m u:libvirt-qemu:r /path/to/file.iso`, and
 `setfacl -m u:libvirt-qemu:x` on each parent directory).
 
-For reference, on Ubuntu 24.04 the following was used to set up these
-prerequisites (package names will differ on other distros):
+On Ubuntu 24.04 the following was enough; package names differ elsewhere:
 
 ```bash
 sudo apt install -y qemu-system-x86 qemu-utils libvirt-daemon-system \
@@ -99,7 +133,6 @@ pipx install uv
 
 ```bash
 # Set once, pointing at your Windows Server 2022 evaluation ISO.
-# Download from: https://www.microsoft.com/en-us/evalcenter/evaluate-windows-server-2022
 export WINDOWS_ISO=~/Downloads/SERVER_EVAL_x64FRE_en-us.iso
 
 cd integration-tests/windows/vm
@@ -107,16 +140,29 @@ nix-shell                # loads Ansible + libvirt Python bindings
 ansible-playbook start.yaml -i inventory.ini
 ```
 
-The playbook creates a QEMU/KVM VM with two networks (host-only +
-NAT), boots the Windows ISO, and waits for the guest agent. The
-`Autounattend.xml` installs Python 3.12 and pyodbc automatically.
+The playbook creates a QEMU/KVM VM with two networks (host-only and NAT), boots
+the Windows ISO, and waits for the guest agent. `Autounattend.xml` installs
+Python and pyodbc automatically.
 
-First run takes ~30 minutes (Windows install + downloads). Use
-`virt-viewer` or `virt-manager` to watch progress:
+First run takes around 30 minutes, most of it the Windows install and the
+downloads. Watch progress with:
 
 ```bash
 virt-viewer --connect qemu:///system stackable-odbc-test
 ```
+
+### What the current VM image was built with
+
+A snapshot of the image in use, not a set of requirements. Each pin and the
+paths derived from it have to move together, which is why they are collected
+here.
+
+| Thing | Value | Set in |
+|---|---|---|
+| Guest OS | Windows Server 2022 evaluation, [from the evalcenter](https://www.microsoft.com/en-us/evalcenter/evaluate-windows-server-2022) | `$WINDOWS_ISO`, checked by `vm/start.yaml` |
+| Guest Python | 3.12, at `C:\Program Files\Python312\python.exe` | `vm/files/windows-install-config/Autounattend.xml`, and `REMOTE_PYTHON` in `windows_test.py` |
+| virtio-win drivers | 0.1.248 | `vm/start.yaml`, downloaded and checksummed |
+| LLVM for the MSVC cross build | `llvmPackages_18` | the `nix-shell` line under [Building the DLL](#building-the-dll) |
 
 ### Shutting down
 
@@ -143,9 +189,12 @@ virsh --connect qemu:///system net-undefine stackable-odbc-test-internet
 
 ## Reference: driver and DSN management
 
+Everything below is what `windows_test.py` does for you, written out for when
+you are working in the VM by hand.
+
 ### Building the DLL
 
-The mingw cross-compiler is the simplest option (no extra tooling needed):
+The mingw cross-compiler needs no extra tooling:
 
 ```bash
 cargo build --release --target x86_64-pc-windows-gnu
@@ -153,8 +202,8 @@ cargo build --release --target x86_64-pc-windows-gnu
 
 Output: `target/x86_64-pc-windows-gnu/release/stackable_odbc_sqlite.dll`
 
-Alternatively, MSVC cross-compilation works via `cargo-xwin` (requires
-`cargo install cargo-xwin` and nix for LLVM):
+MSVC cross-compilation works through `cargo-xwin` (`cargo install cargo-xwin`,
+plus nix for LLVM), and is what `--target msvc` builds:
 
 ```bash
 nix-shell -p llvmPackages_18.clang llvmPackages_18.lld llvmPackages_18.llvm --run \
@@ -163,8 +212,10 @@ nix-shell -p llvmPackages_18.clang llvmPackages_18.lld llvmPackages_18.llvm --ru
 
 Output: `target/x86_64-pc-windows-msvc/release/stackable_odbc_sqlite.dll`
 
-Both produce DLLs that work with the Windows Driver Manager. Prefer mingw for
-simplicity; use MSVC if you need to match the target environment exactly.
+Both work with the Windows Driver Manager. Prefer mingw; use MSVC to match a
+target environment exactly. Note that the harness builds with plain
+`cargo build`, while release DLLs are built with `cargo auditable`, which
+embeds the dependency list `packaging/sbom.sh` refuses an artifact without.
 
 ### Registering the driver
 
@@ -172,7 +223,7 @@ All commands below run in `cmd.exe` as Administrator. Adjust the DLL path as
 needed.
 
 ```cmd
-odbcconf.exe /A {INSTALLDRIVER "stackable_odbc_sqlite|Driver=C:\Users\Administrator\Downloads\stackable_odbc_sqlite.dll|Setup=C:\Users\Administrator\Downloads\stackable_odbc_sqlite.dll|"}
+odbcconf.exe /A {INSTALLDRIVER "stackable_odbc_sqlite|Driver=C:\odbc_test\stackable_odbc_sqlite.dll|Setup=C:\odbc_test\stackable_odbc_sqlite.dll|"}
 ```
 
 Both `Driver=` and `Setup=` must point to the same DLL, which exports both the
@@ -180,38 +231,48 @@ ODBC API functions and the `ConfigDSNW` setup entry point.
 
 ### Creating a DSN
 
-The driver's `ConfigDSNW` is headless (no GUI dialog), so DSNs must be created
-programmatically rather than through the ODBC Data Source Administrator's "Add"
-button:
+Two ways.
+
+**The ODBC Data Source Administrator**, `odbcad32.exe` → **Add…**, which
+displays the driver's dialog. `ConfigDSN` reaches
+`SqliteBackend::configure_dsn`, which runs `configure-dsn.ps1` and hands the
+keywords back for core to write. The script must sit beside the DLL.
+
+**`odbcconf`**, which is what the test harness uses. It passes a null
+*hwndParent*, so no dialog is displayed and the keywords on the command line
+are written as given:
 
 ```cmd
-odbcconf.exe /A {CONFIGDSN "stackable_odbc_sqlite" "DSN=MySQLite|Database=C:\odbc_test\test.db|"}
+odbcconf.exe /A {CONFIGDSN "stackable_odbc_sqlite" "DSN=test_sqlite|Database=C:\odbc_test\test.db|"}
 ```
 
 ### Connection string parameters
 
-| Parameter | Required | Description |
-|-----------|----------|-------------|
-| Database  | Yes      | Path to the SQLite database file (e.g. `C:\path\to\test.db`) |
+`Database` is the only key. The full table is in the
+[root README](../../README.md#connecting), and the authoritative list is
+`src/backend/types/connect_params.rs`.
 
 ### Verifying registration
 
 Open `%SystemRoot%\System32\odbcad32.exe` (64-bit) and confirm:
 
-- **Drivers tab**: `stackable_odbc_sqlite` is listed
-- **User DSN tab**: `MySQLite` (or whatever DSN name you chose) is listed
-- Selecting the driver under "Add" should produce no error (but also no dialog, which is expected for a headless driver)
+- **Drivers tab**: `stackable_odbc_sqlite` is listed, with a version and
+  `Stackable GmbH` rather than `Not marked`.
+- **User DSN tab**: `test_sqlite` (or whatever name you chose) is listed.
+- **Add…** on the driver displays the setup dialog. See
+  [The setup dialog](#the-setup-dialog).
 
 ### Unregistering
 
-Remove a DSN (User DSN entries are stored under `HKCU`):
+Remove a DSN (User DSN entries live under `HKCU`):
 
 ```cmd
-reg delete "HKCU\SOFTWARE\ODBC\ODBC.INI\MySQLite" /f
-reg delete "HKCU\SOFTWARE\ODBC\ODBC.INI\ODBC Data Sources" /v "MySQLite" /f
+reg delete "HKCU\SOFTWARE\ODBC\ODBC.INI\test_sqlite" /f
+reg delete "HKCU\SOFTWARE\ODBC\ODBC.INI\ODBC Data Sources" /v "test_sqlite" /f
 ```
 
-Remove the driver (via registry, as `odbcconf` does not support `REMOVEDRIVER`):
+Remove the driver (through the registry, since `odbcconf` has no
+`REMOVEDRIVER`):
 
 ```cmd
 reg delete "HKLM\SOFTWARE\ODBC\ODBCINST.INI\stackable_odbc_sqlite" /f
@@ -222,10 +283,9 @@ reg delete "HKLM\SOFTWARE\ODBC\ODBCINST.INI\ODBC Drivers" /v "stackable_odbc_sql
 
 ### PowerShell smoke test
 
-PowerShell's `System.Data.Odbc` is built into .NET, so no extra tools are needed.
-This example is self-contained: it creates its own table, queries it, and
-cleans up. The driver must be registered first (done automatically by the
-test script).
+PowerShell's `System.Data.Odbc` is built into .NET, so no extra tools are
+needed. This example is self-contained: it creates its own table, queries it,
+and cleans up. The driver must be registered first, which the test script does.
 
 ```powershell
 $conn = New-Object System.Data.Odbc.OdbcConnection("Driver=stackable_odbc_sqlite;Database=C:\odbc_test\manual_test.db")
@@ -264,25 +324,16 @@ Connected: Open
 Done
 ```
 
-**DSN-based connection:**
-
-The automated test script registers a DSN named `test_sqlite`. To use it
-(in `cmd.exe`, not PowerShell):
-
-```cmd
-odbcconf.exe /A {CONFIGDSN "stackable_odbc_sqlite" "DSN=MySQLite|Database=C:\odbc_test\manual_test.db|"}
-```
-
-Then in PowerShell:
+To connect through the DSN the test script registers instead:
 
 ```powershell
-$c = New-Object System.Data.Odbc.OdbcConnection("DSN=MySQLite"); $c.Open(); Write-Host "Connected: $($c.State)"; $c.Close()
+$c = New-Object System.Data.Odbc.OdbcConnection("DSN=test_sqlite"); $c.Open(); Write-Host "Connected: $($c.State)"; $c.Close()
 ```
 
 ### Running test_integration.py manually
 
-If you need to run the tests without the wrapper script (e.g. from a
-PowerShell session on the VM):
+To run the suite without the wrapper script, from a PowerShell session on the
+VM:
 
 ```powershell
 & "C:\Program Files\Python312\python.exe" C:\odbc_test\test_integration.py "Driver=stackable_odbc_sqlite;Database=C:\odbc_test\test.db"

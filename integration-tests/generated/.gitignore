@@ -1,4 +1,4 @@
-# Everything setup.sh writes here embeds absolute paths, so none of it is
+# The ODBC config setup.sh writes here embeds absolute paths, so none of it is
 # portable between checkouts. Keep the directory, ignore the contents.
 *
 !.gitignore

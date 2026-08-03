@@ -91,8 +91,7 @@ points against real handles, so it catches marshalling bugs an ordinary Rust
 test cannot.
 
 The integration suite goes one layer further out, through real unixODBC using
-Python's `pyodbc`. It needs no server, so unlike the Trino driver's suite it
-runs on every pull request:
+Python's `pyodbc`. It needs no server, so it runs on every pull request:
 
 ```bash
 ./integration-tests/setup.sh       # build the driver, create the database, write the ODBC config
@@ -120,11 +119,13 @@ Two more things a change usually needs:
   [`CHANGELOG.md`](CHANGELOG.md), if an ODBC application can observe the
   difference. A changed SQLSTATE, a changed `SQLGetInfo` value, a new
   connection-string key or a different type mapping all count.
-- **A new connection-string key means three edits**: the parser in
-  `src/backend/types/connect_params.rs`, the table in [`README.md`](README.md),
-  and the `$Fields` table in `packaging/windows/configure-dsn.ps1`.
+- **A new connection-string key touches four places**: the parser in
+  `src/backend/types/connect_params.rs`, the key tables in
+  [`README.md`](README.md) and [`packaging/README.md`](packaging/README.md), and
+  the `$Fields` table in `packaging/windows/configure-dsn.ps1`.
   `dsn_keys_match_the_connection_string_parser` in `src/lib.rs` fails the build
-  if the parser and the dialog disagree.
+  if the parser and the dialog disagree. See
+  [Connection string keys](AGENTS.md#connection-string-keys).
 
 ## Where things live
 

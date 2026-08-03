@@ -11,7 +11,7 @@ publish = false
 push = true
 # Signing is requested here rather than left to the releaser's `tag.gpgsign` /
 # `commit.gpgsign`, so a release tag is signed regardless of whose machine it
-# is cut on — and fails loudly instead of silently producing an unsigned tag
+# is cut on, and fails loudly instead of silently producing an unsigned tag
 # when no signing key is configured.
 sign-tag = true
 sign-commit = true
@@ -54,7 +54,7 @@ replace = "[Unreleased]: https://github.com/stackabletech/stackable-odbc-sqlite/
 min = 0
 
 # First-release case: the initial placeholder points at `commits/HEAD`.
-# Fires exactly once — on the first release — after which the line is in the
+# Fires exactly once, on the first release, after which the line is in the
 # `compare/...` form the rule above owns, and this one never matches again.
 [[pre-release-replacements]]
 file = "CHANGELOG.md"

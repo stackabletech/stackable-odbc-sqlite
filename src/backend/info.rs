@@ -405,11 +405,11 @@ fn sqlite_get_info(
         // a plain `rusqlite::Connection::open`, so shared cache is off and the
         // level is unreachable.
         //
-        // This previously advertised all four levels. Nothing applies the
-        // value an application sets (`SQL_ATTR_TXN_ISOLATION` is stored on
-        // the connection and read back, never pushed to SQLite), so an
-        // application that asked for REPEATABLE READ was told it had it while
-        // running serializable.
+        // Advertising all four would be a promise nothing keeps. Nothing
+        // applies the value an application sets (`SQL_ATTR_TXN_ISOLATION` is
+        // stored on the connection and read back, never pushed to SQLite), so
+        // an application asking for REPEATABLE READ would be told it had it
+        // while running serializable.
         //
         // Spec: <https://www.sqlite.org/isolation.html>
         InfoType::TransactionIsolationProtocol => {
@@ -520,68 +520,14 @@ pub(super) fn get_info_pre_connect(info_type: InfoType) -> Result<InfoValue, Sql
 pub(crate) const SQLITE_AGGREGATE_FUNCTIONS: u32 =
     SQL_AF_AVG | SQL_AF_COUNT | SQL_AF_MAX | SQL_AF_MIN | SQL_AF_SUM | SQL_AF_DISTINCT | SQL_AF_ALL;
 
-/// `SQL_ALTER_TABLE` (86): the `ALTER TABLE` clauses SQLite accepts, of those
-/// the ODBC bitmap can express.
-///
-/// Every bit here was established by executing the clause against the bundled
-/// library (3.53.2), not read off the documentation.
-/// `alter_table_capabilities_are_each_live_probed` is that probe, and it
-/// checks the unclaimed bits too. That matters: `ADD CONSTRAINT` and
-/// `DROP CONSTRAINT` are recent additions, rejected by 3.51.3 and accepted by
-/// 3.53.2, so a bitmap written from an older recollection of SQLite's grammar
-/// understates it.
-///
-/// Claimed:
-///
-/// - `ADD COLUMN`, with `DEFAULT` and `COLLATE`.
-/// - `ADD CONSTRAINT <name> CHECK (...)`, which rewrites the stored schema to
-///   carry a genuine table constraint. Note the ODBC bit is all-or-nothing
-///   while SQLite accepts only `CHECK` here; `UNIQUE`, `PRIMARY KEY` and
-///   `FOREIGN KEY` are still syntax errors.
-/// - `SQL_AT_CONSTRAINT_NAME_DEFINITION`, since that `CONSTRAINT <name>` clause
-///   is exactly what the bit describes.
-///
-/// - `SQL_AT_ADD_CONSTRAINT`, which despite its name means "`ADD COLUMN` is
-///   supported *with column constraints*", not table constraints. SQLite takes
-///   `NOT NULL` (given a non-null default), `CHECK`, `REFERENCES` and a named
-///   `CONSTRAINT` on an added column. Only `UNIQUE` and `PRIMARY KEY` are
-///   refused, with "Cannot add a UNIQUE column".
-///
-/// Supported by SQLite but *unrepresentable*, so absent by necessity rather
-/// than because SQLite lacks them: unqualified `DROP COLUMN` (3.35.0+) and
-/// unqualified `DROP CONSTRAINT`, for which the ODBC 3.x bitmap offers only
-/// `CASCADE` and `RESTRICT` variants, and SQLite rejects both keywords, so
-/// claiming either would advertise a syntax an application would send and have
-/// refused. `sql.h` does carry ODBC 2.0-era `SQL_AT_ADD_COLUMN` and
-/// `SQL_AT_DROP_COLUMN` bits for the unqualified forms, but the ODBC 3.x
-/// `SQL_ALTER_TABLE` table does not define them, and this driver reports
-/// `SQL_OIC_CORE` against ODBC 3.x. `RENAME TO` and `RENAME COLUMN` have no
-/// bit at all.
-///
-/// Deliberately **not** claimed: the four `SQL_AT_CONSTRAINT_*` deferrability
-/// bits. SQLite implements deferred constraints only inside a foreign-key
-/// clause, and its parser additionally accepts `DEFERRABLE` after a `CHECK` or
-/// `NOT NULL` constraint, where SQL-92 does not allow it and where it has no
-/// effect. Accepting a token is not implementing the attribute, and deriving a
-/// general capability from an FK-only feature plus a permissive parser is
-/// exactly the overstatement these bitmaps invite.
-///
-/// Genuinely absent: `ALTER COLUMN ... SET DEFAULT` and
-/// `ALTER COLUMN ... DROP DEFAULT` are not SQLite grammar.
-///
-/// Core previously defaulted this to 0, which said SQLite cannot alter a table
-/// in any way.
-///
-/// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlgetinfo-function>
-/// SQLite: <https://www.sqlite.org/lang_altertable.html>
 /// `SQL_SUBQUERIES` (95): the subquery forms SQLite accepts.
 ///
 /// `SQL_SQ_QUANTIFIED` is deliberately absent. It covers `< ALL` / `< ANY` /
 /// `< SOME`, which SQLite does not parse. That is the same finding
 /// `sql92_predicates_excludes_quantified_comparison_and_match` records for
-/// `SQL_SP_QUANTIFIED_COMPARISON`. Core's default claimed it, so this driver
-/// denied quantified comparison in one info type and asserted it in another.
-/// Each remaining bit is exercised by `subqueries_are_each_live_probed`.
+/// `SQL_SP_QUANTIFIED_COMPARISON`. Claiming it here would deny quantified
+/// comparison in one info type while asserting it in another. Each remaining
+/// bit is exercised by `subqueries_are_each_live_probed`.
 pub(crate) const SQLITE_SUBQUERIES: u32 =
     SQL_SQ_COMPARISON | SQL_SQ_EXISTS | SQL_SQ_IN | SQL_SQ_CORRELATED_SUBQUERIES;
 
@@ -628,6 +574,56 @@ pub(crate) const SQLITE_OUTER_JOIN_CAPABILITIES: u32 = SQL_OJ_LEFT
     | SQL_OJ_INNER
     | SQL_OJ_ALL_COMPARISON_OPS;
 
+/// `SQL_ALTER_TABLE` (86): the `ALTER TABLE` clauses SQLite accepts, of those
+/// the ODBC bitmap can express.
+///
+/// Every bit here was established by executing the clause against the bundled
+/// library (3.53.2), not read off the documentation.
+/// `alter_table_capabilities_are_each_live_probed` is that probe, and it
+/// checks the unclaimed bits too. That matters: `ADD CONSTRAINT` and
+/// `DROP CONSTRAINT` are recent additions, rejected by 3.51.3 and accepted by
+/// 3.53.2, so a bitmap written from an older recollection of SQLite's grammar
+/// understates it.
+///
+/// Claimed:
+///
+/// - `ADD COLUMN`, with `DEFAULT` and `COLLATE`.
+/// - `ADD CONSTRAINT <name> CHECK (...)`, which rewrites the stored schema to
+///   carry a genuine table constraint. Note the ODBC bit is all-or-nothing
+///   while SQLite accepts only `CHECK` here; `UNIQUE`, `PRIMARY KEY` and
+///   `FOREIGN KEY` are still syntax errors.
+/// - `SQL_AT_CONSTRAINT_NAME_DEFINITION`, since that `CONSTRAINT <name>` clause
+///   is exactly what the bit describes.
+/// - `SQL_AT_ADD_CONSTRAINT`, which despite its name means "`ADD COLUMN` is
+///   supported *with column constraints*", not table constraints. SQLite takes
+///   `NOT NULL` (given a non-null default), `CHECK`, `REFERENCES` and a named
+///   `CONSTRAINT` on an added column. Only `UNIQUE` and `PRIMARY KEY` are
+///   refused, with "Cannot add a UNIQUE column".
+///
+/// Supported by SQLite but *unrepresentable*, so absent by necessity rather
+/// than because SQLite lacks them: unqualified `DROP COLUMN` (3.35.0+) and
+/// unqualified `DROP CONSTRAINT`, for which the ODBC 3.x bitmap offers only
+/// `CASCADE` and `RESTRICT` variants, and SQLite rejects both keywords, so
+/// claiming either would advertise a syntax an application would send and have
+/// refused. `sql.h` does carry ODBC 2.0-era `SQL_AT_ADD_COLUMN` and
+/// `SQL_AT_DROP_COLUMN` bits for the unqualified forms, but the ODBC 3.x
+/// `SQL_ALTER_TABLE` table does not define them, and this driver reports
+/// `SQL_OIC_CORE` against ODBC 3.x. `RENAME TO` and `RENAME COLUMN` have no
+/// bit at all.
+///
+/// Deliberately **not** claimed: the four `SQL_AT_CONSTRAINT_*` deferrability
+/// bits. SQLite implements deferred constraints only inside a foreign-key
+/// clause, and its parser additionally accepts `DEFERRABLE` after a `CHECK` or
+/// `NOT NULL` constraint, where SQL-92 does not allow it and where it has no
+/// effect. Accepting a token is not implementing the attribute, and deriving a
+/// general capability from an FK-only feature plus a permissive parser is
+/// exactly the overstatement these bitmaps invite.
+///
+/// Genuinely absent: `ALTER COLUMN ... SET DEFAULT` and
+/// `ALTER COLUMN ... DROP DEFAULT` are not SQLite grammar.
+///
+/// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlgetinfo-function>
+/// SQLite: <https://www.sqlite.org/lang_altertable.html>
 pub(crate) const SQLITE_ALTER_TABLE: u32 = SQL_AT_ADD_COLUMN_SINGLE
     | SQL_AT_ADD_COLUMN_DEFAULT
     | SQL_AT_ADD_COLUMN_COLLATION
@@ -1117,9 +1113,9 @@ mod tests {
         // because the snapshot's job is the value an application sees
         // regardless of which layer produced it.
         (InfoType::CursorSensitivity,             Expected::U32(SQL_UNSPECIFIED as u32)),
-        // SQL_SQ_QUANTIFIED dropped: `< ALL` / `< ANY` / `< SOME` do not
-        // parse, which SQL_SQL92_PREDICATES already recorded. Core's default
-        // claimed it, so the two info types disagreed.
+        // SQL_SQ_QUANTIFIED is absent: `< ALL` / `< ANY` / `< SOME` do not
+        // parse, which SQL_SQL92_PREDICATES already records. Claiming it here
+        // would make the two info types disagree.
         (InfoType::Subqueries,                    Expected::U32(SQLITE_SUBQUERIES)),
         (InfoType::UnionStatement,                Expected::U32(SQLITE_UNION)),
         (InfoType::DefaultTxnIsolation,           Expected::U32(SQL_TXN_SERIALIZABLE)),
@@ -1133,8 +1129,8 @@ mod tests {
         (InfoType::MaxIndexSize,                  Expected::U32(0)),
         (InfoType::MaxRowSize,                    Expected::U32(0)),
         (InfoType::MaxStatementLen,               Expected::U32(0)),
-        // Not 0: SQLite implements every outer-join form the spec asks
-        // about. Core's default of 0 contradicted SQL_OUTER_JOINS = "Y".
+        // Not 0: SQLite implements every outer-join form the spec asks about,
+        // and 0 would contradict SQL_OUTER_JOINS = "Y".
         (InfoType::OuterJoinCapabilities,         Expected::U32(
             SQL_OJ_LEFT | SQL_OJ_RIGHT | SQL_OJ_FULL | SQL_OJ_NESTED
                 | SQL_OJ_NOT_ORDERED | SQL_OJ_INNER | SQL_OJ_ALL_COMPARISON_OPS)),
@@ -1528,11 +1524,11 @@ mod tests {
     /// subquery form it describes, and the one it does not claim, proved by
     /// the bundled library rejecting it.
     ///
-    /// `SQL_SQ_QUANTIFIED` is the point. Core's default claimed it while this
-    /// driver's `SQL_SQL92_PREDICATES` denied `SQL_SP_QUANTIFIED_COMPARISON`,
-    /// so the same capability was advertised and denied by two info types. A
-    /// BI tool reading `SQL_SUBQUERIES` would push down `< ALL` and get a
-    /// syntax error.
+    /// `SQL_SQ_QUANTIFIED` is the point. Claiming it while
+    /// `SQL_SQL92_PREDICATES` denies `SQL_SP_QUANTIFIED_COMPARISON` would
+    /// advertise and deny the same capability across two info types, and a BI
+    /// tool reading `SQL_SUBQUERIES` would push down `< ALL` and get a syntax
+    /// error.
     #[test]
     fn subqueries_are_each_live_probed() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -1672,11 +1668,10 @@ mod tests {
     }
 
     /// The five catalog info types and the two schema info types must agree
-    /// with each other. This is the test the previous arrangement lacked:
-    /// `SQL_CATALOG_NAME`, `SQL_CATALOG_LOCATION` and `SQL_CATALOG_USAGE` said
-    /// catalogs do not exist while `SQL_CATALOG_TERM` and
-    /// `SQL_CATALOG_NAME_SEPARATOR` fell through to core's defaults and named
-    /// one, and nothing tied the two groups together.
+    /// with each other. Without this test nothing ties the two groups
+    /// together, and `SQL_CATALOG_NAME`, `SQL_CATALOG_LOCATION` and
+    /// `SQL_CATALOG_USAGE` can say catalogs do not exist while
+    /// `SQL_CATALOG_TERM` and `SQL_CATALOG_NAME_SEPARATOR` name one.
     ///
     /// Asserts the spec's rule, not the current values, so it keeps holding if
     /// [`SqliteBackend::supports_catalogs`] or
@@ -1749,7 +1744,7 @@ mod tests {
     /// SQLite is serializable and has no way to be anything else here: READ
     /// COMMITTED and REPEATABLE READ are not SQLite concepts, and READ
     /// UNCOMMITTED needs shared-cache mode, which `SqliteBackend::connect`
-    /// never enables. The bitmap previously advertised all four.
+    /// never enables.
     ///
     /// This matters more than an unused info value usually would, because
     /// nothing applies what an application sets: `SQL_ATTR_TXN_ISOLATION` is
@@ -1907,9 +1902,8 @@ mod tests {
     /// ever took the bundled library below that, this fails with a parse error
     /// instead of the bitmap overclaiming forever.
     ///
-    /// Core's default for `SQL_OUTER_JOIN_CAPABILITIES` is 0, which said
-    /// SQLite supports no outer joins at all while this driver's own
-    /// `SQL_OUTER_JOINS` said "Y".
+    /// A `SQL_OUTER_JOIN_CAPABILITIES` of 0 would say SQLite supports no outer
+    /// joins at all, while this driver's own `SQL_OUTER_JOINS` says "Y".
     #[test]
     fn outer_join_capabilities_are_each_live_probed() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();

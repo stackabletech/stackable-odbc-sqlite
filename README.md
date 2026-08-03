@@ -13,8 +13,8 @@
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/stackabletech/stackable-odbc-sqlite/badge)](https://scorecard.dev/viewer/?uri=github.com/stackabletech/stackable-odbc-sqlite)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-green.svg)](https://docs.stackable.tech/home/stable/contributor/index.html)
 [![Apache License 2.0](https://img.shields.io/badge/license-Apache--2.0-green)](./LICENSE)
-[![ODBC 3.80](https://img.shields.io/badge/ODBC-3.80-blue)](#what-it-deliberately-does-not-do)
-[![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows-blue)](#quick-start)
+[![ODBC 3.80](https://img.shields.io/badge/ODBC-3.80-blue)](#compatibility)
+[![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows-blue)](#compatibility)
 [![SQLite bundled](https://img.shields.io/badge/SQLite-3.53.2%20bundled-blue)](https://sqlite.org)
 
 [Stackable Data Platform](https://stackable.tech/) | [Platform Docs](https://docs.stackable.tech/) | [Discussions](https://github.com/orgs/stackabletech/discussions) | [Discord](https://discord.gg/7kZ3BNnCAF)
@@ -22,83 +22,55 @@
 ## What is this?
 
 [SQLite](https://sqlite.org) is a database that lives in a single file. There
-is nothing to install and nothing to start: the whole database is one `.db`
-file you can copy onto a USB stick. Your phone is running several of them right
-now.
+is nothing to install and nothing to start, because the whole database is one
+`.db` file you can copy onto a USB stick. Your phone is running several of them
+right now.
 
 Most desktop tools cannot open one of those files directly, but nearly all of
-them speak **ODBC**. ODBC is a widely supported standard: a tool loads a small library called a *driver*, calls a fixed set of functions on it, and the driver translates those calls into whatever the actual database understands. Write one driver, and every ODBC-speaking tool on the machine can talk to that database.
+them speak **ODBC**, a standard that lets any tool load a small library, called
+a driver, and talk to a database through it.
 
-This repository is that driver for SQLite. Install it, and Excel, LibreOffice
-Base, DBeaver, `isql` and Python's `pyodbc` can query a SQLite file as if it
-were a full database server. Linux and Windows are both supported.
+This is the ODBC driver for SQLite. Install it, and Excel, LibreOffice Base,
+DBeaver, `isql` and Python's `pyodbc` can query a SQLite file as if it were a
+full database server. Linux and Windows are both first-class targets.
 
-Two things make it unusual:
-
-- **It carries its own SQLite.** Version 3.53.2 is compiled straight into the
-  driver, so there is no separate SQLite to install and no version of it on the
-  machine that could disagree with the one the driver actually uses.
-- **It is a testbed.** Everything generic about being an ODBC driver lives in
-  [`stackable-odbc-core`](https://github.com/stackabletech/stackable-odbc-core),
-  which also powers the
-  [Trino driver](https://github.com/stackabletech/stackable-odbc-trino). SQLite
-  is small, fast and needs no server, which makes it the ideal backend for
-  proving that shared framework behaves.
+SQLite itself is compiled into the driver, so there is nothing else to install
+and no second copy on the machine that could disagree with it.
 
 ## Quick start
 
-No release has been cut yet, so build the driver yourself. You need Rust (the
-version in `rust-toolchain.toml` is installed automatically by `rustup`) and
-the unixODBC development headers, because the ODBC bindings link against them:
+Download an archive from the
+[releases page](https://github.com/stackabletech/stackable-odbc-sqlite/releases).
+
+### Windows
+
+1. Unzip `stackable-odbc-sqlite-<version>-windows-x64.zip`.
+2. Right-click `install.bat` and choose **Run as administrator**. This registers
+   the driver with Windows.
+3. Open **ODBC Data Sources (64-bit)** from the Start menu, click **Add**, and
+   pick `stackable_odbc_sqlite` from the list. Name the data source, browse to
+   your `.db` file, and click **Test connection** before saving.
+
+Step 3 creates a *DSN*: a saved connection with a name. Once it exists, every
+tool on the machine can pick it from a list instead of asking you to type a
+connection string.
+
+### Linux
+
+You need unixODBC (the `unixodbc` package). Installing the driver registers it
+system-wide, so it needs root.
 
 ```bash
-sudo apt-get install unixodbc-dev   # Debian/Ubuntu
-sudo pacman -S unixodbc             # Arch
+mkdir /tmp/sqlite-odbc
+tar xzf stackable-odbc-sqlite-<version>-linux-x64.tar.gz -C /tmp/sqlite-odbc
+cd /tmp/sqlite-odbc
+sudo ./install.sh
 ```
 
-Clone this repository:
-
-```bash
-git clone https://github.com/stackabletech/stackable-odbc-sqlite
-cd stackable-odbc-sqlite
-cargo build --release
-```
-
-Output: `target/release/libstackable_odbc_sqlite.so`.
-
-For Windows, cross-compile with MinGW (`gcc-mingw-w64-x86-64`):
-
-```bash
-rustup target add x86_64-pc-windows-gnu
-cargo build --release --target x86_64-pc-windows-gnu
-```
-
-Output: `target/x86_64-pc-windows-gnu/release/stackable_odbc_sqlite.dll`.
-
-### Installing it
-
-`packaging/build-archives.sh` turns those binaries into the same release
-archives CI publishes, each with an installer inside:
-
-```bash
-VERSION=0.0.1 ./packaging/build-archives.sh
-```
-
-On Linux, unpack `stackable-odbc-sqlite-<version>-linux-x64.tar.gz` and run
-`sudo ./install.sh`. It copies the library into place and registers it with
-unixODBC; check it worked with `odbcinst -q -d`, which should list
+Check it worked with `odbcinst -q -d`, which should list
 `[stackable_odbc_sqlite]`.
 
-On Windows, unpack the `.zip` and run `install.bat` from an Administrator
-Command Prompt, then look for `stackable_odbc_sqlite` on the Drivers tab of
-**ODBC Data Sources (64-bit)**. From there, **Add…** opens the driver's own
-dialog: name the data source, browse to a `.db` file, and press **Test
-connection** to check it before saving.
-
-The full install, uninstall and DSN reference is in
-[`packaging/README.md`](packaging/README.md).
-
-### Then use it
+### Your first query
 
 ```python
 import pyodbc
@@ -108,66 +80,13 @@ for row in conn.cursor().execute("SELECT name FROM sqlite_master WHERE type = 't
     print(row.name)
 ```
 
-Or straight from a source checkout, without installing anything at all:
-
-```bash
-isql -3 -k "Driver=$(pwd)/target/release/libstackable_odbc_sqlite.so;Database=$(pwd)/test/test.db" -v
-```
-
-## Highlights
-
-- **The stop button actually stops the query.** Cancelling from your tool calls
-  SQLite's `sqlite3_interrupt` on the connection, so a runaway query really
-  stops instead of quietly running to the end while your tool pretends it was
-  cancelled. The statement reports "operation canceled" and can be re-run.
-
-- **Real transactions.** Turn autocommit off and the driver opens a transaction
-  for you, then commits or rolls back when you say so and immediately opens the
-  next one. Your open result sets survive both, because the driver has already
-  read every row into memory by the time you commit.
-
-- **Foreign keys are switched on.** SQLite ships with foreign-key enforcement
-  *off* for backwards compatibility, which surprises almost everyone. This
-  driver turns it on for every connection, so a `REFERENCES` clause in your
-  schema is a rule the database enforces rather than a comment.
-
-- **Your tool can browse the database.** Tables, views, columns, primary keys,
-  foreign keys, indexes and row identifiers all show up in the object browser,
-  read out of SQLite's own `PRAGMA` introspection. So you can click through what
-  is there instead of guessing table names.
-
-- **Columns get sensible types even though SQLite has almost none.** SQLite is
-  dynamically typed: any value can go in any column, and there is no `DATE` or
-  `BOOLEAN` type at all. The driver reads each column's declared type and its
-  actual storage class and maps them onto proper ODBC types, including the
-  three different ways SQLite people store a timestamp (ISO text, Unix seconds,
-  Julian day numbers).
-
-- **Nothing is claimed that was not measured.** What a driver reports about
-  itself is how tools decide which SQL to send, so guessing wrong there breaks
-  things in confusing ways. The tests here run the actual SQL to check: the list
-  of `ALTER TABLE` clauses is verified by executing each one, and the list of
-  reserved words is read out of the linked SQLite library at runtime instead of
-  being copied from documentation that can drift.
-
-- **Windows is a real target, not an afterthought.** It gets its own installer
-  and its own setup dialog, so the ODBC administrator's **Add…** button works
-  the way it does for a commercial driver. The DLL is cross-compiled,
-  export-checked and unit-tested on every pull request, and the integration
-  suite can be run through the Windows Driver Manager in a VM, which is far
-  stricter than unixODBC and tends to fail silently rather than loudly.
-
-- **Every release says what is inside it.** Both archives carry a CycloneDX
-  SBOM generated from the binary's own embedded dependency list rather than
-  from `Cargo.toml`, so it describes what was linked. That includes the
-  bundled SQLite and the Driver Manager the library loads, neither of which
-  cargo can see. The release page also carries SPDX, checksums and build
-  provenance attestations.
+For the full install and uninstall reference, see
+[`packaging/README.md`](packaging/README.md).
 
 ## Connecting
 
 Connection strings are `Key=Value` pairs joined by `;`. Keys are
-case-insensitive. There is exactly one key:
+case-insensitive. There is exactly one key.
 
 | Key | Required | Meaning |
 |-----|----------|---------|
@@ -177,8 +96,8 @@ case-insensitive. There is exactly one key:
 Driver=stackable_odbc_sqlite;Database=/path/to/your.db
 ```
 
-Instead of typing that every time you can save it as a **DSN**, which is just a
-named, stored connection, like a browser bookmark. On Linux, add a section to
+Instead of typing that every time you can save it as a DSN, which is a named,
+stored connection much like a browser bookmark. On Linux, add a section to
 `~/.odbc.ini`:
 
 ```ini
@@ -187,83 +106,130 @@ Driver = stackable_odbc_sqlite
 Database = /path/to/your.db
 ```
 
-On Windows, the **Add…** button in the ODBC Data Source Administrator writes
-one for you; see [`packaging/README.md`](packaging/README.md) for that and for
-the scripted alternatives.
+On Windows the **Add** button in the ODBC Data Source Administrator writes one
+for you. See [`packaging/README.md`](packaging/README.md) for that and for the
+scripted alternatives.
 
-### Logging
+## What you get
 
-Two environment variables turn on tracing, which is by far the fastest way to
-see which ODBC functions your tool actually calls, and in what order:
+- **The stop button stops the query.** Cancelling from your tool calls SQLite's
+  `sqlite3_interrupt` on the connection, so a runaway query really stops rather
+  than running to the end while your tool reports it as cancelled. The
+  statement can be run again afterwards.
 
-```bash
-# Levels: trace, debug, info, warn, error
-ODBC_LOG_LEVEL=debug isql -3 test_sqlite -v
+- **Real transactions.** Turn autocommit off and the driver opens a transaction
+  for you, then commits or rolls back when you say so and immediately opens the
+  next one. Your open result sets survive both, because the driver has already
+  read every row into memory by the time you commit.
 
-# Or send it to a file instead of stderr
-ODBC_LOG_LEVEL=debug ODBC_LOG_FILE=/tmp/odbc.log isql -3 test_sqlite -v
-```
+- **Foreign keys are switched on.** SQLite ships with foreign-key enforcement
+  *off* for backwards compatibility, which surprises almost everyone. This
+  driver turns it on for every connection, so a `REFERENCES` clause in your
+  schema is a rule the database keeps.
 
-## What it deliberately does not do
+- **Your tool can browse the database.** Tables, views, columns, primary keys,
+  foreign keys, indexes and row identifiers all show up in the object browser,
+  read from SQLite's own `PRAGMA` introspection, so you can click through what
+  is there instead of guessing table names.
 
-Every one of these is reported to the application as unsupported rather than
-quietly faked, so a tool can react to it instead of trusting a wrong answer.
+- **Columns get sensible types even though SQLite has almost none.** SQLite is
+  dynamically typed. Any value can go in any column, and there is no `DATE` or
+  `BOOLEAN` type at all. The driver reads each column's declared type together
+  with the storage class of its values and maps the pair onto a proper ODBC
+  type. That covers the three ways people store a timestamp in SQLite: ISO
+  text, Unix seconds and Julian day numbers.
+
+- **Your tool gets accurate answers about what SQLite supports.** Applications
+  choose which SQL to send based on what the driver reports about itself, so
+  those answers are measured against the bundled library rather than copied
+  from documentation. The `ALTER TABLE` clauses are checked by executing each
+  one, and the reserved-word list is read out of the library at runtime.
+
+- **Windows gets its own installer and setup dialog**, so the ODBC
+  administrator's **Add** button behaves the way it does for a commercial
+  driver. The DLL is cross-compiled, export-checked and unit-tested on every
+  pull request, and the integration suite can also be run through the Windows
+  Driver Manager in a VM.
+
+- **Every release says what is inside it.** Both archives carry a CycloneDX
+  SBOM generated from the binary's own embedded dependency list rather than
+  from `Cargo.toml`, so it describes what was actually linked, including the
+  bundled SQLite. The release page also carries SPDX documents, checksums and
+  build provenance attestations.
+
+## Limits
+
+Each of these is reported to your tool as unsupported rather than quietly
+faked, so the tool can react instead of trusting a wrong answer.
 
 - **No catalogs and no schemas.** SQLite has neither, so the driver says so
-  rather than inventing a fake one-level hierarchy for the sake of looking
-  familiar.
+  rather than inventing a one-level hierarchy for the sake of looking familiar.
 - **No stored procedures.** SQLite has none, so those lookups return nothing.
+- **Rows arrive one at a time.** There are no block cursors and no parameter
+  arrays.
 - **No query timeout.** You can cancel a running statement from another thread,
-  but asking for "give up after 30 seconds" is answered with "you have no
-  timeout" and a warning, instead of a promise that would never be kept.
-- **Result sets are read into memory in one go.** Simple, and it is what makes
-  cursors survive a commit or rollback, but a `SELECT` over a table larger than
-  your RAM is not going to work.
+  but "give up after 30 seconds" is answered with a warning rather than a
+  promise that would never be kept.
+- **Result sets are read into memory in one go.** That is what lets cursors
+  survive a commit or rollback, but a `SELECT` over a table larger than your
+  RAM will not work.
 - **One isolation level.** SQLite gives you serializable transactions, so that
-  is the only level offered, and asking for a weaker one is refused up front
-  rather than accepted and silently ignored.
-- **No setup dialog on Linux.** Windows gets one, from the **Add** button in
-  the ODBC administrator. unixODBC has no equivalent convention for a driver to
-  put a window on the screen, so on Linux a DSN is a section in `odbc.ini`.
+  is the only level offered, and asking for a weaker one is refused up front.
+- **No setup dialog on Linux.** unixODBC has no convention for a driver to put
+  a window on the screen, so a DSN there is a section in `odbc.ini`.
 
-## Testing
+## Compatibility
+
+| | |
+|---|---|
+| ODBC | 3.80 |
+| Platforms | Linux x86-64, Windows x86-64 |
+| Driver Managers | unixODBC, and the Windows Driver Manager |
+| SQLite | 3.53.2, compiled into the driver |
+| Tested with | `pyodbc`, `isql` |
+
+## Troubleshooting
+
+**Turn on logging first.** The driver logs to a file when you ask it to, and
+that is usually enough to see what a tool is really sending:
 
 ```bash
-cargo test    # unit and FFI tests; needs no database file and no setup
-cargo bench   # Criterion fetch-throughput benchmark against :memory:
+export ODBC_LOG_LEVEL=debug          # trace, debug, info, warn, error
+export ODBC_LOG_FILE=/tmp/sqlite-odbc.log
 ```
 
-`cargo test` drives the real exported C entry points against real handles, so
-it catches the marshalling bugs that ordinary Rust tests cannot.
+On Windows, set the same two as environment variables. The log may contain your
+SQL, so check it before sharing.
 
-The integration suite goes one layer further out and runs through real
-unixODBC, using Python's `pyodbc` exactly like a normal application would:
+**You connected fine but the database is empty.** SQLite creates a file that
+does not exist yet rather than refusing, so a typo in the path connects
+successfully and finds nothing. Check the path. The Windows dialog's **Test
+connection** button reports the table count for exactly this reason.
 
-```bash
-./integration-tests/setup.sh       # build the driver, create the database, write the ODBC config
-./integration-tests/run-tests.sh   # run the pyodbc suite, then cargo test
-```
+**The driver does not appear in the list.** On Linux, run `odbcinst -q -d`; if
+`[stackable_odbc_sqlite]` is missing, the install did not complete. On Windows,
+make sure you opened **ODBC Data Sources (64-bit)**: a 64-bit driver is
+invisible to the 32-bit Administrator, and both are in the Start menu under
+similar names.
 
-Both are run on every pull request. `run-tests.sh --windows` additionally runs
-the same suite inside a Windows VM; see
-[integration-tests/README.md](integration-tests/README.md) for what is covered
-and [integration-tests/windows/WINDOWS.md](integration-tests/windows/WINDOWS.md)
-for how to provision one.
+**A `REFERENCES` clause is being enforced that was not before.** That is
+deliberate. The driver turns foreign-key enforcement on for every connection,
+which most other SQLite tooling leaves off.
 
-For the architecture, the conventions and the full testing reference, see
-[AGENTS.md](AGENTS.md). For building it, the `[patch]` that points core at a
-sibling checkout, and what has to pass before a commit, see
-[CONTRIBUTING.md](CONTRIBUTING.md).
+## Getting help
 
-## Releasing
+- [GitHub Discussions](https://github.com/orgs/stackabletech/discussions) for
+  questions
+- [Discord](https://discord.gg/7kZ3BNnCAF) to talk to us
+- [Issues](https://github.com/stackabletech/stackable-odbc-sqlite/issues) for
+  bugs, and [SECURITY.md](SECURITY.md) for anything security-related
 
-See [packaging/README.md](packaging/README.md) for building the release
-archives and how the SBOM is produced, and `release.toml` for the
-`cargo-release` configuration.
+## Contributing
 
-## Security
-
-Please report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for building from source, running the
+tests, and how the repository is laid out. [AGENTS.md](AGENTS.md) has the
+architecture and the ODBC design rationale behind what the driver reports.
+[CHANGELOG.md](CHANGELOG.md) records what changed in each release.
 
 ## License
 
