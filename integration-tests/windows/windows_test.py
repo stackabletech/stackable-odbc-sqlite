@@ -33,11 +33,31 @@ OPENSSL_CNF = WINDOWS_DIR / "openssl_legacy.cnf"
 
 DIALOG_SCRIPT = PROJECT_DIR / "packaging" / "windows" / "configure-dsn.ps1"
 
+PERF_DIR = TEST_DIR / "perf"
+
 REMOTE_DIR = r"C:\odbc_test"
 REMOTE_DLL = rf"{REMOTE_DIR}\stackable_odbc_sqlite.dll"
-REMOTE_TEST = rf"{REMOTE_DIR}\test_integration.py"
 REMOTE_DIALOG = rf"{REMOTE_DIR}\configure-dsn.ps1"
 REMOTE_DB = rf"{REMOTE_DIR}\test.db"
+# The stress suite generates 50k rows, so it gets a database of its own for the
+# same reason it does on Linux. See `STRESS_DB_PATH` in scripts/lib.sh.
+REMOTE_STRESS_DB = rf"{REMOTE_DIR}\stress.db"
+
+# Everything lands flat in REMOTE_DIR, and each suite puts its own directory on
+# `sys.path`, so `from harness import ...` resolves to the copy deployed here.
+SUPPORT_FILES = ("harness.py", "odbc_abi.py")
+
+# Run through the Windows Driver Manager, once per connection style. The DM is
+# far stricter than unixODBC and tends to fail silently, which is the whole
+# reason for running any of this in a VM.
+DM_SUITES = ("test_integration.py", "test_transactions.py", "test_sql_surface.py")
+
+# Load the DLL with ctypes, so no Driver Manager is in the loop. Run once: a
+# second pass through a DSN would reach the same code by a longer route, and
+# these never resolve a data source at all.
+DIRECT_SUITES = ("test_c_abi.py", "test_type_matrix.py")
+
+STRESS_SUITE = "test_stress.py"
 
 DRIVER_NAME = "stackable_odbc_sqlite"
 DSN_NAME = "test_sqlite"
@@ -62,7 +82,17 @@ def main():
         build_dll(args.target)
 
     dll_path = resolve_dll_path(args.target)
-    test_path = SUITES_DIR / "test_integration.py"
+    # Name -> local path, for everything the VM needs. Assembled here so a suite
+    # added to one of the tuples above is deployed without touching the
+    # download plumbing.
+    payload = {name: SUITES_DIR / name for name in SUPPORT_FILES}
+    payload.update({name: SUITES_DIR / name for name in DM_SUITES})
+    payload.update({name: SUITES_DIR / name for name in DIRECT_SUITES})
+    payload[STRESS_SUITE] = PERF_DIR / STRESS_SUITE
+    missing = [name for name, path in payload.items() if not path.exists()]
+    if missing:
+        print(f"ERROR: suite files not found: {', '.join(missing)}", file=sys.stderr)
+        sys.exit(1)
 
     host = args.host or discover_vm_ip(args.vm_network)
 
@@ -96,51 +126,72 @@ def main():
     print(f"=== Deploying files via HTTP ===")
     files_to_serve = {
         dll_path.name: dll_path,
-        "test_integration.py": test_path,
         # The setup dialog, which the driver's ConfigDSN looks for *beside its
         # own DLL* and fails without. A DLL deployed here without it would
         # answer the ODBC Administrator's Add... button with an error, so the
         # two travel together the same way install.bat ships them together.
         "configure-dsn.ps1": DIALOG_SCRIPT,
+        **payload,
     }
     with http_file_server(files_to_serve) as port:
         base_url = f"http://{args.gateway}:{port}"
-        download_ps = (
-            f'$ProgressPreference = "SilentlyContinue"; '
-            f'Invoke-WebRequest -Uri "{base_url}/{dll_path.name}" '
-            f'-OutFile "{REMOTE_DLL}"; '
-            f'Invoke-WebRequest -Uri "{base_url}/test_integration.py" '
-            f'-OutFile "{REMOTE_TEST}"; '
-            f'Invoke-WebRequest -Uri "{base_url}/configure-dsn.ps1" '
-            f'-OutFile "{REMOTE_DIALOG}"'
-        )
+        # One request per file, in one PowerShell invocation. The DLL and the
+        # dialog have fixed destinations; everything else lands in REMOTE_DIR
+        # under its own name, which is what puts `harness.py` beside the suites
+        # that import it.
+        downloads = [
+            f'Invoke-WebRequest -Uri "{base_url}/{dll_path.name}" -OutFile "{REMOTE_DLL}"',
+            f'Invoke-WebRequest -Uri "{base_url}/configure-dsn.ps1" -OutFile "{REMOTE_DIALOG}"',
+        ] + [
+            f'Invoke-WebRequest -Uri "{base_url}/{name}" -OutFile "{REMOTE_DIR}\\{name}"'
+            for name in payload
+        ]
+        download_ps = '$ProgressPreference = "SilentlyContinue"; ' + "; ".join(downloads)
         r = session.run_ps(download_ps)
         if r.status_code != 0:
             stderr = r.std_err.decode()
             print(f"ERROR: file download failed:\n{stderr}", file=sys.stderr)
             sys.exit(1)
     print(f"  DLL: {dll_path.stat().st_size / 1024:.0f} KB")
-    print(f"  test_integration.py: {test_path.stat().st_size / 1024:.0f} KB")
     print(f"  configure-dsn.ps1: {DIALOG_SCRIPT.stat().st_size / 1024:.0f} KB")
+    print(f"  suites: {', '.join(sorted(payload))}")
 
     print("=== Registering ODBC driver ===")
     register_driver(session)
 
-    # --- Run 1: DSN-less connection string ---
-    print("=== Running integration tests (DSN-less) ===")
-    conn_str = f"Driver={DRIVER_NAME};Database={REMOTE_DB}"
-    exit_code = run_tests(session, conn_str)
-    if exit_code != 0:
-        sys.exit(exit_code)
-
-    # --- Run 2: DSN-based connection ---
     print("=== Registering DSN ===")
     register_dsn(session)
 
-    print("=== Running integration tests (via DSN) ===")
-    dsn_conn_str = f"DSN={DSN_NAME}"
-    exit_code = run_tests(session, dsn_conn_str)
-    sys.exit(exit_code)
+    # Every suite is run, and every result recorded, rather than stopping at the
+    # first failure. One Windows-only defect should not hide the next, and a
+    # VM round trip is slow enough that a second run to find out is expensive.
+    failures = []
+
+    def run(label, script, conn_str):
+        print(f"=== {label} ===")
+        if run_suite(session, script, conn_str) != 0:
+            failures.append(label)
+
+    dsn_less = f"Driver={DRIVER_NAME};Database={REMOTE_DB}"
+    for suite in DM_SUITES:
+        run(f"{suite} (DSN-less)", suite, dsn_less)
+    for suite in DM_SUITES:
+        run(f"{suite} (DSN)", suite, f"DSN={DSN_NAME}")
+
+    # These load the DLL themselves, so the connection string names its path
+    # rather than the registered driver.
+    direct = f"Driver={REMOTE_DLL};Database={REMOTE_DB}"
+    for suite in DIRECT_SUITES:
+        run(suite, suite, direct)
+
+    run(STRESS_SUITE, STRESS_SUITE, f"Driver={REMOTE_DLL};Database={REMOTE_STRESS_DB}")
+
+    print()
+    if failures:
+        print(f"FAILED on Windows: {', '.join(failures)}", file=sys.stderr)
+        sys.exit(1)
+    print("All Windows suites passed")
+    sys.exit(0)
 
 
 def parse_args():
@@ -359,11 +410,9 @@ def _port_available(port: int) -> bool:
             return False
 
 
-def run_tests(session, conn_str: str) -> int:
-    """Run test_integration.py on the VM and return the exit code."""
-    r = session.run_ps(
-        f'& {REMOTE_PYTHON} {REMOTE_TEST} "{conn_str}"'
-    )
+def run_suite(session, script: str, conn_str: str) -> int:
+    """Run one suite on the VM and return its exit code."""
+    r = session.run_ps(f'& {REMOTE_PYTHON} {REMOTE_DIR}\\{script} "{conn_str}"')
     stdout = r.std_out.decode("utf-8", errors="replace")
     print(stdout, end="")
 

@@ -1,10 +1,10 @@
 # Windows testing
 
-`suites/test_integration.py`, driven through the Windows ODBC Driver Manager
-over WinRM. The Windows DM is far stricter than unixODBC and tends to fail
-silently, so this is measured rather than assumed. The target is a disposable
-Windows Server VM on a host-only libvirt network, created by the Ansible
-playbook in `vm/`.
+The integration suites, driven through the Windows ODBC Driver Manager over
+WinRM. The Windows DM is far stricter than unixODBC and tends to fail silently,
+so this is measured rather than assumed. The target is a disposable Windows
+Server VM on a host-only libvirt network, created by the Ansible playbook in
+`vm/`.
 
 The VM's credentials are `Administrator` / `Asdf1234`, the defaults in
 `windows_test.py`. They are not a secret: the machine is local, throwaway, and
@@ -30,9 +30,23 @@ Then run from the Linux host. `uv` installs `pywinrm` itself:
 uv run --with pywinrm python3 integration-tests/windows/windows_test.py
 ```
 
-The suite runs twice against the same database, DSN-less and then via a DSN,
-exactly as it does on Linux. Nothing needs to be running on the host: SQLite is
-compiled into the DLL, and the script copies a freshly built database to the VM.
+This runs the same suites the Linux runner does, in the same shapes:
+
+| Suite | How |
+|---|---|
+| `test_integration.py`, `test_transactions.py`, `test_sql_surface.py` | Through the Windows Driver Manager, once DSN-less and once via a DSN |
+| `test_c_abi.py`, `test_type_matrix.py` | Loading the DLL with `ctypes`, so no Driver Manager is in the loop. Once |
+| `perf/test_stress.py` | Once, against a database of its own |
+
+Every suite runs and every result is recorded; the script does not stop at the
+first failure, because one Windows-only defect should not hide the next and a VM
+round trip is slow enough that finding out costs a second run.
+
+`harness.py` and `odbc_abi.py` are deployed alongside, flat in `C:\odbc_test`,
+which is where each suite's own `sys.path` entry looks for them.
+
+Nothing needs to be running on the host: SQLite is compiled into the DLL, and
+the script copies a freshly built database to the VM.
 
 **Do not diagnose a Windows failure without rebuilding the DLL first.**
 `--skip-build` reuses whatever sits in `target/x86_64-pc-windows-gnu/release/`,

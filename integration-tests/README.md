@@ -124,10 +124,11 @@ silently ignored.
 ## Windows
 
 `windows/windows_test.py` deploys the cross-compiled DLL to a provisioned
-libvirt VM over WinRM, registers it, and runs the same
-`suites/test_integration.py` through the Windows Driver Manager, DSN-less and
-then via a DSN. The Windows DM is much stricter than unixODBC and tends to fail
-silently, so this is measured rather than assumed.
+libvirt VM over WinRM, registers it, and runs the same suites through the
+Windows Driver Manager: the three pyodbc ones DSN-less and then via a DSN, the
+two ctypes ones once each, and the stress suite once. The Windows DM is much
+stricter than unixODBC and tends to fail silently, so this is measured rather
+than assumed.
 
 See [windows/WINDOWS.md](windows/WINDOWS.md) for provisioning the VM.
 
