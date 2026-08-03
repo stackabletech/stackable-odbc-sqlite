@@ -21,17 +21,16 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 RUN_WINDOWS=false
 SKIP_BUILD=false
 SKIP_CARGO_TEST=false
+# Arguments this script does not act on itself and therefore only passes along.
+# `--skip-build` is deliberately absent: it is handled here, so putting it in
+# this array would make the guard below reject `run-tests.sh --skip-build`,
+# which is a documented Linux-only invocation.
 WINDOWS_ARGS=()
 
 for arg in "$@"; do
     case "$arg" in
         --windows) RUN_WINDOWS=true ;;
-        # Forwarded as well as acted on: the VM build is a separate
-        # cross-compile, and skipping one without the other would be a surprise.
-        --skip-build)
-            SKIP_BUILD=true
-            WINDOWS_ARGS+=("$arg")
-            ;;
+        --skip-build) SKIP_BUILD=true ;;
         --skip-cargo-test) SKIP_CARGO_TEST=true ;;
         -h | --help)
             usage "${BASH_SOURCE[0]}"
@@ -46,6 +45,12 @@ done
 if [[ "$RUN_WINDOWS" == false && ${#WINDOWS_ARGS[@]} -gt 0 ]]; then
     echo "ERROR: ${WINDOWS_ARGS[*]} only applies with --windows. Try --help." >&2
     exit 2
+fi
+
+# Forwarded as well as acted on: the VM build is a separate cross-compile, and
+# skipping one without the other would be a surprise.
+if [[ "$RUN_WINDOWS" == true && "$SKIP_BUILD" == true ]]; then
+    WINDOWS_ARGS+=(--skip-build)
 fi
 
 require_setup
@@ -65,6 +70,12 @@ uv run --with pyodbc python3 "$SUITES_DIR/test_integration.py" \
 
 echo "=== Running Linux pyodbc integration tests (DSN) ==="
 uv run --with pyodbc python3 "$SUITES_DIR/test_integration.py" "DSN=$DSN_NAME"
+
+# Once, not per connection style: this suite loads the .so with ctypes and
+# never reaches a Driver Manager, so a DSN run would exercise the same code by
+# a longer route. Plain python3, because it needs no third-party package.
+echo "=== Running raw C ABI pen test (no Driver Manager) ==="
+python3 "$SUITES_DIR/test_c_abi.py" "Driver=$DRIVER_PATH;Database=$DB_PATH"
 
 # Run by default so that a developer invoking this script gets the whole suite
 # in one command. CI passes --skip-cargo-test, because its pre-commit job has

@@ -24,7 +24,10 @@ Both take `--help`.
 | `scripts/setup.sh` | Builds the driver, creates `test.db`, writes `odbc.ini` / `odbcinst.ini` |
 | `scripts/run-tests.sh` | Runs the suites |
 | `suites/create_test_db.sql` | The schema and rows every suite reads |
+| `suites/harness.py` | PASS/FAIL accounting and connection-string parsing, shared by the suites |
+| `suites/odbc_abi.py` | The raw ODBC C ABI declared for `ctypes`, for the suites that skip the Driver Manager |
 | `suites/test_integration.py` | The pyodbc suite, run once per connection style |
+| `suites/test_c_abi.py` | The C ABI pen test, run once |
 | `generated/` | Everything `setup.sh` writes. Gitignored |
 | `windows/` | The VM suite, its libvirt definitions, and [WINDOWS.md](windows/WINDOWS.md) |
 
@@ -45,6 +48,19 @@ checkout, and a committed copy would be wrong for everyone but its author.
 They are separate runs because they fail separately. A driver that reads its
 parameters correctly can still be unreachable through a DSN, and that is a
 configuration most applications actually use.
+
+Then `test_c_abi.py`, once. It loads the driver's `.so` with `ctypes` and calls
+the exported entry points with **no Driver Manager in the loop**, which is the
+point: unixODBC answers a large part of the ODBC state machine itself, so what
+the driver does with an out-of-order or malformed call is invisible to anything
+going through pyodbc. It covers handle lifecycle and parentage, stale handles
+and double frees, cursor state, attribute round-trips, the query timeout, and
+transactions. A DSN run would reach the same code by a longer route, so there
+is only one.
+
+Because the spec's **(DM)** diagnostics come from the Driver Manager, that suite
+never demands one. Where a SQLSTATE is (DM)-annotated it asserts what the driver
+does instead, with a comment naming the diagnostic it is not asking for.
 
 It then runs `cargo test`, so that one command gives a developer the whole
 suite. CI passes `--skip-cargo-test`, since its pre-commit job has already run
