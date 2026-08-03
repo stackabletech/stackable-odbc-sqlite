@@ -80,6 +80,13 @@ uv run --with pyodbc python3 "$SUITES_DIR/test_transactions.py" \
 echo "=== Running transaction tests (DSN) ==="
 uv run --with pyodbc python3 "$SUITES_DIR/test_transactions.py" "DSN=$DSN_NAME"
 
+echo "=== Running SQL surface tests (DSN-less) ==="
+uv run --with pyodbc python3 "$SUITES_DIR/test_sql_surface.py" \
+    "Driver=$DRIVER_PATH;Database=$DB_PATH"
+
+echo "=== Running SQL surface tests (DSN) ==="
+uv run --with pyodbc python3 "$SUITES_DIR/test_sql_surface.py" "DSN=$DSN_NAME"
+
 # Once, not per connection style: this suite loads the .so with ctypes and
 # never reaches a Driver Manager, so a DSN run would exercise the same code by
 # a longer route. Plain python3, because it needs no third-party package.

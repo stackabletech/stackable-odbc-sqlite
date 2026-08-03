@@ -28,6 +28,7 @@ Both take `--help`.
 | `suites/odbc_abi.py` | The raw ODBC C ABI declared for `ctypes`, for the suites that skip the Driver Manager |
 | `suites/test_integration.py` | The pyodbc suite, run once per connection style |
 | `suites/test_transactions.py` | Manual-commit transactions, run once per connection style |
+| `suites/test_sql_surface.py` | The SQL a BI tool emits, the ODBC escapes and the catalog functions, run once per connection style |
 | `suites/test_c_abi.py` | The C ABI pen test, run once |
 | `suites/test_type_matrix.py` | Type-transform fuzz and column description, run once |
 | `generated/` | Everything `setup.sh` writes. Gitignored |
@@ -57,6 +58,15 @@ Trino driver's equivalents, which is why it could not simply be copied across:
 a failed statement leaves a SQLite transaction usable rather than aborting it,
 a commit preserves an open cursor rather than closing it, and serializable is
 the level that must be accepted rather than refused.
+
+`test_sql_surface.py` runs both ways too. It walks joins, aggregates, window
+functions, CTEs, set operations and parameters, and is the only suite that
+reaches `escape_dialect.rs`: the `{fn ...}`, `{d ...}`, `{ts ...}` and
+`{oj ...}` sequences, including the three date/time forms that are bare
+keywords in SQLite and need the whole escape rewritten rather than the name
+swapped. Where the Trino driver can only check that a key or index lookup
+returns nothing without erroring, this one asserts the rows, because SQLite
+publishes all three.
 
 Then `test_c_abi.py`, once. It loads the driver's `.so` with `ctypes` and calls
 the exported entry points with **no Driver Manager in the loop**, which is the
