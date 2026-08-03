@@ -18,7 +18,7 @@ use stackable_odbc_core::{
     types::{
         ColumnDescriptor, ColumnRow, ColumnValue, ConnectParams, CursorBehavior, ExecuteOutcome,
         ForeignKeyRow, InfoValue, PrimaryKeyRow, SQL_CB_NULL, SQL_CN_ANY, SQL_GB_NO_RELATION,
-        SQL_IC_MIXED, SQL_NC_LOW, SQL_NNC_NON_NULL, SQL_TC_DML, SQL_TXN_SERIALIZABLE,
+        SQL_IC_MIXED, SQL_NC_LOW, SQL_NNC_NON_NULL, SQL_TC_ALL, SQL_TXN_SERIALIZABLE,
         SpecialColumnRow, StatisticsRow, TableRow, TypeInfoRow,
     },
 };
@@ -501,7 +501,7 @@ impl Backend for SqliteBackend {
         Cow::Borrowed(&[Cow::Borrowed("database")])
     }
 
-    /// SQLite supports transactions and this driver reports `SQL_TC_DML` for
+    /// SQLite supports transactions and this driver reports `SQL_TC_ALL` for
     /// `SQL_TXN_CAPABLE`, so manual-commit mode must actually be honoured.
     ///
     /// Manual-commit mode is entered by opening a transaction with `BEGIN`;
@@ -684,28 +684,36 @@ impl Backend for SqliteBackend {
         SQL_TXN_SERIALIZABLE
     }
 
-    /// `SQL_TC_DML`: SQLite runs DML inside a transaction, and a DDL statement
-    /// inside one causes neither a commit nor an error. SQLite's DDL is
-    /// transactional, so `CREATE TABLE` simply participates.
+    /// `SQL_TC_ALL`: "Transactions support both DML and DDL statements in any
+    /// order", which is what SQLite does. Its DDL is transactional, so a
+    /// `CREATE TABLE` inside a transaction simply participates, and a later
+    /// `ROLLBACK` undoes the table along with the rows.
     ///
-    /// `SQL_TC_ALL` would be the stronger claim and is tempting for that
-    /// reason, but the spec defines it as "transactions can contain DDL
-    /// statements **and** DML statements in any order", and this driver's
-    /// manual-commit mode is built on `BEGIN`/`COMMIT` around whatever the
-    /// application sends. `SQL_TC_DML` states what an application can rely on
-    /// without also promising the DDL-ordering freedom the spec attaches to
-    /// `SQL_TC_ALL`.
+    /// `SQL_TC_DML` is the tempting-looking weaker answer and is wrong. The
+    /// spec defines it as "DDL statements encountered in a transaction cause
+    /// an error", so it is not a smaller promise but the opposite claim. An
+    /// application reading it before running DDL inside a transaction would
+    /// either refuse, or commit first and silently discard the atomicity the
+    /// user asked for.
+    ///
+    /// `transaction_capability_is_live_probed` measures all of it against the
+    /// bundled library: that the DDL raises no error, that a rollback undoes
+    /// the rows around it, and that it undoes the schema change too, which is
+    /// what rules out `SQL_TC_DDL_COMMIT` and `SQL_TC_DDL_IGNORE`.
     ///
     /// Core pins this against [`SqliteBackend::txn_isolation_options`]:
     /// `SQL_TC_NONE` if and only if no isolation level is declared. Declaring a
     /// level and then reporting no transaction support is the
     /// self-contradiction that pairing exists to catch.
     ///
-    /// `SQL_TC_DML` is a small fixed constant, so the narrowing `as u16`
+    /// `SQL_TC_ALL` is a small fixed constant, so the narrowing `as u16`
     /// cannot lose information. (The `SQL_TC_*` constants are typed `u32` for
     /// bitmask use, while the info type is `SQLUSMALLINT`.)
+    ///
+    /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlgetinfo-function>
+    /// SQLite: <https://www.sqlite.org/lang_transaction.html>
     fn txn_capable(_conn: &SqliteConnection) -> u16 {
-        SQL_TC_DML as u16
+        SQL_TC_ALL as u16
     }
 
     /// `true`: each connection this driver opens is its own

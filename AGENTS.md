@@ -286,7 +286,7 @@ describe the same thing and must be changed together:
 | `SQL_OUTER_JOINS` | `SQL_OUTER_JOIN_CAPABILITIES` |
 | `SQL_SQL_CONFORMANCE` | `SQL_GROUP_BY`, `SQL_CONCAT_NULL_BEHAVIOR`, `SQL_NON_NULLABLE_COLUMNS` |
 | `SQL_SQL92_PREDICATES` (`SQL_SP_QUANTIFIED_COMPARISON`) | `SQL_SUBQUERIES` (`SQL_SQ_QUANTIFIED`) |
-| `SQL_TXN_ISOLATION_OPTION` | whatever actually applies the level an application sets |
+| `SQL_TXN_ISOLATION_OPTION` | `SQL_TXN_CAPABLE`, and whatever actually applies the level an application sets |
 
 When adding or changing a capability, look for the other info type that talks
 about the same thing, and assert the relationship.
@@ -304,11 +304,23 @@ would depend on a dependency's build flags rather than on this driver.
 `integrity_enhancement_facility_is_actually_enforced` checks it through
 `connect`.
 
-SQLite supports transactions and this driver reports `SQL_TC_DML` for
+SQLite supports transactions and this driver reports `SQL_TC_ALL` for
 `SQL_TXN_CAPABLE`, so manual-commit mode is honoured for real:
 `set_autocommit(false)` issues `BEGIN`, and `end_tran` issues `COMMIT` or
 `ROLLBACK` and then opens the next transaction while still in manual-commit
 mode.
+
+`SQL_TC_ALL` is the measured answer, not the optimistic one. The four
+non-`NONE` values differ only in what DDL does inside a transaction, and the
+spec separates them by observable effect: `SQL_TC_DML` means DDL "cause[s] an
+error", `SQL_TC_DDL_COMMIT` that it commits, `SQL_TC_DDL_IGNORE` that it is
+ignored. SQLite's DDL is transactional, so a `CREATE TABLE` between two
+inserts raises nothing and a later `ROLLBACK` undoes the table along with the
+rows. `transaction_capability_is_live_probed` runs exactly that and rules out
+all three alternatives at once. Note that `SQL_TC_DML` is not a cautious
+weaker claim: it asserts that DDL errors, so reporting it would make an
+application either refuse DDL inside a transaction or commit before sending
+it, silently dropping the atomicity the user asked for.
 
 Both `cursor_commit_behavior` and `cursor_rollback_behavior` return
 `CursorBehavior::Preserve`, and **this depends on an implementation detail**:

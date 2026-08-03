@@ -3705,7 +3705,7 @@ fn autocommit_off_then_rollback_discards_changes() {
                 0,
             ),
             SqlReturn::SUCCESS,
-            "SQLite advertises SQL_TC_DML so manual-commit must be accepted"
+            "SQLite advertises SQL_TC_ALL so manual-commit must be accepted"
         );
 
         assert_eq!(

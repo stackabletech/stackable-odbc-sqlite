@@ -1009,7 +1009,7 @@ mod tests {
         SQL_SP_MATCH_FULL, SQL_SP_MATCH_PARTIAL, SQL_SP_MATCH_UNIQUE_FULL,
         SQL_SP_MATCH_UNIQUE_PARTIAL, SQL_SP_OVERLAPS, SQL_SP_QUANTIFIED_COMPARISON, SQL_SP_UNIQUE,
         SQL_SQ_COMPARISON, SQL_SQ_CORRELATED_SUBQUERIES, SQL_SQ_EXISTS, SQL_SQ_IN,
-        SQL_SQ_QUANTIFIED, SQL_SRJO_CORRESPONDING_CLAUSE, SQL_SRJO_UNION_JOIN, SQL_TC_DML,
+        SQL_SQ_QUANTIFIED, SQL_SRJO_CORRESPONDING_CLAUSE, SQL_SRJO_UNION_JOIN, SQL_TC_ALL,
         SQL_TXN_READ_COMMITTED, SQL_TXN_READ_UNCOMMITTED, SQL_TXN_REPEATABLE_READ,
         SQL_TXN_SERIALIZABLE, SQL_UNSPECIFIED,
     };
@@ -1101,7 +1101,7 @@ mod tests {
         (InfoType::CatalogLocation,               Expected::U16(0)),
         // TransactionCapable is SQLUSMALLINT per spec, not SQLUINTEGER. See
         // the matching comment on its arm in sqlite_get_info.
-        (InfoType::TransactionCapable,            Expected::U16(SQL_TC_DML as u16)),
+        (InfoType::TransactionCapable,            Expected::U16(SQL_TC_ALL as u16)),
         // --- U32 values ---
         // CursorSensitivity is SQLUINTEGER per spec, not SQLUSMALLINT. See
         // the matching comment in stackable-odbc-core's default_get_info.
@@ -1735,6 +1735,60 @@ mod tests {
                 "SQL_SCHEMA_USAGE must be 0 when schemas are unsupported"
             );
         }
+    }
+
+    /// `SQL_TXN_CAPABLE` is measured rather than assumed, because the four
+    /// non-`NONE` values differ only in what DDL does inside a transaction and
+    /// nothing about the constant's name says which one SQLite is.
+    ///
+    /// The spec separates them by observable effect: `SQL_TC_DML` means DDL
+    /// "cause[s] an error", `SQL_TC_DDL_COMMIT` that it commits the
+    /// transaction, `SQL_TC_DDL_IGNORE` that it is ignored, and `SQL_TC_ALL`
+    /// that DML and DDL are supported "in any order". So the probe runs a
+    /// `CREATE TABLE` between two inserts and rolls back, which tells all four
+    /// apart at once: no error rules out `SQL_TC_DML`, the inserts
+    /// disappearing rules out `SQL_TC_DDL_COMMIT`, and the created table
+    /// disappearing rules out `SQL_TC_DDL_IGNORE`.
+    #[test]
+    fn transaction_capability_is_live_probed() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t (id INTEGER); INSERT INTO t VALUES (1);")
+            .unwrap();
+
+        conn.execute_batch("BEGIN").unwrap();
+        conn.execute_batch("INSERT INTO t VALUES (2)").unwrap();
+        conn.execute_batch("CREATE TABLE mid (x TEXT)")
+            .expect("DDL inside a transaction must not error, which is what SQL_TC_DML claims");
+        conn.execute_batch("INSERT INTO t VALUES (3)").unwrap();
+        conn.execute_batch("ROLLBACK").unwrap();
+
+        let rows: i64 = conn
+            .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            rows, 1,
+            "the rows around the DDL survived a ROLLBACK, so the DDL committed \
+             the transaction and this is SQL_TC_DDL_COMMIT"
+        );
+
+        let mid: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'mid'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            mid, 0,
+            "the table created inside the transaction survived a ROLLBACK, so the \
+             DDL was not transactional and this is SQL_TC_DDL_IGNORE"
+        );
+
+        let reported = SqliteBackend::txn_capable(&test_connection());
+        assert_eq!(
+            reported, SQL_TC_ALL as u16,
+            "SQLite runs DDL and DML in a transaction in any order, which is SQL_TC_ALL"
+        );
     }
 
     /// `SQL_DEFAULT_TXN_ISOLATION` must name a level that
