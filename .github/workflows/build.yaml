@@ -21,6 +21,10 @@ env:
   CARGO_TERM_COLOR: always
   RUST_TOOLCHAIN_VERSION: "1.95.0"
 
+# Every job below names a runner image rather than a `-latest` alias, so an
+# image roll cannot change what a merge is gated on. The label cannot be lifted
+# into a variable: `runs-on` accepts no `env` context, and the one context that
+# would work, `vars`, holds its value in repository settings rather than here.
 jobs:
   # The whole gate: `cargo test`, formatting, clippy (which is what enforces the
   # unwrap_used / unwrap_in_result / panic denies from Cargo.toml), rustdoc,
@@ -34,7 +38,7 @@ jobs:
   # pass, which is only true if CI runs the same thing.
   pre-commit:
     name: pre-commit
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       # The cargo-test pre-commit hook links libodbc via odbc-sys.
@@ -42,14 +46,16 @@ jobs:
         uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05 # v1.6.0
         with:
           packages: unixodbc-dev
-          version: ubuntu-latest
+          # A cache key, not a runner label, but it tracks the runner image so
+          # that bumping the image invalidates the cached .deb files.
+          version: ubuntu-24.04
 
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
 
       - name: Install Rust ${{ env.RUST_TOOLCHAIN_VERSION }} toolchain
-        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b # 1.95.0
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
           components: rustfmt, clippy
@@ -70,10 +76,11 @@ jobs:
 
   # This suite needs only unixODBC and the sqlite3 CLI, no server and no
   # container, so it runs on a standard runner in seconds and is worth
-  # gating every pull request on.
+  # gating every pull request on. The Trino driver cannot do this, which is
+  # part of why this driver exists.
   sqlite-integration:
     name: SQLite Integration Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     needs: [pre-commit]
     steps:
@@ -81,12 +88,11 @@ jobs:
         uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05 # v1.6.0
         with:
           packages: unixodbc-dev unixodbc sqlite3
-          version: ubuntu-latest
+          version: ubuntu-24.04
 
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Rust ${{ env.RUST_TOOLCHAIN_VERSION }} toolchain
         uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
@@ -105,19 +111,65 @@ jobs:
           # --skip-cargo-test: the pre-commit job above already ran it.
           ./integration-tests/run-tests.sh --skip-cargo-test
 
-  windows-cross-compile:
-    name: Cross-compile Windows DLL
-    runs-on: ubuntu-latest
+  unit-tests-windows:
+    name: Unit Tests (Windows)
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN_VERSION }} toolchain
+        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          targets: x86_64-pc-windows-gnu
+
+      # A separate cache key: the Linux job's artefacts are a different target
+      # triple and sharing the key would thrash both.
+      - name: Setup Rust Cache
+        uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0 # v2.8.0
+        with:
+          key: windows-gnu-test
+
+      # The GNU target's linker, and the C compiler libsqlite3-sys needs to
+      # build the bundled SQLite amalgamation. The runner image ships MSYS2,
+      # but its mingw64 bin directory is not on PATH by default.
+      - name: Add MinGW to PATH
+        run: echo "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      # `--target x86_64-pc-windows-gnu`, not the runner's default MSVC triple.
+      # That is the target release.yaml builds and packaging/build-archives.sh
+      # ships, and a suite passing against a toolchain nobody receives is only
+      # evidence about that toolchain. odbc-sys links odbc32, which comes with
+      # the Windows SDK already on the runner, so there is no equivalent of the
+      # unixodbc-dev install the Linux jobs need.
+      #
+      # This is also the only job that compiles `backend::setup`'s
+      # `#[cfg(windows)]` module, which is the half of the setup dialog that
+      # calls into kernel32.
+      - name: Run unit tests
+        run: cargo test --locked --target x86_64-pc-windows-gnu
+
+  # Builds both shipping artifacts the way release.yaml does, and checks the two
+  # properties that are invisible in a unit test run: that the DLL exports the
+  # ODBC entry points, and that what each artifact links at load time still
+  # matches packaging/sbom-native.json. The SBOM declares native dependencies by
+  # hand, since no cargo metadata describes them, so nothing but this check keeps
+  # the declaration true.
+  release-artifacts:
+    name: Release Artifacts
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     needs: [pre-commit]
     steps:
       - name: Install MinGW cross-compiler
-        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 unixodbc-dev
 
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Rust ${{ env.RUST_TOOLCHAIN_VERSION }} toolchain
         uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
@@ -130,12 +182,39 @@ jobs:
         with:
           key: windows-gnu
 
+      - name: Build Linux shared library
+        run: cargo build --locked --release
+
       - name: Build Windows DLL
-        run: cargo build --target x86_64-pc-windows-gnu --release
+        run: cargo build --locked --target x86_64-pc-windows-gnu --release
 
       - name: Verify DLL exports
         run: |
           x86_64-w64-mingw32-objdump -p target/x86_64-pc-windows-gnu/release/stackable_odbc_sqlite.dll | grep -c "SQL" | xargs -I{} echo "SQLite DLL: {} ODBC symbols exported"
+
+      # build.rs embeds this, and it is what stops the ODBC Data Source
+      # Administrator listing the driver as "Not marked". A cross-build with no
+      # windres on PATH fails loudly, but a change to build.rs that silently
+      # stops emitting the resource would not, so the section is asserted here.
+      - name: Verify the DLL carries a version resource
+        run: |
+          x86_64-w64-mingw32-objdump -h target/x86_64-pc-windows-gnu/release/stackable_odbc_sqlite.dll \
+            | grep -q '\.rsrc' || { echo "::error::the DLL carries no .rsrc section"; exit 1; }
+          echo "Version resource present."
+
+      # Two different assertions behind one flag. For the .so it compares
+      # DT_NEEDED against the sonames sbom-native.json declares, in both
+      # directions. For the .dll it asserts the mingw runtime is still linked
+      # statically: the release archive ships no runtime DLL, so an artifact
+      # that imported one would fail to load on a user's machine.
+      #
+      # Only the release binaries are checked, and only here rather than in
+      # release.yaml, because a pull request is where a dependency change can
+      # still be reverted cheaply.
+      - name: Verify declared native dependencies
+        run: |
+          ./packaging/sbom.sh --check-native target/release/libstackable_odbc_sqlite.so
+          ./packaging/sbom.sh --check-native target/x86_64-pc-windows-gnu/release/stackable_odbc_sqlite.dll
 
   # Single required check for branch protection rules.
   finished:
@@ -144,16 +223,22 @@ jobs:
     needs:
       - pre-commit
       - sqlite-integration
-      - windows-cross-compile
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+      - unit-tests-windows
+      - release-artifacts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
+      # Derived from needs.* rather than a hand-written list of job names: a job
+      # added to `needs` above but forgotten here would otherwise be silently
+      # non-blocking.
       - name: Check job results
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
-          if [[ "${{ needs.pre-commit.result }}" != "success" ]] ||
-             [[ "${{ needs.sqlite-integration.result }}" != "success" ]] ||
-             [[ "${{ needs.windows-cross-compile.result }}" != "success" ]]; then
-            echo "One or more jobs failed"
-            exit 1
-          fi
-          echo "All jobs passed"
+          for result in $RESULTS; do
+            if [[ "$result" != "success" ]]; then
+              echo "One or more jobs did not succeed: $RESULTS"
+              exit 1
+            fi
+          done
+          echo "All jobs passed: $RESULTS"

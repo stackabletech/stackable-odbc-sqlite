@@ -10,6 +10,7 @@
 
 [![Build and Test](https://github.com/stackabletech/stackable-odbc-sqlite/actions/workflows/build.yaml/badge.svg)](https://github.com/stackabletech/stackable-odbc-sqlite/actions/workflows/build.yaml)
 [![Security Audit](https://github.com/stackabletech/stackable-odbc-sqlite/actions/workflows/security_audit.yaml/badge.svg)](https://github.com/stackabletech/stackable-odbc-sqlite/actions/workflows/security_audit.yaml)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/stackabletech/stackable-odbc-sqlite/badge)](https://scorecard.dev/viewer/?uri=github.com/stackabletech/stackable-odbc-sqlite)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-green.svg)](https://docs.stackable.tech/home/stable/contributor/index.html)
 [![Apache License 2.0](https://img.shields.io/badge/license-Apache--2.0-green)](./LICENSE)
 [![ODBC 3.80](https://img.shields.io/badge/ODBC-3.80-blue)](#what-it-deliberately-does-not-do)
@@ -90,7 +91,9 @@ unixODBC; check it worked with `odbcinst -q -d`, which should list
 
 On Windows, unpack the `.zip` and run `install.bat` from an Administrator
 Command Prompt, then look for `stackable_odbc_sqlite` on the Drivers tab of
-**ODBC Data Sources (64-bit)**.
+**ODBC Data Sources (64-bit)**. From there, **Add…** opens the driver's own
+dialog: name the data source, browse to a `.db` file, and press **Test
+connection** to check it before saving.
 
 The full install, uninstall and DSN reference is in
 [`packaging/README.md`](packaging/README.md).
@@ -147,10 +150,19 @@ isql -3 -k "Driver=$(pwd)/target/release/libstackable_odbc_sqlite.so;Database=$(
   reserved words is read out of the linked SQLite library at runtime instead of
   being copied from documentation that can drift.
 
-- **Windows is a real target, not an afterthought.** It gets its own installer,
-  the DLL is cross-compiled and export-checked on every pull request, and the
-  test suite can be run through the Windows Driver Manager in a VM, which is far
+- **Windows is a real target, not an afterthought.** It gets its own installer
+  and its own setup dialog, so the ODBC administrator's **Add…** button works
+  the way it does for a commercial driver. The DLL is cross-compiled,
+  export-checked and unit-tested on every pull request, and the integration
+  suite can be run through the Windows Driver Manager in a VM, which is far
   stricter than unixODBC and tends to fail silently rather than loudly.
+
+- **Every release says what is inside it.** Both archives carry a CycloneDX
+  SBOM generated from the binary's own embedded dependency list rather than
+  from `Cargo.toml`, so it describes what was linked. That includes the
+  bundled SQLite and the Driver Manager the library loads, neither of which
+  cargo can see. The release page also carries SPDX, checksums and build
+  provenance attestations.
 
 ## Connecting
 
@@ -175,7 +187,9 @@ Driver = stackable_odbc_sqlite
 Database = /path/to/your.db
 ```
 
-On Windows, see [`packaging/README.md`](packaging/README.md).
+On Windows, the **Add…** button in the ODBC Data Source Administrator writes
+one for you; see [`packaging/README.md`](packaging/README.md) for that and for
+the scripted alternatives.
 
 ### Logging
 
@@ -208,9 +222,9 @@ quietly faked, so a tool can react to it instead of trusting a wrong answer.
 - **One isolation level.** SQLite gives you serializable transactions, so that
   is the only level offered, and asking for a weaker one is refused up front
   rather than accepted and silently ignored.
-- **No setup dialog.** The driver has no GUI, so the **Add** button in Windows'
-  ODBC administrator stores whatever it was handed without prompting you for a
-  database path. Create DSNs with `odbcconf` or by editing `odbc.ini` instead.
+- **No setup dialog on Linux.** Windows gets one, from the **Add** button in
+  the ODBC administrator. unixODBC has no equivalent convention for a driver to
+  put a window on the screen, so on Linux a DSN is a section in `odbc.ini`.
 
 ## Testing
 
@@ -237,12 +251,19 @@ and [integration-tests/windows/WINDOWS.md](integration-tests/windows/WINDOWS.md)
 for how to provision one.
 
 For the architecture, the conventions and the full testing reference, see
-[AGENTS.md](AGENTS.md).
+[AGENTS.md](AGENTS.md). For building it, the `[patch]` that points core at a
+sibling checkout, and what has to pass before a commit, see
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Releasing
 
 See [packaging/README.md](packaging/README.md) for building the release
-archives, and `release.toml` for the `cargo-release` configuration.
+archives and how the SBOM is produced, and `release.toml` for the
+`cargo-release` configuration.
+
+## Security
+
+Please report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
 
 ## License
 

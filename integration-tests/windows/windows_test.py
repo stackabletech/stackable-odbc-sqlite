@@ -31,9 +31,12 @@ PROJECT_DIR = TEST_DIR.parent
 SUITES_DIR = TEST_DIR / "suites"
 OPENSSL_CNF = WINDOWS_DIR / "openssl_legacy.cnf"
 
+DIALOG_SCRIPT = PROJECT_DIR / "packaging" / "windows" / "configure-dsn.ps1"
+
 REMOTE_DIR = r"C:\odbc_test"
 REMOTE_DLL = rf"{REMOTE_DIR}\stackable_odbc_sqlite.dll"
 REMOTE_TEST = rf"{REMOTE_DIR}\test_integration.py"
+REMOTE_DIALOG = rf"{REMOTE_DIR}\configure-dsn.ps1"
 REMOTE_DB = rf"{REMOTE_DIR}\test.db"
 
 DRIVER_NAME = "stackable_odbc_sqlite"
@@ -94,6 +97,11 @@ def main():
     files_to_serve = {
         dll_path.name: dll_path,
         "test_integration.py": test_path,
+        # The setup dialog, which the driver's ConfigDSN looks for *beside its
+        # own DLL* and fails without. A DLL deployed here without it would
+        # answer the ODBC Administrator's Add... button with an error, so the
+        # two travel together the same way install.bat ships them together.
+        "configure-dsn.ps1": DIALOG_SCRIPT,
     }
     with http_file_server(files_to_serve) as port:
         base_url = f"http://{args.gateway}:{port}"
@@ -102,7 +110,9 @@ def main():
             f'Invoke-WebRequest -Uri "{base_url}/{dll_path.name}" '
             f'-OutFile "{REMOTE_DLL}"; '
             f'Invoke-WebRequest -Uri "{base_url}/test_integration.py" '
-            f'-OutFile "{REMOTE_TEST}"'
+            f'-OutFile "{REMOTE_TEST}"; '
+            f'Invoke-WebRequest -Uri "{base_url}/configure-dsn.ps1" '
+            f'-OutFile "{REMOTE_DIALOG}"'
         )
         r = session.run_ps(download_ps)
         if r.status_code != 0:
@@ -111,6 +121,7 @@ def main():
             sys.exit(1)
     print(f"  DLL: {dll_path.stat().st_size / 1024:.0f} KB")
     print(f"  test_integration.py: {test_path.stat().st_size / 1024:.0f} KB")
+    print(f"  configure-dsn.ps1: {DIALOG_SCRIPT.stat().st_size / 1024:.0f} KB")
 
     print("=== Registering ODBC driver ===")
     register_driver(session)

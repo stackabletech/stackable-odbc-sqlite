@@ -29,9 +29,9 @@ rusqlite = { version = "0.40", features = [
   "column_metadata",
   "limits",
 ] }
+serde_json = "1"
 snafu = "0.9"
-# TODO: switch to a crates.io version dep once stackable-odbc-core is published.
-stackable-odbc-core = { path = "../stackable-odbc-core" }
+stackable-odbc-core = { git = "https://github.com/stackabletech/stackable-odbc-core.git", branch = "scaffolding" }
 tracing = "0.1"
 
 [dev-dependencies]
@@ -41,7 +41,7 @@ proptest = "1"
 # attach/detach helpers. Default-off there because it is test code that would
 # otherwise land in this driver's shipped binary; enabled only here, so
 # `cargo test` sees it and `cargo build` does not.
-stackable-odbc-core = { path = "../stackable-odbc-core", features = ["test-support"] }
+stackable-odbc-core = { git = "https://github.com/stackabletech/stackable-odbc-core.git", branch = "scaffolding", features = ["test-support"] }
 
 [lints.clippy]
 unwrap_in_result = "deny"

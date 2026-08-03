@@ -32,13 +32,19 @@ repos:
 
   - repo: local
     hooks:
+      # The packaging files are in `files:` because tests in src/lib.rs
+      # `include_str!` them: the Windows dialog is checked against the
+      # connection-string parser, and sbom-native.json's SQLite version against
+      # the library that is actually linked. Changing one of those without
+      # touching any .rs file is exactly the case those tests exist to catch,
+      # and without this the hook would not run for it.
       - id: cargo-test
         name: cargo-test
         language: system
         entry: cargo test --locked
         stages: [pre-commit, pre-merge-commit]
         pass_filenames: false
-        files: \.rs$|Cargo\.(toml|lock)
+        files: \.rs$|Cargo\.(toml|lock)|^packaging/(sbom-native\.json|windows/(configure-dsn\.ps1|install\.bat))$
 
       - id: cargo-rustfmt
         name: cargo-rustfmt
@@ -59,10 +65,16 @@ repos:
       # Broken intra-doc links are warnings, not errors, so they reach a
       # published doc build silently. -D warnings promotes them. Runs in well
       # under a second because the dependency graph is already built above.
+      #
+      # --document-private-items, because almost everything in this crate is
+      # private -- `backend::setup` entirely so -- and without it their doc
+      # comments are checked by nothing. Not `--all-targets`: that builds the
+      # test target, sets `cfg(test)`, and would pull the `#[cfg(test)]`
+      # modules into the check.
       - id: cargo-doc
         name: cargo-doc
         language: system
-        entry: env RUSTDOCFLAGS=-Dwarnings cargo doc --locked --no-deps
+        entry: env RUSTDOCFLAGS=-Dwarnings cargo doc --locked --no-deps --document-private-items
         stages: [pre-commit, pre-merge-commit]
         pass_filenames: false
         files: \.rs$|Cargo\.(toml|lock)

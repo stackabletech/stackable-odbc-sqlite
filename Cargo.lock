@@ -859,6 +859,7 @@ dependencies = [
 [[package]]
 name = "stackable-odbc-core"
 version = "0.0.1"
+source = "git+https://github.com/stackabletech/stackable-odbc-core.git?branch=scaffolding#5bc04176095b0881c3cd5620d9546c3f593ef96c"
 dependencies = [
  "odbc-sys",
  "snafu",
@@ -874,6 +875,7 @@ dependencies = [
  "criterion",
  "proptest",
  "rusqlite",
+ "serde_json",
  "snafu",
  "stackable-odbc-core",
  "tracing",

@@ -593,7 +593,7 @@ pub(crate) const SQLITE_UNION: u32 = SQL_U_UNION | SQL_U_UNION_ALL;
 ///
 /// Just `$`. SQLite's tokenizer classifies it as an identifier character, so a
 /// name containing it parses unquoted and round-trips through `sqlite_master`
-/// unchanged. Every character in [`SPECIAL_CHARACTER_CANDIDATES`] is executed
+/// unchanged. Every character in `SPECIAL_CHARACTER_CANDIDATES` is executed
 /// against the bundled library by
 /// `special_characters_are_each_live_probed`, which checks the rejected ones
 /// too.

@@ -1,55 +1,47 @@
 # Stackable SQLite ODBC Driver
 
-ODBC 3.x driver for SQLite, primarily intended for testing and for
-exercising the Stackable ODBC framework on a lightweight backend.
+ODBC 3.x driver for [SQLite](https://sqlite.org), for Linux and Windows.
+SQLite is compiled into the driver, so there is no separate SQLite to install.
 
-## Building from source
+This file ships inside both release archives. If you have just extracted one,
+start at [Installation](#installation).
 
-To produce the release archives yourself, run the following from the
-**repository root**:
+## What is in the archive
 
-```bash
-# One-time: add the Windows cross-compilation target
-rustup target add x86_64-pc-windows-gnu
+`stackable-odbc-sqlite-<version>-linux-x64.tar.gz`:
 
-# Build the Linux and Windows binaries
-cargo build --release
-cargo build --release --target x86_64-pc-windows-gnu
+| File | Purpose |
+|------|---------|
+| `libstackable_odbc_sqlite.so` | The driver |
+| `install.sh`, `uninstall.sh` | Registration with unixODBC |
+| `libstackable_odbc_sqlite.so.cdx.json` | CycloneDX SBOM for the driver |
+| `README.md`, `LICENSE` | This file, and Apache-2.0 |
 
-# Package into release archives (replace the version as appropriate)
-VERSION=0.0.1 ./packaging/build-archives.sh
-```
+`stackable-odbc-sqlite-<version>-windows-x64.zip`:
 
-This produces two files in `packaging/dist/`:
+| File | Purpose |
+|------|---------|
+| `stackable_odbc_sqlite.dll` | The driver |
+| `install.bat`, `uninstall.bat` | Registration with the Windows Driver Manager |
+| `configure-dsn.ps1` | The data source dialog |
+| `stackable_odbc_sqlite.dll.cdx.json` | CycloneDX SBOM for the driver |
+| `README.md`, `LICENSE` | This file, and Apache-2.0 |
 
-- `stackable-odbc-sqlite-<version>-linux-x64.tar.gz`
-- `stackable-odbc-sqlite-<version>-windows-x64.zip`
-
-To install on Linux, extract and run the install script:
-
-```bash
-mkdir /tmp/sqlite-odbc
-tar xzf stackable-odbc-sqlite-0.0.1-linux-x64.tar.gz -C /tmp/sqlite-odbc
-cd /tmp/sqlite-odbc
-sudo ./install.sh
-```
-
-On Windows, extract the `.zip` and run `install.bat` from an Administrator
-Command Prompt. See the installation instructions below for details.
+The release page carries `sha256sums.txt` over every published file. Verify a
+download with `sha256sum -c sha256sums.txt`, run from the directory you
+downloaded into.
 
 ## Installation
 
-> **Note:** These instructions assume you are working from an extracted
-> release archive, where the driver binary sits alongside the install
-> scripts. If you are working from a source checkout, build the archives
-> first (see above).
-
 ### Linux (x86_64)
 
-Requires `unixODBC` (`unixodbc` package) and root privileges for
+Requires `unixODBC` (the `unixodbc` package) and root privileges for
 `odbcinst` registration.
 
 ```bash
+mkdir /tmp/sqlite-odbc
+tar xzf stackable-odbc-sqlite-<version>-linux-x64.tar.gz -C /tmp/sqlite-odbc
+cd /tmp/sqlite-odbc
 sudo ./install.sh
 ```
 
@@ -63,19 +55,26 @@ sudo ./uninstall.sh
 ```
 
 If you created any DSNs, also remove them from `/etc/odbc.ini` (or
-`~/.odbc.ini`).
+`~/.odbc.ini`). Your database files are untouched either way: a data source
+only points at one.
 
 ### Windows (x86_64)
 
-Open an **Administrator** Command Prompt (`cmd.exe`), then:
+Extract the `.zip`, open an **Administrator** Command Prompt (`cmd.exe`) in the
+extracted folder, then:
 
 ```cmd
 install.bat
 ```
 
+`install.bat` installs `configure-dsn.ps1` next to the DLL and refuses to run
+without it, because that script is the dialog the ODBC Administrator's
+**Add…** button displays.
+
 Verify with the ODBC Data Source Administrator
 (`%SystemRoot%\System32\odbcad32.exe`); the Drivers tab should list
-`stackable_odbc_sqlite`.
+`stackable_odbc_sqlite`, with a version and `Stackable GmbH` rather than
+`Not marked`.
 
 To uninstall:
 
@@ -83,55 +82,128 @@ To uninstall:
 uninstall.bat
 ```
 
-If you created any DSNs, also remove them via the registry:
+## Creating a data source
+
+A data source (DSN) stores the connection settings under a name, so an
+application can ask for `sales_db` instead of a full connection string. It is
+optional: the DSN-less connection strings below work without one.
+
+### Windows: the dialog
+
+The ODBC Data Source Administrator's **Add…** button, and **Configure…** on an
+existing data source, both display this driver's dialog. It asks for the data
+source name and the database file, and its **Test connection** button opens the
+file and reports the SQLite version and the number of tables it found before
+anything is written.
+
+The same dialog runs on its own, without going through the Administrator:
 
 ```cmd
-reg delete "HKCU\SOFTWARE\ODBC\ODBC.INI\YourDsnName" /f
-reg delete "HKCU\SOFTWARE\ODBC\ODBC.INI\ODBC Data Sources" /v "YourDsnName" /f
+powershell -ExecutionPolicy Bypass -File "%ProgramFiles%\Stackable\ODBC\configure-dsn.ps1"
 ```
 
-## Create a DSN (optional)
+```cmd
+rem Edit an existing data source
+powershell -ExecutionPolicy Bypass -File "...\configure-dsn.ps1" -Dsn sales_db
+```
 
-A DSN stores connection parameters so that users don't need the full
-connection string each time. This step is optional, since DSN-less connection
-strings (shown below) work without it.
+### Windows: without a dialog
 
-On Windows (`cmd.exe`):
+For a scripted install, the same script writes a data source with no GUI:
 
 ```cmd
-odbcconf.exe /A {CONFIGDSN "stackable_odbc_sqlite" "DSN=SQLite Test|Database=C:\data\test.db|"}
+powershell -ExecutionPolicy Bypass -File "...\configure-dsn.ps1" ^
+  -NoGui -Set @{ DSN='sales_db'; Database='C:\data\sales.db' }
+```
+
+Or through `odbcconf` directly:
+
+```cmd
+odbcconf.exe /A {CONFIGDSN "stackable_odbc_sqlite" "DSN=sales_db|Database=C:\data\sales.db|"}
 ```
 
 > **PowerShell users:** `odbcconf.exe` commands with `{...}` use `cmd.exe`
 > syntax. In PowerShell, wrap the argument in single quotes:
 > `odbcconf.exe /A '{CONFIGDSN ...}'`.
 
-The DSN will appear under the **User DSN** tab in ODBC Data Source
-Administrator.
+A **System** data source (visible to every user, stored in `HKLM`) needs an
+elevated session. The dialog disables the System option when it does not have
+one, and `-NoGui -System` fails rather than writing a User data source
+silently.
 
-> **Note:** the driver registers itself as its own `Setup` library and
-> implements `ConfigDSNW`, but headlessly: it never displays a dialog. The
-> **Add** button therefore does not fail, it silently writes a data source
-> from whatever attributes the Driver Manager passed it, which will not
-> include `Database`. Create DSNs with `odbcconf` or the registry so that
-> every key is set.
+### Linux
 
-On Linux, add a section to `/etc/odbc.ini` (or `~/.odbc.ini` for a
-per-user DSN):
+Add a section to `/etc/odbc.ini` (or `~/.odbc.ini` for a per-user DSN):
 
 ```ini
-[SQLite Test]
+[sales_db]
 Driver = stackable_odbc_sqlite
-Database = /path/to/your.db
+Database = /path/to/sales.db
 ```
 
 ## Connection string
 
+There is exactly one key. Keys are case-insensitive.
+
+| Key | Required | Meaning |
+|-----|----------|---------|
+| `Database` | Yes | Path to the SQLite file, or `:memory:` for a throwaway in-memory database |
+
 DSN-less:
 
+```text
+Driver=stackable_odbc_sqlite;Database=/path/to/sales.db
 ```
-Driver=stackable_odbc_sqlite;Database=/path/to/your.db
+
+A file that does not exist yet is created on first connect, because that is
+what SQLite does. A typo in the path therefore connects successfully and finds
+an empty database rather than failing, which is why the dialog's **Test
+connection** reports the table count.
+
+## Building the archives from source
+
+From the **repository root**:
+
+```bash
+# One-time: the Windows cross-compilation target and the two packaging tools
+rustup target add x86_64-pc-windows-gnu
+cargo install cargo-auditable
+# syft: https://github.com/anchore/syft
+
+# Build both binaries. `cargo auditable`, not plain `cargo`: it embeds the
+# dependency list that the SBOM is generated from, and sbom.sh refuses an
+# artifact without it.
+cargo auditable build --locked --release
+cargo auditable build --locked --release --target x86_64-pc-windows-gnu
+
+VERSION=0.0.1 ./packaging/build-archives.sh
 ```
+
+That writes both archives, four SBOMs and `sha256sums.txt` to
+`packaging/dist/`.
+
+### The SBOM
+
+`packaging/sbom.sh` produces one CycloneDX and one SPDX document per artifact.
+The component list comes from the `.dep-v0` section `cargo auditable` embeds,
+so it describes what was **linked** rather than what `Cargo.toml` asked for:
+dev-dependencies are excluded by construction, and a git dependency's purl
+names the resolved commit rather than a branch that moves.
+
+Two kinds of component are invisible to cargo and are declared by hand in
+`packaging/sbom-native.json`:
+
+- **SQLite itself.** cargo sees `libsqlite3-sys`, the Rust wrapper. The C
+  library compiled inside it is what an advisory against SQLite would name, and
+  it ships in both artifacts. `the_declared_sqlite_version_is_the_one_linked`
+  in `src/lib.rs` fails the build if the declared version drifts from what
+  `rusqlite::version()` reports.
+- **What each artifact links at load time.** The `.so` links unixODBC; the
+  `.dll` imports only Windows' own libraries and carries the mingw runtime
+  statically. `./packaging/sbom.sh --check-native <artifact>` verifies both
+  claims against the real binary, and CI runs it on every pull request.
+
+`./packaging/test-sbom.sh` is the pipeline's own test suite.
 
 ## Support
 

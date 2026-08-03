@@ -196,7 +196,8 @@ pub(super) fn exec_direct(
     Ok(SqliteStatement::new(columns, rows))
 }
 
-/// Validate and store a SQL statement for later execution via [`Backend::execute`].
+/// Validate and store a SQL statement for later execution via
+/// [`Backend::execute`](stackable_odbc_core::backend::Backend::execute).
 ///
 /// The SQL is parsed by rusqlite to detect syntax errors early (at prepare time,
 /// matching ODBC semantics). The validated SQL is stored in the returned

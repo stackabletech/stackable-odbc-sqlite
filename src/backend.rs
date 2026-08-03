@@ -1,5 +1,6 @@
 use std::{
     borrow::Cow,
+    collections::HashMap,
     sync::{Arc, Mutex},
 };
 
@@ -7,6 +8,7 @@ use snafu::Snafu;
 use stackable_odbc_core::{
     backend::Backend,
     errors::OdbcError,
+    setup::{ConfigRequest, SetupError},
     types::{
         ColumnDescriptor, ColumnRow, ColumnValue, ConnectParams, CursorBehavior, ExecuteOutcome,
         ForeignKeyRow, InfoValue, PrimaryKeyRow, SQL_CB_NULL, SQL_CN_ANY, SQL_GB_NO_RELATION,
@@ -28,6 +30,7 @@ pub(crate) mod info;
 mod info;
 mod metadata;
 mod params;
+mod setup;
 mod types;
 
 /// The SQLite [`Backend`] implementation.
@@ -404,6 +407,20 @@ impl Backend for SqliteBackend {
     type Connection = SqliteConnection;
     type Error = SqliteError;
     type Statement = SqliteStatement;
+
+    /// The DSN setup dialog the ODBC Administrator's **Add…** and
+    /// **Configure…** buttons display.
+    ///
+    /// See the `backend::setup` module for how it is presented, and why the
+    /// dialog is `packaging/windows/configure-dsn.ps1` rather than a second
+    /// implementation in Rust.
+    fn configure_dsn(
+        hwnd_parent: *mut std::ffi::c_void,
+        request: ConfigRequest,
+        attributes: HashMap<String, String>,
+    ) -> Result<Option<HashMap<String, String>>, SetupError> {
+        setup::configure_dsn(hwnd_parent, request, attributes)
+    }
 
     /// Hand out the connection's interrupt handle. Infallible and lock-free:
     /// the handle was captured in [`SqliteBackend::connect`], so this only
