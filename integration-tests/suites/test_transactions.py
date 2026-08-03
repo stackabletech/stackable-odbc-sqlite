@@ -91,39 +91,28 @@ def drop_table(conn, table):
         pass
 
 
-def as_int(value):
-    """An aggregate read back as a number, whatever the driver typed it as.
-
-    `count(*)` arrives as a *string*: `sqlite3_column_decltype` is NULL for any
-    computed column, and `describe_column` falls back to `TEXT`, so every
-    expression is described as VARCHAR regardless of the storage class of the
-    value in it. That is a real finding, but it belongs to the type suite, not
-    to this one. Coercing here keeps a transaction failure from being reported
-    as a typing failure and the other way round."""
-    return int(value)
-
-
 def count_rows(target, table):
     """Count from a *fresh* connection, which is what makes a commit or a
     rollback observable rather than merely reported.
 
     Only ever called once the writing transaction has ended. SQLite takes a
     write lock for the duration of one, and a second connection reading through
-    it would be answered `SQLITE_BUSY` rather than with a row count."""
+    it would be answered `SQLITE_BUSY` rather than with a row count.
+
+    The comparison against an integer is deliberate. `count(*)` is a computed
+    column, which SQLite gives no declared type, and the driver types it from
+    the storage class of the value; a regression there would hand back a string
+    and fail here. `test_type_matrix.py` is what tests that properly."""
     with target.connect() as conn:
-        return as_int(
-            conn.cursor().execute(f"SELECT count(*) FROM {table}").fetchone()[0]
-        )
+        return conn.cursor().execute(f"SELECT count(*) FROM {table}").fetchone()[0]
 
 
 def table_exists(target, table):
     with target.connect() as conn:
         return (
-            as_int(
-                conn.cursor()
-                .execute("SELECT count(*) FROM sqlite_master WHERE name = ?", table)
-                .fetchone()[0]
-            )
+            conn.cursor()
+            .execute("SELECT count(*) FROM sqlite_master WHERE name = ?", table)
+            .fetchone()[0]
             > 0
         )
 
@@ -235,7 +224,7 @@ def a_failed_statement_leaves_the_transaction_usable(target, results):
         )
 
         conn.autocommit = True
-        value = as_int(conn.cursor().execute("SELECT 1").fetchone()[0])
+        value = conn.cursor().execute("SELECT 1").fetchone()[0]
         results.check("the connection still works", value == 1, f"got {value}")
         conn.close()
     finally:

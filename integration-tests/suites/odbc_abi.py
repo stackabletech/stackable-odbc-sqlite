@@ -71,6 +71,21 @@ def load(path):
         "SQLFetch": ([P], S),
         "SQLGetData": ([P, ctypes.c_uint16, S, P, L, ctypes.POINTER(L)], S),
         "SQLNumResultCols": ([P, ctypes.POINTER(S)], S),
+        # SQLULEN is 64-bit here, so ColumnSizePtr is a c_uint64 out-parameter.
+        "SQLDescribeColW": (
+            [
+                P,
+                ctypes.c_uint16,
+                W,
+                S,
+                ctypes.POINTER(S),
+                ctypes.POINTER(S),
+                ctypes.POINTER(ctypes.c_uint64),
+                ctypes.POINTER(S),
+                ctypes.POINTER(S),
+            ],
+            S,
+        ),
         "SQLRowCount": ([P, ctypes.POINTER(L)], S),
         "SQLCloseCursor": ([P], S),
         "SQLFreeStmt": ([P, ctypes.c_uint16], S),

@@ -29,6 +29,7 @@ Both take `--help`.
 | `suites/test_integration.py` | The pyodbc suite, run once per connection style |
 | `suites/test_transactions.py` | Manual-commit transactions, run once per connection style |
 | `suites/test_c_abi.py` | The C ABI pen test, run once |
+| `suites/test_type_matrix.py` | Type-transform fuzz and column description, run once |
 | `generated/` | Everything `setup.sh` writes. Gitignored |
 | `windows/` | The VM suite, its libvirt definitions, and [WINDOWS.md](windows/WINDOWS.md) |
 
@@ -69,6 +70,14 @@ is only one.
 Because the spec's **(DM)** diagnostics come from the Driver Manager, that suite
 never demands one. Where a SQLSTATE is (DM)-annotated it asserts what the driver
 does instead, with a comment naming the diagnostic it is not asking for.
+
+Last, `test_type_matrix.py`, also once and also through ctypes. It drives every
+(value, C type) pair through `SQLGetData` and checks invariants rather than a
+transcribed copy of the ODBC conversion matrix, which would mostly test the
+transcription. It then checks what `SQLDescribeCol` *says* each column is, which
+is a separate question from what `SQLGetData` will hand over: SQLite gives a
+computed column no declared type, so the driver answers from the storage class
+of the values, and a tool decides from that whether a column can be summed.
 
 It then runs `cargo test`, so that one command gives a developer the whole
 suite. CI passes `--skip-cargo-test`, since its pre-commit job has already run

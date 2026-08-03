@@ -37,12 +37,18 @@ fn describe_column(
     stmt: &rusqlite::Statement<'_>,
     i: usize,
     col: &rusqlite::Column<'_>,
+    inferred_decl: &str,
 ) -> ColumnDescriptor {
     let name = stmt
         .column_name(i)
         .map(|n| n.to_string())
         .unwrap_or_else(|_| "?".to_string());
-    let decl = col.decl_type().unwrap_or("TEXT").to_string();
+    // The declared type when SQLite has one, and otherwise whatever the
+    // materialised values imply. `sqlite3_column_decltype` is NULL for every
+    // computed column, so without the fallback a `count(*)` would be described
+    // as `TEXT`, and an application choosing a column to sum or chart would
+    // pass over it. See [`infer_decl_type`].
+    let decl = col.decl_type().unwrap_or(inferred_decl).to_string();
     let sql_type = sqlite_type_to_sql_data_type(&decl);
 
     let descriptor = ColumnDescriptor::new(name, sql_type)
@@ -151,6 +157,59 @@ fn is_searched_dml(sql: &str) -> bool {
         .any(|dml| keyword.eq_ignore_ascii_case(dml))
 }
 
+/// A declared-type string for column `i`, worked out from the values in it.
+///
+/// Only consulted for a column SQLite reports no declared type for, which is
+/// every computed one: a literal, an expression, an aggregate, even an explicit
+/// `CAST(x AS INTEGER)`. `sqlite3_column_decltype` names the column of a stored
+/// table or nothing at all, so without this a `count(*)` is described as `TEXT`
+/// and a tool looking for something to sum passes over it.
+///
+/// A *string* rather than a `SqlDataType` so that the declared-type path stays
+/// the only one: precision, scale and `SQL_DESC_TYPE_NAME` are all derived from
+/// it by the same functions that handle a real declaration, and a column
+/// inferred as `INTEGER` is therefore indistinguishable from one declared that
+/// way.
+///
+/// SQLite lets the storage class vary from row to row, so the answer has to
+/// cover every value present:
+///
+/// - Only integers is `INTEGER`; only reals is `REAL`.
+/// - Integers and reals together is `REAL`, the one that can hold both.
+/// - Only blobs is `BLOB`.
+/// - Anything else mixed, or any text, is `TEXT`, which every storage class
+///   converts into.
+/// - No rows at all, or nothing but NULL, leaves `TEXT`. There is no evidence
+///   to work from, and it is what the column was described as before this
+///   existed.
+///
+/// NULLs are skipped rather than counted: a NULL is absence of a value, not
+/// evidence of a type, and letting one row of NULL widen an integer column to
+/// text would make the description depend on which rows happened to match.
+fn infer_decl_type(rows: &[Vec<rusqlite::types::Value>], i: usize) -> String {
+    use rusqlite::types::Value;
+
+    let (mut ints, mut reals, mut blobs, mut others) = (false, false, false, false);
+    for row in rows {
+        match row.get(i) {
+            Some(Value::Integer(_)) => ints = true,
+            Some(Value::Real(_)) => reals = true,
+            Some(Value::Blob(_)) => blobs = true,
+            Some(Value::Null) | None => {}
+            Some(Value::Text(_)) => others = true,
+        }
+    }
+
+    match (ints, reals, blobs, others) {
+        (true, false, false, false) => "INTEGER",
+        (false, true, false, false) => "REAL",
+        (true, true, false, false) => "REAL",
+        (false, false, true, false) => "BLOB",
+        _ => "TEXT",
+    }
+    .to_string()
+}
+
 pub(super) fn exec_direct(
     conn: &SqliteConnection,
     sql: &str,
@@ -171,27 +230,45 @@ pub(super) fn exec_direct(
         ));
     }
 
-    // SELECT path: collect column metadata, then eagerly fetch all rows.
+    // SELECT path. The rows are collected before the descriptors are built,
+    // because a computed column has no declared type and the values are the
+    // only evidence of what it holds. Nothing is read twice: the rows have to
+    // be materialised anyway (see the eager-materialisation section of
+    // AGENTS.md), so this only defers the conversion until the target type is
+    // settled.
+    let col_count = stmt.column_count();
+    let mut raw: Vec<Vec<rusqlite::types::Value>> = Vec::new();
+    {
+        let mut raw_rows = stmt.query([]).map_err(map_sqlite_error)?;
+        while let Some(row) = raw_rows.next().map_err(map_sqlite_error)? {
+            let mut row_values = Vec::with_capacity(col_count);
+            for i in 0..col_count {
+                row_values.push(
+                    row.get::<_, rusqlite::types::Value>(i)
+                        .map_err(map_sqlite_error)?,
+                );
+            }
+            raw.push(row_values);
+        }
+    }
+
     // Fully-qualified call to avoid name collision with Backend::columns.
     let sqlite_columns = rusqlite::Statement::columns(&stmt);
     let columns: Vec<ColumnDescriptor> = sqlite_columns
         .iter()
         .enumerate()
-        .map(|(i, col)| describe_column(&stmt, i, col))
+        .map(|(i, col)| describe_column(&stmt, i, col, &infer_decl_type(&raw, i)))
         .collect();
 
-    // Eagerly fetch all rows
-    let col_count = stmt.column_count();
-    let mut rows = Vec::new();
-    let mut raw_rows = stmt.query([]).map_err(map_sqlite_error)?;
-    while let Some(row) = raw_rows.next().map_err(map_sqlite_error)? {
-        let mut row_values = Vec::with_capacity(col_count);
-        for (i, col) in columns.iter().enumerate() {
-            let value: rusqlite::types::Value = row.get(i).map_err(map_sqlite_error)?;
-            row_values.push(sqlite_value_to_column_value(value, col.sql_type()));
-        }
-        rows.push(row_values);
-    }
+    let rows = raw
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .zip(columns.iter())
+                .map(|(value, col)| sqlite_value_to_column_value(value, col.sql_type()))
+                .collect()
+        })
+        .collect();
 
     Ok(SqliteStatement::new(columns, rows))
 }
@@ -257,27 +334,43 @@ pub(super) fn execute(
         return Ok(ExecuteOutcome::default());
     }
 
-    // SELECT path
+    // SELECT path. Rows first, then descriptors, for the reason `exec_direct`
+    // gives: a computed column has no declared type, and the values are the
+    // only evidence of what it holds.
+    let col_count = prepared.column_count();
+    let mut raw: Vec<Vec<rusqlite::types::Value>> = Vec::new();
+    {
+        let mut raw_rows = prepared
+            .query(rusqlite::params_from_iter(rusqlite_params))
+            .map_err(map_sqlite_error)?;
+        while let Some(row) = raw_rows.next().map_err(map_sqlite_error)? {
+            let mut row_values = Vec::with_capacity(col_count);
+            for i in 0..col_count {
+                row_values.push(
+                    row.get::<_, rusqlite::types::Value>(i)
+                        .map_err(map_sqlite_error)?,
+                );
+            }
+            raw.push(row_values);
+        }
+    }
+
     let sqlite_columns = rusqlite::Statement::columns(&prepared);
     let columns: Vec<ColumnDescriptor> = sqlite_columns
         .iter()
         .enumerate()
-        .map(|(i, col)| describe_column(&prepared, i, col))
+        .map(|(i, col)| describe_column(&prepared, i, col, &infer_decl_type(&raw, i)))
         .collect();
 
-    let col_count = prepared.column_count();
-    let mut rows = Vec::new();
-    let mut raw_rows = prepared
-        .query(rusqlite::params_from_iter(rusqlite_params))
-        .map_err(map_sqlite_error)?;
-    while let Some(row) = raw_rows.next().map_err(map_sqlite_error)? {
-        let mut row_values = Vec::with_capacity(col_count);
-        for (i, col) in columns.iter().enumerate() {
-            let value: rusqlite::types::Value = row.get(i).map_err(map_sqlite_error)?;
-            row_values.push(sqlite_value_to_column_value(value, col.sql_type()));
-        }
-        rows.push(row_values);
-    }
+    let rows = raw
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .zip(columns.iter())
+                .map(|(value, col)| sqlite_value_to_column_value(value, col.sql_type()))
+                .collect()
+        })
+        .collect();
 
     stmt.columns = columns;
     stmt.rows = rows;
@@ -404,6 +497,104 @@ mod tests {
 
     use super::*;
     use crate::backend::{SqliteConnection, SqliteStatement};
+
+    /// One column's worth of values, as `infer_decl_type` takes them.
+    fn column_of(values: Vec<rusqlite::types::Value>) -> Vec<Vec<rusqlite::types::Value>> {
+        values.into_iter().map(|v| vec![v]).collect()
+    }
+
+    /// Every storage-class combination `infer_decl_type` distinguishes.
+    ///
+    /// The mixed cases are the ones worth pinning: SQLite lets the class vary
+    /// per row, so the answer has to hold every value the column actually
+    /// contains rather than describe only the first.
+    #[test]
+    fn a_computed_column_is_typed_from_the_values_in_it() {
+        use rusqlite::types::Value;
+
+        for (label, values, want) in [
+            (
+                "all integers",
+                vec![Value::Integer(1), Value::Integer(2)],
+                "INTEGER",
+            ),
+            ("all reals", vec![Value::Real(1.5)], "REAL"),
+            ("all text", vec![Value::Text("a".into())], "TEXT"),
+            ("all blobs", vec![Value::Blob(vec![0])], "BLOB"),
+            // REAL holds both, so it is the answer that loses nothing.
+            (
+                "integers and reals",
+                vec![Value::Integer(1), Value::Real(1.5)],
+                "REAL",
+            ),
+            // Text converts from every class, so it is the only safe answer
+            // once one is present.
+            (
+                "integers and text",
+                vec![Value::Integer(1), Value::Text("a".into())],
+                "TEXT",
+            ),
+            (
+                "blobs and integers",
+                vec![Value::Blob(vec![0]), Value::Integer(1)],
+                "TEXT",
+            ),
+            // NULL is absence of a value, not evidence of a type. Counting it
+            // would make the description depend on which rows matched.
+            (
+                "integers with a NULL among them",
+                vec![Value::Integer(1), Value::Null, Value::Integer(2)],
+                "INTEGER",
+            ),
+            // No evidence at all leaves the pre-existing fallback.
+            ("nothing but NULL", vec![Value::Null], "TEXT"),
+            ("no rows", vec![], "TEXT"),
+        ] {
+            assert_eq!(
+                infer_decl_type(&column_of(values), 0),
+                want,
+                "{label} should infer {want}"
+            );
+        }
+    }
+
+    /// A declared type always wins, even over values that contradict it.
+    ///
+    /// SQLite lets any value into any column, so an `INTEGER` column can hold
+    /// text. The schema is what the next row might hold, and what the
+    /// application asked about, so inference must not reach a column that has a
+    /// declaration.
+    #[test]
+    fn a_declared_type_is_not_overridden_by_the_values() {
+        let conn = conn_with(
+            "CREATE TABLE t (n INTEGER);
+             INSERT INTO t VALUES ('not a number');",
+        );
+        let stmt = exec_direct(&conn, "SELECT n FROM t").unwrap();
+        let col = stmt.describe_col(1).unwrap();
+        assert_eq!(
+            col.sql_type(),
+            sqlite_type_to_sql_data_type("INTEGER"),
+            "the declared INTEGER must survive a text value in the column"
+        );
+    }
+
+    /// The headline case: `count(*)` is a number, not text.
+    #[test]
+    fn an_aggregate_is_described_as_a_number() {
+        let conn = conn_with("CREATE TABLE t (n INTEGER); INSERT INTO t VALUES (1), (2);");
+        let stmt = exec_direct(&conn, "SELECT count(*) FROM t").unwrap();
+        assert_eq!(
+            stmt.describe_col(1).unwrap().sql_type(),
+            sqlite_type_to_sql_data_type("INTEGER"),
+        );
+
+        let stmt = exec_direct(&conn, "SELECT avg(n) FROM t").unwrap();
+        assert_eq!(
+            stmt.describe_col(1).unwrap().sql_type(),
+            sqlite_type_to_sql_data_type("REAL"),
+        );
+    }
 
     fn conn_with(schema: &str) -> SqliteConnection {
         let c = rusqlite::Connection::open_in_memory().unwrap();

@@ -428,6 +428,35 @@ session-wide gives every statement the most recent one. This driver applies it
 nowhere: `seconds` is ignored and core owns both the timer and the stored
 value, so two statements on one connection keep their own deadlines.
 
+### Computed columns are typed from their values
+
+`sqlite3_column_decltype` names the column of a stored table or nothing at all,
+so every computed column arrives with no declared type: a literal, an
+expression, an aggregate, even an explicit `CAST(x AS INTEGER)`. Falling back to
+`TEXT` describes `count(*)` as `SQL_WVARCHAR`, and a tool choosing a column to
+sum or chart passes over it.
+
+`execute::infer_decl_type` supplies the missing declaration from the storage
+classes of the materialised values, and `describe_column` uses it only when
+SQLite offers none. Two consequences worth keeping straight:
+
+- **A declared type always wins.** SQLite lets any value into any column, so an
+  `INTEGER` column can hold text. The declaration is what the schema promises
+  and what the next row might hold, so inference must not reach a column that
+  has one. `a_declared_type_is_not_overridden_by_the_values` pins that.
+- **Rows are collected before the descriptors are built.** Values are converted
+  using the descriptor's SQL type, so refining the type afterwards would convert
+  against the old one. Nothing is read twice; the rows are materialised anyway.
+
+The inference returns a declared-type *string* rather than a `SqlDataType`, so
+precision, scale and `SQL_DESC_TYPE_NAME` all come from the same functions that
+handle a real declaration and a column inferred as `INTEGER` is
+indistinguishable from one declared that way. Mixed storage classes resolve to
+whatever holds every value present: integers and reals to `REAL`, anything with
+text to `TEXT`. NULLs are skipped, because a NULL is the absence of a value
+rather than evidence of a type, and counting one would make the description
+depend on which rows matched.
+
 ### `row_count` has three answers, not two
 
 `StatementBackend::row_count` returns `Option<i64>`, and core reads all three
