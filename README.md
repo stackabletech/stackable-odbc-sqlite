@@ -174,11 +174,11 @@ faked, so the tool can react instead of trusting a wrong answer.
 - **One isolation level.** SQLite gives you serializable transactions, so that
   is the only level offered, and asking for a weaker one is refused up front.
 - **No setup dialog on Linux.** unixODBC has no convention for a driver to put
-  a window on the screen, so a DSN there is a section in `odbc.ini`.
+  a window on the screen, so on Linux a DSN is defined by a section in `odbc.ini`.
 
 ## Compatibility
 
-| | |
+| Component | Support |
 |---|---|
 | ODBC | 3.80 |
 | Platforms | Linux x86-64, Windows x86-64 |
