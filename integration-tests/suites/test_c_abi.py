@@ -19,8 +19,8 @@ Covers: handle lifecycle and parentage, invalid and stale handles, double free,
 use after free, connection state, cursor state, prepare / execute / re-execute,
 SQLFreeStmt options, statement and connection attribute round-trips, the
 enforced query timeout, transactions including DDL, the catalog functions
-SQLite answers with no rows, and the SQLGetData buffer contract — truncation,
-the zero-length length probe, chunked retrieval, and the ordinal range check.
+SQLite answers with no rows, and the SQLGetData buffer contract (truncation,
+the zero-length length probe, chunked retrieval, and the ordinal range check).
 
 Usage:
     python3 integration-tests/suites/test_c_abi.py \

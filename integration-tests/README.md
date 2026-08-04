@@ -84,9 +84,9 @@ Last in that suite, the catalog functions are given hostile names. They are the
 only path in the driver that turns a caller-supplied argument into SQL, and for
 a BI tool that argument is often typed into a filter box. A table whose name
 contains a quote has to be found, payloads that close a literal and issue a
-`DROP` have to be treated as names that match nothing — asserted by re-counting
+`DROP` have to be treated as names that match nothing (asserted by re-counting
 the fixture afterwards, since "no exception" would also pass for a driver that
-ran them — and `%` and `_` have to keep working as patterns, which rules out
+ran them), and `%` and `_` have to keep working as patterns, which rules out
 escaping everything indiscriminately.
 
 Then `test_c_abi.py`, once. It loads the driver's `.so` with `ctypes` and calls
@@ -99,8 +99,8 @@ transactions. It also covers the `SQLGetData` buffer contract, which is the
 part of that call an application cannot avoid and a Driver Manager does not
 implement: how much is written, what the indicator counts, that a zero-length
 call is the documented length probe rather than a completed read, that a
-second call continues the value instead of restarting it — a driver that
-restarts turns the documented drain loop into an infinite one — and that an
+second call continues the value instead of restarting it (a driver that
+restarts turns the documented drain loop into an infinite one), and that an
 ordinal past the last column is `07009` rather than a general error. A DSN run
 would reach the same code by a longer route, so there is only one.
 

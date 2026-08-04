@@ -358,7 +358,7 @@ differently on purpose. The interrupt handle is the *connection's*, cloned from
 `cancelled` flag is the *token's own*, minted fresh by `cancel_token`. Core
 mints a token per statement-producing call, so a flag shared across them would
 leave a cancelled statement permanently unusable, with every later error on the
-connection reported as `HY008` — where the spec says "After the statement has
+connection reported as `HY008`, where the spec says "After the statement has
 been canceled, the application can call SQLExecute or SQLExecDirect again."
 
 This is the **aliasing** token shape of the two `Backend::CancelToken`'s doc
