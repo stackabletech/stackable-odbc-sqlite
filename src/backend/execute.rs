@@ -396,12 +396,12 @@ impl StatementBackend for SqliteStatement {
     /// number of columns in the result set" is `07009`, and that clause of the
     /// row carries no **(DM)** marker, so it is this driver's to return.
     ///
-    /// Core reaches the backend for the range check rather than doing it
-    /// itself, so `SqlState::general_error()` here was what an application
-    /// actually saw for an out-of-range ordinal: `HY000`, which says nothing
-    /// about which argument was wrong. The column-0 arm is unreachable through
-    /// `SQLGetData` — core rejects the bookmark ordinal before calling — but it
-    /// answers `07009` too, so the two ways of naming a column that does not
+    /// Core range-checks the ordinal against `StatementBackend::column_count`
+    /// before reaching the backend, so neither arm below is what an application
+    /// sees through `SQLGetData` any more: the out-of-range arm is the answer
+    /// for a direct backend call, and the column-0 arm was already unreachable
+    /// because core rejects the bookmark ordinal before calling. Both are kept,
+    /// and both answer `07009`, so the ways of naming a column that does not
     /// exist cannot disagree depending on which layer caught it.
     fn get_data(
         &mut self,

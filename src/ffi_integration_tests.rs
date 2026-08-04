@@ -3063,11 +3063,13 @@ fn get_data_truncates_string_returns_success_with_info() {
 /// clause carries no **(DM)** marker, so the Driver Manager does not supply it
 /// and the driver has to.
 ///
-/// Core does not range-check the ordinal itself — it asks the backend and
-/// reports whatever SQLSTATE comes back — so this is `SqliteStatement::get_data`
-/// being asserted through the entry point an application actually calls. It
-/// answered `HY000` until the ordinal check was given its own SQLSTATE, which
-/// told an application only that *something* went wrong.
+/// Core range-checks the ordinal against `column_count` before reaching the
+/// backend, and `SqliteStatement::get_data` answers `07009` for the same
+/// condition, so this asserts the SQLSTATE an application sees whichever layer
+/// caught it. It was written when only the driver checked, and the driver
+/// answered `HY000`, which told an application only that *something* went
+/// wrong. What it pins is worth pinning from the entry point an application
+/// actually calls either way.
 ///
 /// Both ends of the range are probed. One past the last column is the case that
 /// regressed; `u16::MAX` is the same condition reached by a wildly wrong
