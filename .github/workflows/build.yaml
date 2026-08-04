@@ -1,0 +1,278 @@
+---
+name: Build and Test
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  merge_group:
+
+# Supersede in-flight runs on the same ref. Never cancel in a merge queue: a
+# cancelled merge_group run reports failure and evicts the PR from the queue.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN_VERSION: "1.95.0"
+
+# Every job below names a runner image rather than a `-latest` alias, so an
+# image roll cannot change what a merge is gated on. The label cannot be lifted
+# into a variable: `runs-on` accepts no `env` context, and the one context that
+# would work, `vars`, holds its value in repository settings rather than here.
+jobs:
+  # The whole gate: `cargo test`, formatting, clippy (which is what enforces the
+  # unwrap_used / unwrap_in_result / panic denies from Cargo.toml), rustdoc,
+  # cargo-deny, cargo-sort and shellcheck.
+  #
+  # This lives here rather than in its own workflow because `needs:` cannot
+  # cross workflows, and a lint gate the required check does not observe is not
+  # a gate. It runs the hooks rather than the underlying commands so that CI and
+  # `pre-commit run --all-files` cannot drift apart -- CLAUDE.md points
+  # contributors at that command as the single source of truth for what must
+  # pass, which is only true if CI runs the same thing.
+  pre-commit:
+    name: pre-commit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      # The cargo-test pre-commit hook links libodbc via odbc-sys.
+      - name: Install host dependencies
+        uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05 # v1.6.0
+        with:
+          packages: unixodbc-dev
+          # A cache key, not a runner label, but it tracks the runner image so
+          # that bumping the image invalidates the cached .deb files.
+          version: ubuntu-24.04
+
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN_VERSION }} toolchain
+        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b # 1.95.0
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          components: rustfmt, clippy
+
+      - name: Setup Rust Cache
+        uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0 # v2.8.0
+
+      - name: Install cargo-deny and cargo-sort
+        uses: taiki-e/install-action@97a5807a604e12de3a13b52d868ebecaeeea757c # v2.75.4
+        with:
+          tool: cargo-deny,cargo-sort
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+
+  # This suite needs only unixODBC and the sqlite3 CLI, no server and no
+  # container, so it runs on a standard runner in seconds and is worth
+  # gating every pull request on. The Trino driver cannot do this, which is
+  # part of why this driver exists.
+  sqlite-integration:
+    name: SQLite Integration Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: [pre-commit]
+    steps:
+      - name: Install host dependencies
+        uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05 # v1.6.0
+        with:
+          packages: unixodbc-dev unixodbc sqlite3
+          version: ubuntu-24.04
+
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN_VERSION }} toolchain
+        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+
+      - name: Setup Rust Cache
+        uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0 # v2.8.0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+
+      - name: Run SQLite integration tests
+        run: |
+          ./integration-tests/setup.sh
+          # --skip-cargo-test: the pre-commit job above already ran it.
+          ./integration-tests/run-tests.sh --skip-cargo-test
+
+  unit-tests-windows:
+    name: Unit Tests (Windows)
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN_VERSION }} toolchain
+        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          targets: x86_64-pc-windows-gnu
+
+      # A separate cache key: the Linux job's artefacts are a different target
+      # triple and sharing the key would thrash both.
+      - name: Setup Rust Cache
+        uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0 # v2.8.0
+        with:
+          key: windows-gnu-test
+
+      # The GNU target's linker, and the C compiler libsqlite3-sys needs to
+      # build the bundled SQLite amalgamation. The runner image ships MSYS2,
+      # but its mingw64 bin directory is not on PATH by default.
+      - name: Add MinGW to PATH
+        run: echo "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      # `--target x86_64-pc-windows-gnu`, not the runner's default MSVC triple.
+      # That is the target release.yaml builds and packaging/build-archives.sh
+      # ships, and a suite passing against a toolchain nobody receives is only
+      # evidence about that toolchain. odbc-sys links odbc32, which comes with
+      # the Windows SDK already on the runner, so there is no equivalent of the
+      # unixodbc-dev install the Linux jobs need.
+      #
+      # This is also the only job that compiles `backend::setup`'s
+      # `#[cfg(windows)]` module, which is the half of the setup dialog that
+      # calls into kernel32.
+      - name: Run unit tests
+        run: cargo test --locked --target x86_64-pc-windows-gnu
+
+  # Builds both shipping artifacts the way release.yaml does, and checks the two
+  # properties that are invisible in a unit test run: that the DLL exports the
+  # ODBC entry points, and that what each artifact links at load time still
+  # matches packaging/sbom-native.json. The SBOM declares native dependencies by
+  # hand, since no cargo metadata describes them, so nothing but this check keeps
+  # the declaration true.
+  release-artifacts:
+    name: Release Artifacts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: [pre-commit]
+    steps:
+      - name: Install MinGW cross-compiler
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 unixodbc-dev
+
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN_VERSION }} toolchain
+        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          targets: x86_64-pc-windows-gnu
+
+      - name: Setup Rust Cache
+        uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0 # v2.8.0
+        with:
+          key: windows-gnu
+
+      - name: Build Linux shared library
+        run: cargo build --locked --release
+
+      - name: Build Windows DLL
+        run: cargo build --locked --target x86_64-pc-windows-gnu --release
+
+      # Graded on what the DLL actually exports, not on the last command in a
+      # pipeline. The previous form piped a symbol count into `xargs echo`, and
+      # the step's exit status was `xargs`'s, which is 0 whatever it echoes: a
+      # DLL exporting nothing at all printed "0 ODBC symbols exported" and
+      # passed. The named set catches the entry points an application reaches
+      # the driver through, and the floor catches a wholesale regression in
+      # core's `forward_ffi!` even if these particular names survive.
+      - name: Verify DLL exports
+        run: |
+          DLL=target/x86_64-pc-windows-gnu/release/stackable_odbc_sqlite.dll
+          EXPORTS=$(x86_64-w64-mingw32-objdump -p "$DLL" \
+            | awk '/Export Address Table/,/Ordinal base/' \
+            | grep -oE '\b(SQL|Config)[A-Za-z]+\b' | sort -u)
+          echo "$EXPORTS" | tr '\n' ' '; echo
+
+          missing=""
+          for sym in SQLAllocHandle SQLFreeHandle SQLDriverConnectW SQLConnectW \
+                     SQLBrowseConnectW SQLDisconnect SQLPrepareW SQLExecute \
+                     SQLExecDirectW SQLBindParameter SQLDescribeParam SQLFetch \
+                     SQLGetData SQLNumResultCols SQLDescribeColW SQLGetInfoW \
+                     SQLGetTypeInfoW SQLGetDiagRecW SQLTablesW SQLColumnsW \
+                     SQLEndTran SQLCancel ConfigDSNW; do
+            grep -qx "$sym" <<< "$EXPORTS" || missing="$missing $sym"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::the DLL does not export:$missing"
+            exit 1
+          fi
+
+          # The DLL exports 61 and the Linux .so 60, the difference being
+          # ConfigDSNW, which is `#[cfg(windows)]`.
+          count=$(echo "$EXPORTS" | grep -c .)
+          if [ "$count" -lt 55 ]; then
+            echo "::error::only $count ODBC symbols exported; expected at least 55"
+            exit 1
+          fi
+          echo "SQLite DLL: $count ODBC symbols exported, all required names present"
+
+      # build.rs embeds this, and it is what stops the ODBC Data Source
+      # Administrator listing the driver as "Not marked". A cross-build with no
+      # windres on PATH fails loudly, but a change to build.rs that silently
+      # stops emitting the resource would not, so the section is asserted here.
+      - name: Verify the DLL carries a version resource
+        run: |
+          x86_64-w64-mingw32-objdump -h target/x86_64-pc-windows-gnu/release/stackable_odbc_sqlite.dll \
+            | grep -q '\.rsrc' || { echo "::error::the DLL carries no .rsrc section"; exit 1; }
+          echo "Version resource present."
+
+      # Two different assertions behind one flag. For the .so it compares
+      # DT_NEEDED against the sonames sbom-native.json declares, in both
+      # directions. For the .dll it asserts the mingw runtime is still linked
+      # statically: the release archive ships no runtime DLL, so an artifact
+      # that imported one would fail to load on a user's machine.
+      #
+      # Only the release binaries are checked, and only here rather than in
+      # release.yaml, because a pull request is where a dependency change can
+      # still be reverted cheaply.
+      - name: Verify declared native dependencies
+        run: |
+          ./packaging/sbom.sh --check-native target/release/libstackable_odbc_sqlite.so
+          ./packaging/sbom.sh --check-native target/x86_64-pc-windows-gnu/release/stackable_odbc_sqlite.dll
+
+  # Single required check for branch protection rules.
+  finished:
+    name: Finished Build and Test
+    if: always()
+    needs:
+      - pre-commit
+      - sqlite-integration
+      - unit-tests-windows
+      - release-artifacts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      # Derived from needs.* rather than a hand-written list of job names: a job
+      # added to `needs` above but forgotten here would otherwise be silently
+      # non-blocking.
+      - name: Check job results
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for result in $RESULTS; do
+            if [[ "$result" != "success" ]]; then
+              echo "One or more jobs did not succeed: $RESULTS"
+              exit 1
+            fi
+          done
+          echo "All jobs passed: $RESULTS"

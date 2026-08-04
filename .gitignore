@@ -1,0 +1,28 @@
+debug/
+target/
+**/*.rs.bk
+.worktrees/
+
+.idea/
+*.iws
+*.iml
+.vscode/
+
+# Generated via ctags -R.
+tags
+
+# Local agent working notes (SDD reports); never part of the shipped tree
+.superpowers/
+
+# Release packaging output
+packaging/dist/
+
+# integration-tests/generated/ has its own .gitignore; the ODBC config setup.sh
+# writes there embeds absolute paths.
+
+# Python bytecode from the test scripts
+__pycache__/
+*.pyc
+
+# Local cargo overrides, e.g. a [patch] pointing core at a sibling checkout.
+.cargo/

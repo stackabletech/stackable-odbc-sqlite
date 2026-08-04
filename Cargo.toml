@@ -1,0 +1,53 @@
+[package]
+name = "stackable-odbc-sqlite"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.95.0"
+authors = ["Stackable GmbH <info@stackable.tech>"]
+license = "Apache-2.0"
+description = "ODBC driver for SQLite, built on the stackable-odbc-core framework."
+repository = "https://github.com/stackabletech/stackable-odbc-sqlite"
+readme = "README.md"
+keywords = ["odbc", "sqlite", "driver", "ffi", "sql"]
+categories = ["database", "external-ffi-bindings", "api-bindings"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# "limits" is dependency-free; it exposes sqlite3_limit, which SQL_MAX_* is
+# read from rather than hardcoded.
+#
+# "column_metadata" exposes sqlite3_table_column_metadata, which is the only
+# way to answer SQLDescribeCol's nullability and SQL_DESC_BASE_TABLE_NAME
+# truthfully: it reports a result column's originating table and its NOT NULL
+# constraint, and reports neither for a computed column -- which is exactly the
+# SQL_NULLABLE_UNKNOWN case.
+rusqlite = { version = "0.40", features = [
+  "bundled",
+  "column_decltype",
+  "column_metadata",
+  "limits",
+] }
+serde_json = "1"
+snafu = "0.9"
+stackable-odbc-core = { git = "https://github.com/stackabletech/stackable-odbc-core.git", tag = "v0.1.0" }
+tracing = "0.1"
+
+[dev-dependencies]
+criterion = { version = "0.8", features = ["html_reports"] }
+proptest = "1"
+# "test-support" gates core's `conformance` module and the connection
+# attach/detach helpers. Default-off there because it is test code that would
+# otherwise land in this driver's shipped binary; enabled only here, so
+# `cargo test` sees it and `cargo build` does not.
+stackable-odbc-core = { git = "https://github.com/stackabletech/stackable-odbc-core.git", tag = "v0.1.0", features = ["test-support"] }
+
+[lints.clippy]
+unwrap_in_result = "deny"
+unwrap_used = "deny"
+panic = "deny"
+
+[[bench]]
+name = "fetch_sqlite"
+harness = false
