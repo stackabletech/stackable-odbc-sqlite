@@ -141,7 +141,7 @@ syft "$ARTIFACT" -o cyclonedx-json="$RAW" --quiet
 # --- enrich ----------------------------------------------------------------
 # cargo-auditable embeds only name, version and source kind, so syft's output
 # carries no licenses, and a git or path dependency is indistinguishable from a
-# crates.io package. A scanner resolving pkg:cargo/stackable-odbc-core@0.0.1
+# crates.io package. A scanner resolving pkg:cargo/stackable-odbc-core@0.1.0
 # would reach a crates.io package that does not exist yet.
 #
 # Everything below keys off cargo metadata's source *kind*, never off a crate

@@ -62,14 +62,15 @@ search = "\\[Unreleased\\]: https://github.com/stackabletech/stackable-odbc-sqli
 replace = "[Unreleased]: https://github.com/stackabletech/stackable-odbc-sqlite/compare/v{{version}}...HEAD\n[{{version}}]: https://github.com/stackabletech/stackable-odbc-sqlite/releases/tag/v{{version}}"
 min = 0
 
+# The only release version literal in packaging/README.md is the `VERSION=` the
+# example build command passes to build-archives.sh, so that the documented
+# command reproduces the archives of the release the tree is at. The archive
+# names the file lists elsewhere use a `<version>` placeholder, because they
+# document a naming scheme rather than one release, and so need no rule. The
+# remaining version literals there pin syft and cargo-auditable, which track
+# their own upstreams and must survive a release untouched.
 [[pre-release-replacements]]
 file = "packaging/README.md"
 search = "VERSION=[0-9]+\\.[0-9]+\\.[0-9]+"
 replace = "VERSION={{version}}"
-exactly = 1
-
-[[pre-release-replacements]]
-file = "packaging/README.md"
-search = "stackable-odbc-sqlite-[0-9]+\\.[0-9]+\\.[0-9]+-linux-x64\\.tar\\.gz"
-replace = "stackable-odbc-sqlite-{{version}}-linux-x64.tar.gz"
 exactly = 1
