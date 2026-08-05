@@ -206,7 +206,7 @@ cargo install cargo-auditable
 cargo auditable build --locked --release
 cargo auditable build --locked --release --target x86_64-pc-windows-gnu
 
-VERSION=0.0.1 ./packaging/build-archives.sh
+VERSION=0.1.0 ./packaging/build-archives.sh
 ```
 
 That writes both archives, four SBOMs and `sha256sums.txt` to
