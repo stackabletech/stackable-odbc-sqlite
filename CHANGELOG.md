@@ -7,8 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.0] — 2026-08-05
-
 First release, so this section describes what the driver offers rather than
 what changed.
 
@@ -81,5 +79,4 @@ describes what was linked, including the bundled SQLite.
 - Linux has no setup dialog. unixODBC has no convention for a driver to display
   one, so a data source there is a section in `odbc.ini`.
 
-[Unreleased]: https://github.com/stackabletech/stackable-odbc-sqlite/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/stackabletech/stackable-odbc-sqlite/releases/tag/v0.1.0
+[Unreleased]: https://github.com/stackabletech/stackable-odbc-sqlite/commits/HEAD
