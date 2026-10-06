@@ -859,7 +859,7 @@ dependencies = [
 [[package]]
 name = "stackable-odbc-core"
 version = "0.1.0"
-source = "git+https://github.com/stackabletech/stackable-odbc-core.git?tag=v0.1.0#23c924489e135d1d3da1d1664ae16bf8656d5aa3"
+source = "git+https://github.com/stackabletech/stackable-odbc-core.git?rev=23f055e451cde6b842ad117f5c8a16957abe113f#23f055e451cde6b842ad117f5c8a16957abe113f"
 dependencies = [
  "odbc-sys",
  "snafu",

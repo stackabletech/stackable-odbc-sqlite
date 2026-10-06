@@ -861,6 +861,33 @@ fn get_type_info_filters_by_data_type() {
     }
 }
 
+/// SQL_VARCHAR is the one DATA_TYPE with two rows (TEXT and VARCHAR). An
+/// application taking the first row for a DATA_TYPE as its type gets the
+/// driver's preferred one, through core's real entry point.
+#[test]
+fn get_type_info_leads_sql_varchar_with_text() {
+    unsafe {
+        let (env, conn, stmt) = alloc_handles();
+        assert_eq!(connect_memory(conn), SqlReturn::SUCCESS);
+
+        let ret = ffi::info::sql_get_type_info::<SqliteBackend>(stmt, SqlDataType::VARCHAR.0);
+        assert_eq!(ret, SqlReturn::SUCCESS);
+
+        let mut names = Vec::new();
+        loop {
+            let ret = ffi::fetch::sql_fetch::<SqliteBackend>(stmt);
+            if ret == SqlReturn::NO_DATA {
+                break;
+            }
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            names.push(fetch_string_col(stmt, 1));
+        }
+        assert_eq!(names, vec!["TEXT", "VARCHAR"]);
+
+        cleanup(env, conn, stmt);
+    }
+}
+
 #[test]
 fn row_count_after_exec_direct() {
     unsafe {

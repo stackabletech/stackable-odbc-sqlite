@@ -31,7 +31,10 @@ rusqlite = { version = "0.40", features = [
 ] }
 serde_json = "1"
 snafu = "0.9"
-stackable-odbc-core = { git = "https://github.com/stackabletech/stackable-odbc-core.git", tag = "v0.1.0" }
+# TEMPORARY: pinned to the core commit adding `TypeInfoRow::with_preferred`
+# until a core release containing it is tagged; switch both entries back to
+# that tag before merging.
+stackable-odbc-core = { git = "https://github.com/stackabletech/stackable-odbc-core.git", rev = "23f055e451cde6b842ad117f5c8a16957abe113f" }
 tracing = "0.1"
 
 [dev-dependencies]
@@ -41,7 +44,7 @@ proptest = "1"
 # attach/detach helpers. Default-off there because it is test code that would
 # otherwise land in this driver's shipped binary; enabled only here, so
 # `cargo test` sees it and `cargo build` does not.
-stackable-odbc-core = { git = "https://github.com/stackabletech/stackable-odbc-core.git", tag = "v0.1.0", features = ["test-support"] }
+stackable-odbc-core = { git = "https://github.com/stackabletech/stackable-odbc-core.git", rev = "23f055e451cde6b842ad117f5c8a16957abe113f", features = ["test-support"] }
 
 [lints.clippy]
 unwrap_in_result = "deny"

@@ -115,12 +115,12 @@ static SUPPORTED_FUNCTIONS: &[FunctionId] = &[
 // maximum supported precision/scale) rather than hand-written (see
 // `stackable_odbc_core::types::column_size` module docs).
 //
-// Rows are sorted by DATA_TYPE ascending (as signed i16, so ODBC extension
-// types with negative codes sort first), then by TYPE_NAME ascending within
-// an equal DATA_TYPE, per the SQLGetTypeInfo spec's "ordered by DATA_TYPE and
-// then ... TYPE_NAME" requirement. This invariant is asserted directly by
-// `type_info_rows_sorted_by_data_type_then_type_name` below; keep new rows
-// in the correct sorted position rather than appending them.
+// Core orders the result set itself (DATA_TYPE, then the row marked
+// `with_preferred`, then TYPE_NAME; see
+// `stackable_odbc_core::ffi::info::sql_get_type_info`), so rows are grouped
+// here for reading, not for the spec. Every DATA_TYPE shared by several rows
+// marks its closest match, as `every_shared_data_type_has_one_preferred_row`
+// asserts.
 //
 // A `LazyLock` rather than a plain `static`: `TypeInfoRow`'s string fields are
 // `Cow<'static, str>` so a backend can compute them, and converting a `&'static
@@ -260,6 +260,10 @@ static SQLITE_TYPE_INFO: std::sync::LazyLock<Vec<TypeInfoRow>> = std::sync::Lazy
         // the same size. 255 is the value the rest of the driver treats as
         // authoritative for this DATA_TYPE (`default_precision_for_type`, and the
         // WVARCHAR row below), so both rows use it.
+        //
+        // Preferred over the VARCHAR row below: TEXT is SQLite's own storage
+        // class, and SQLite ignores a VARCHAR(n) length, so it is the closer
+        // match for SQL_VARCHAR. Core orders it first among the two.
         TypeInfoRow::new("TEXT", SqlDataType::VARCHAR)
             .with_column_size(catalog_column_size(
                 SqlDataType::VARCHAR,
@@ -268,7 +272,8 @@ static SQLITE_TYPE_INFO: std::sync::LazyLock<Vec<TypeInfoRow>> = std::sync::Lazy
             ))
             .with_literal_affixes(Some("'"), Some("'"))
             .with_create_params(Some("max length"))
-            .with_case_sensitive(true),
+            .with_case_sensitive(true)
+            .with_preferred(true),
         // SQL_VARCHAR (12): ANSI alias needed for Windows DM / pyodbc type
         // conversion (AGENTS.md "Windows Driver Manager compatibility
         // checklist"). sqlite_type_to_sql_data_type never actually returns this
@@ -2284,35 +2289,30 @@ mod tests {
         );
     }
 
+    /// Core orders the result set (DATA_TYPE, preferred row, TYPE_NAME), so the
+    /// declaration order here no longer matters. What does matter is that every
+    /// DATA_TYPE shared by several rows names its closest match, rather than
+    /// leaving the first row to the alphabet.
     #[test]
-    fn type_info_rows_sorted_by_data_type_then_type_name() {
-        // Spec (SQLGetTypeInfo): "ordered by DATA_TYPE and then ... TYPE_NAME,
-        // both ascending." DATA_TYPE is a signed i16 (negative for ODBC
-        // extension types), so the comparison must not treat it as unsigned.
-        // This walks adjacent pairs rather than asserting a fixed sequence,
-        // so it keeps holding as rows are added or reordered.
-        for pair in SQLITE_TYPE_INFO.windows(2) {
-            let (prev, next) = (&pair[0], &pair[1]);
-            assert!(
-                prev.data_type().0 <= next.data_type().0,
-                "SQLITE_TYPE_INFO not sorted by DATA_TYPE: {:?} (DATA_TYPE={}) \
-                 appears before {:?} (DATA_TYPE={})",
-                prev.type_name(),
-                prev.data_type().0,
-                next.type_name(),
-                next.data_type().0
-            );
-            if prev.data_type() == next.data_type() {
-                assert!(
-                    prev.type_name() <= next.type_name(),
-                    "rows sharing DATA_TYPE={} not sorted by TYPE_NAME: {:?} appears \
-                     before {:?}",
-                    prev.data_type().0,
-                    prev.type_name(),
-                    next.type_name()
-                );
-            }
-        }
+    fn every_shared_data_type_has_one_preferred_row() {
+        let issues =
+            stackable_odbc_core::conformance::type_info_preference_issues(&SQLITE_TYPE_INFO);
+        assert!(
+            issues.is_empty(),
+            "SQLGetTypeInfo preference markers: {issues:#?}"
+        );
+    }
+
+    /// The specific choice: `TEXT`, SQLite's own storage class, over its
+    /// `VARCHAR` alias for SQL_VARCHAR.
+    #[test]
+    fn sql_varchar_prefers_text() {
+        let preferred: Vec<&str> = SQLITE_TYPE_INFO
+            .iter()
+            .filter(|r| r.preferred())
+            .map(|r| r.type_name())
+            .collect();
+        assert_eq!(preferred, vec!["TEXT"]);
     }
 
     /// Guards that SQL_DRIVER_VER is derived from the crate version rather
