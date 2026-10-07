@@ -910,12 +910,14 @@ pub(super) fn get_type_info() -> &'static [TypeInfoRow] {
 ///
 /// `SQLITE_TYPE_INFO` has two rows sharing `DATA_TYPE=SqlDataType::VARCHAR`
 /// (`"TEXT"` and `"VARCHAR"`, both kept purely for Windows DM/pyodbc ANSI
-/// compatibility; see the `WVARCHAR`/`TEXT`/`VARCHAR` row comments above),
-/// with no single correct bare name for that DATA_TYPE. That case is
-/// rejected explicitly below rather than left to `.find` picking whichever
-/// row happens to come first: `sqlite_type_to_sql_data_type` never actually
-/// returns the ANSI code (`SqlDataType::VARCHAR`) for any declared type
-/// today, so the ambiguity is currently unreachable, but this function no
+/// compatibility; see the `WVARCHAR`/`TEXT`/`VARCHAR` row comments above).
+/// `TEXT` is marked preferred, so it is the row `SQLGetTypeInfo` lists first,
+/// but which name a *column* should carry is a separate question: a column
+/// declared `VARCHAR(50)` is not honestly reported as `TEXT`. That case is
+/// therefore rejected explicitly below rather than left to `.find` picking
+/// whichever row happens to come first: `sqlite_type_to_sql_data_type` never
+/// actually returns the ANSI code (`SqlDataType::VARCHAR`) for any declared
+/// type today, so the question is currently unreachable, but this function no
 /// longer depends on that fact staying true to give a correct answer; it
 /// would rather report "unknown" than silently guess.
 pub(super) fn sqlite_bare_type_name(sql_type: SqlDataType) -> &'static str {
