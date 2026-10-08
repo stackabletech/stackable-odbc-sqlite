@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `SQLGetTypeInfo` lists `TEXT` before `VARCHAR` for `SQL_VARCHAR`, as the
+  spec's "how closely the data type maps" ordering requires: `TEXT` is SQLite's
+  own storage class for character data. The rows were sorted by name, so an
+  application taking the first row of a `DATA_TYPE` as its `CAST` target, as
+  Power Query does, got `VARCHAR`. The type names reported for columns are
+  unchanged.
+
 ## [0.1.0] — 2026-08-05
 
 First release, so this section describes what the driver offers rather than
